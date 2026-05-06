@@ -1,0 +1,4 @@
+#!/usr/bin/env bash
+# POSIX shim -- symlink or copy this to a directory on PATH.
+DIR="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" && pwd)"
+exec python3 "$DIR/srv.py" "$@"
