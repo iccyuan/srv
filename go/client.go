@@ -138,10 +138,10 @@ func (c *Client) SFTP() (*sftp.Client, error) {
 
 // RunCaptureResult bundles the output of a captured remote command.
 type RunCaptureResult struct {
-	Stdout   string
-	Stderr   string
-	ExitCode int
-	Cwd      string
+	Stdout   string `json:"stdout"`
+	Stderr   string `json:"stderr"`
+	ExitCode int    `json:"exit_code"`
+	Cwd      string `json:"cwd"`
 }
 
 // RunCapture runs `command` on the remote (in the persisted cwd, if cwd
@@ -248,7 +248,7 @@ func (c *Client) RunDetached(command string, cwd string, jobID string) (int, err
 	encoded := base64Encode(command)
 	wrapped := fmt.Sprintf(
 		"mkdir -p ~/.srv-jobs && cd %s && (nohup bash -c \"$(echo %s | base64 -d)\" </dev/null >%s 2>&1 & echo $!)",
-		shQuote(cwdOrTilde(cwd)), encoded, logPath,
+		shQuotePath(cwdOrTilde(cwd)), encoded, logPath,
 	)
 	res, err := c.RunCapture(wrapped, "")
 	if err != nil {
@@ -302,7 +302,7 @@ func wrapWithCwd(command, cwd string) string {
 	if cwd == "" {
 		return command
 	}
-	return fmt.Sprintf("cd %s && (%s)", shQuote(cwd), command)
+	return fmt.Sprintf("cd %s && (%s)", shQuotePath(cwd), command)
 }
 
 func cwdOrTilde(cwd string) string {

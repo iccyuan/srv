@@ -55,7 +55,7 @@ func changeRemoteCwd(profileName string, profile *Profile, target string) (strin
 	current := GetCwd(profileName, profile)
 	cmd := fmt.Sprintf(
 		"cd %s 2>/dev/null || cd ~; cd %s && pwd",
-		shQuote(current), shQuote(target),
+		shQuotePath(current), shQuotePath(target),
 	)
 	res, err := runRemoteCapture(profile, "", cmd)
 	if err != nil {

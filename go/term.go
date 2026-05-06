@@ -61,6 +61,20 @@ func shQuote(s string) string {
 	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
 }
 
+// shQuotePath is shQuote for filesystem paths, but it preserves a leading
+// `~` or `~/` so the remote shell still does tilde expansion. Without this,
+// `cd '~'` would look for a literal directory named "~" and fail.
+func shQuotePath(p string) string {
+	switch {
+	case p == "~":
+		return "~"
+	case strings.HasPrefix(p, "~/"):
+		return "~/" + shQuote(p[2:])
+	default:
+		return shQuote(p)
+	}
+}
+
 // base64Encode returns the base64 encoding of s.
 func base64Encode(s string) string {
 	return base64.StdEncoding.EncodeToString([]byte(s))

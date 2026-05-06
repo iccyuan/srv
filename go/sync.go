@@ -458,7 +458,7 @@ func tarUploadStream(profile *Profile, localRoot string, files []string, remoteR
 	if err != nil {
 		return 1, err
 	}
-	remoteCmd := fmt.Sprintf("mkdir -p %s && cd %s && tar -xf -", shQuote(expanded), shQuote(expanded))
+	remoteCmd := fmt.Sprintf("mkdir -p %s && cd %s && tar -xf -", shQuotePath(expanded), shQuotePath(expanded))
 
 	// Build tar in-memory (for typical use cases this is fine; for very
 	// large transfers we could pipe via io.Pipe and a goroutine).
