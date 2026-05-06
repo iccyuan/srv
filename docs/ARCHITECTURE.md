@@ -7,14 +7,17 @@
 ## 文件布局
 
 ```
-D:\WorkSpace\server\srv\
-├── srv.py            所有逻辑(单文件,~1300 行)
+srv/
+├── srv.py            所有逻辑(单文件,~1500 行)
 ├── srv.cmd           Windows shim:找 python / py 后调 srv.py
 ├── srv               POSIX bash shim:调 python3 srv.py
 ├── README.md         用户文档(中文)
 ├── README.en.md      用户文档(英文)
 ├── CHANGELOG.md      版本历史
-└── ARCHITECTURE.md   本文
+├── LICENSE           Apache 2.0
+├── .gitignore
+└── docs/
+    └── ARCHITECTURE.md   本文(开发者文档)
 ```
 
 运行时数据在 `~/.srv/`(可用 `$SRV_HOME` 改):`config.json` / `sessions.json` / `jobs.json` / `cm/<host>.sock`。

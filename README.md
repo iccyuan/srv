@@ -467,7 +467,7 @@ MCP 服务器在 Claude Code 会话启动时加载。**新开 Claude Code 会话
 
 - [README.en.md](./README.en.md) —— 英文版
 - [CHANGELOG.md](./CHANGELOG.md) —— 版本变更历史
-- [ARCHITECTURE.md](./ARCHITECTURE.md) —— 代码组织和扩展指南
+- [docs/ARCHITECTURE.md](./docs/ARCHITECTURE.md) —— 代码组织和扩展指南
 
 ---
 

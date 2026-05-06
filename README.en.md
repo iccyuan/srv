@@ -468,7 +468,7 @@ The MCP server is loaded at session startup. Open a **new** Claude Code session,
 
 - [README.md](./README.md) — Chinese version
 - [CHANGELOG.md](./CHANGELOG.md) — version history
-- [ARCHITECTURE.md](./ARCHITECTURE.md) — code organization and how to extend
+- [docs/ARCHITECTURE.md](./docs/ARCHITECTURE.md) — code organization and how to extend
 
 ---
 
