@@ -484,4 +484,4 @@ The MCP server is loaded at session startup. Open a **new** Claude Code session,
 
 ## Version
 
-Currently **0.7.0**. Version bumps on breaking changes — see `srv version` and the `VERSION` constant near the top of `srv.py`.
+Currently **0.7.1**. Version bumps on breaking changes — see `srv version` and the `VERSION` constant near the top of `srv.py`.

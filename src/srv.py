@@ -91,12 +91,17 @@ RESERVED_SUBCOMMANDS = {
     "help", "--help", "-h", "version", "--version",
 }
 
-VERSION = "0.7.0"
+VERSION = "0.7.1"
 
 # Connect-time failure window (seconds): if ssh exits 255 within this window,
 # the failure is presumed to be the handshake (not the user command),
 # making a retry safe.
 HANDSHAKE_FAILURE_WINDOW_S = 5.0
+
+# Set to True only while the stdio MCP server is running. Used to suppress
+# stderr writes (retry messages) that would otherwise leak through the
+# MCP transport and confuse some clients.
+_IN_MCP_MODE = False
 
 # Process exes that are transparent layers between the user's shell and our
 # python: the cmd.exe shim in srv.cmd, and the Windows Store python launcher
@@ -423,10 +428,11 @@ def _ssh_call(cmd: list[str], retry: bool = True, max_attempts: int = 3) -> int:
         if i == attempts - 1:
             return rc
         sleep_s = 1.0 * (2 ** i)
-        sys.stderr.write(
-            f"srv: connect failed (exit 255 in {elapsed:.1f}s), "
-            f"retrying in {sleep_s:.0f}s...\n"
-        )
+        if not _IN_MCP_MODE:
+            sys.stderr.write(
+                f"srv: connect failed (exit 255 in {elapsed:.1f}s), "
+                f"retrying in {sleep_s:.0f}s...\n"
+            )
         time.sleep(sleep_s)
     return rc
 
@@ -445,10 +451,11 @@ def _ssh_run(cmd: list[str], retry: bool = True,
         if i == attempts - 1:
             return r
         sleep_s = 1.0 * (2 ** i)
-        sys.stderr.write(
-            f"srv: connect failed (exit 255 in {elapsed:.1f}s), "
-            f"retrying in {sleep_s:.0f}s...\n"
-        )
+        if not _IN_MCP_MODE:
+            sys.stderr.write(
+                f"srv: connect failed (exit 255 in {elapsed:.1f}s), "
+                f"retrying in {sleep_s:.0f}s...\n"
+            )
         time.sleep(sleep_s)
     return r  # type: ignore[return-value]
 
@@ -2112,8 +2119,13 @@ def _mcp_handle_tool(name: str, args: dict, cfg: dict) -> dict:
 
 
 def _mcp_send(obj: dict) -> None:
-    sys.stdout.write(json.dumps(obj, ensure_ascii=False) + "\n")
-    sys.stdout.flush()
+    try:
+        sys.stdout.write(json.dumps(obj, ensure_ascii=False) + "\n")
+        sys.stdout.flush()
+    except (BrokenPipeError, OSError):
+        # Client closed the read end. Don't crash the server -- the stdin
+        # readline loop will see EOF and exit cleanly on the next iteration.
+        pass
 
 
 def _mcp_response(req_id: Any, result: Any = None, error: dict | None = None) -> dict:
@@ -2126,10 +2138,21 @@ def _mcp_response(req_id: Any, result: Any = None, error: dict | None = None) ->
 
 
 def cmd_mcp(cfg: dict) -> int:
+    global _IN_MCP_MODE
+    _IN_MCP_MODE = True
+    # Force UTF-8 on stdio so non-ASCII payloads (Chinese profile names,
+    # filenames in stderr, etc.) don't crash on Windows cp1252/cp936 stdout.
+    for stream in (sys.stdin, sys.stdout):
+        if hasattr(stream, "reconfigure"):
+            try:
+                stream.reconfigure(encoding="utf-8", errors="replace")
+            except Exception:
+                pass
+
     while True:
         try:
             line = sys.stdin.readline()
-        except KeyboardInterrupt:
+        except (KeyboardInterrupt, OSError, UnicodeDecodeError):
             return 0
         if not line:
             return 0

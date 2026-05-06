@@ -4,6 +4,17 @@
 
 ---
 
+## [0.7.1] — 2026-05-06
+
+### Fixed
+MCP server stability hardening (用户反馈"很容易断"):
+- 进入 `cmd_mcp` 后立刻 `sys.stdout/stdin.reconfigure(encoding="utf-8", errors="replace")`,避免 Windows 默认 cp1252 / cp936 编码下,非 ASCII payload(中文 profile 名 / 路径 / 远端 stderr)写 stdout 直接 `UnicodeEncodeError` 让进程崩。
+- `_mcp_send` 包 `try / except (BrokenPipeError, OSError)`:客户端短暂关闭读端时不连累 server,readline 循环下一轮 EOF 自然退出。
+- 引入 `_IN_MCP_MODE` 全局标志,该模式下 `_ssh_call` / `_ssh_run` 的握手重试提示不再写 stderr——某些 MCP 客户端会因 stderr 里的非 JSON 行判定服务异常。
+- 主循环 `sys.stdin.readline()` 异常处理从 `KeyboardInterrupt` 扩展到 `OSError` / `UnicodeDecodeError`,管道异常状态下也优雅退出。
+
+---
+
 ## [0.7.0] — 2026-05-06
 
 ### Added
