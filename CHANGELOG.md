@@ -4,6 +4,18 @@
 
 ---
 
+## [0.7.5] — 2026-05-06
+
+### Fixed
+**Windows 上 `srv ls` / `srv "echo hi"` 等流式命令"要回车两次"才返回**:不是终端 buffer 问题,是 ssh 客户端默认会**把本地 stdin 转发给远端命令的 stdin**。远端 `ls` 早早执行完了,但本地 ssh 还在轮询 stdin,直到用户按 Enter 触发 broken-pipe 检测才肯退。
+
+修法:`build_ssh_cmd` 在 `tty=False` 且 `sys.stdin.isatty()` 为真时追加 `-n`,告诉 ssh 不读 stdin(等价于 stdin 接 /dev/null)。如果 stdin 是管道(`cat foo | srv "wc -l"`),isatty=False,不加 `-n`,管道数据照常转发到远端。
+
+### Changed
+n/a
+
+---
+
 ## [0.7.4] — 2026-05-06
 
 ### Fixed

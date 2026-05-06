@@ -483,4 +483,4 @@ MCP 服务器在 Claude Code 会话启动时加载。**新开 Claude Code 会话
 
 ## 版本
 
-当前 **0.7.4**。版本号在破坏性变更时增加,详见 `srv version` 和源文件顶部 `VERSION` 常量。完整变更记录见 [CHANGELOG.md](./CHANGELOG.md)。
+当前 **0.7.5**。版本号在破坏性变更时增加,详见 `srv version` 和源文件顶部 `VERSION` 常量。完整变更记录见 [CHANGELOG.md](./CHANGELOG.md)。

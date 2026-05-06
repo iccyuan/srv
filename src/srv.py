@@ -91,7 +91,7 @@ RESERVED_SUBCOMMANDS = {
     "help", "--help", "-h", "version", "--version",
 }
 
-VERSION = "0.7.4"
+VERSION = "0.7.5"
 
 # Connect-time failure window (seconds): if ssh exits 255 within this window,
 # the failure is presumed to be the handshake (not the user command),
@@ -417,6 +417,18 @@ def build_ssh_cmd(profile: dict, remote_command: str, tty: bool = False,
         args.append("-q")
     if tty:
         args.append("-tt")
+    else:
+        # When local stdin is a terminal (no piped data expected), pass `-n`
+        # so ssh doesn't keep polling stdin after the remote command exits.
+        # Without this, the Windows ssh client lingers until the user types
+        # something -- presents as "srv ls hangs until I hit Enter twice".
+        # If stdin is a pipe (e.g. `cat foo | srv "wc -l"`), leave it alone
+        # so the piped data reaches the remote.
+        try:
+            if sys.stdin.isatty():
+                args.append("-n")
+        except (ValueError, AttributeError):
+            pass
     if profile.get("port") and int(profile["port"]) != 22:
         args += ["-p", str(profile["port"])]
     if profile.get("identity_file"):
