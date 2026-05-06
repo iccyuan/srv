@@ -2,9 +2,38 @@
 
 [中文](./README.md) | English
 
-A cross-platform SSH command runner. Configure SSH targets locally, then `srv <cmd>` executes on the remote with persistent cwd, connection multiplexing, per-shell session isolation, and detached background jobs. Callable from Bash or as an MCP server (Claude Code / Codex).
+> Cross-platform SSH command runner. Configure locally, run on the remote. Persistent cwd, connection multiplexing, per-shell session isolation, detached jobs. Callable from Bash or as an MCP server (Claude Code / Codex). Zero third-party deps — just Python 3 + system `ssh` / `scp`.
 
-Zero third-party dependencies — pure Python 3 stdlib plus system `ssh` / `scp`.
+## Cheat sheet
+
+| What you want | Command |
+|---|---|
+| First-time setup + verify | `srv init && srv check` |
+| Run on remote | `srv ls -la` / `srv "ps aux \| grep x"` |
+| Persistent cwd | `srv cd /opt/app` |
+| Switch profile (this shell) | `srv use <profile>` |
+| Push changed files | `srv sync` |
+| Push a single file | `srv push ./a.py` |
+| Long-running background task | `srv -d ./build.sh` |
+| Inspect background jobs | `srv jobs` / `srv logs <id> -f` |
+| Diagnose connection issues | `srv check` |
+| Interactive (vim/htop) | `srv -t <cmd>` |
+| Claude Code integration | See [Claude Code / Codex integration](#claude-code--codex-integration) |
+
+## Contents
+
+1. [What it solves](#what-it-solves)
+2. [Install](#install)
+3. [Quickstart](#quickstart)
+4. [Subcommands](#subcommands)
+5. [Profile keys](#profile-keys)
+6. [Multi-server, multi-terminal](#multi-server-multi-terminal)
+7. [Network resilience](#network-resilience)
+8. [Claude Code / Codex integration](#claude-code--codex-integration)
+9. [Files](#files)
+10. [Environment variables](#environment-variables)
+11. [Troubleshooting](#troubleshooting)
+12. [Design tradeoffs / known limitations](#design-tradeoffs--known-limitations)
 
 ---
 
@@ -128,6 +157,26 @@ srv 'find . -name "*.py"'
 srv "FOO=1 python script.py"            # one-shot env var
 srv "bash -ic 'myalias arg'"            # force interactive shell so aliases load
 ```
+
+### Connectivity diagnosis
+
+```
+srv check        # active probe with BatchMode=yes; diagnoses common failure modes
+```
+
+Never hangs (no ControlMaster, no stdin reads), auto-accepts first-time host keys. Diagnosis categories:
+
+| diagnosis | meaning | output hint |
+|---|---|---|
+| `no-key` | server rejected publickey | prints `ssh-copy-id` and PowerShell-equivalent pipe |
+| `host-key-changed` | host key mismatch | prints `ssh-keygen -R` + `ssh-keyscan` |
+| `dns` | hostname resolution failed | prompts to check host spelling |
+| `refused` | connection refused | sshd not running / wrong port / firewall |
+| `no-route` | network unreachable | VPN / routing |
+| `tcp-timeout` | TCP timed out | server down / silent firewall drop |
+| `perm-denied` | generic auth failure | check key pairing |
+
+`srv init` suggests running `srv check` immediately after — you find out in 15 s whether your config actually works.
 
 ### Working directory
 
@@ -306,16 +355,35 @@ srv -d "python long.py"
 
 ### Option 2: MCP server (structured tools)
 
-Claude Code gets 13 tools via stdio MCP (`run`, `cd`, `pwd`, `use`, `status`, `list_profiles`, `push`, `pull`, `sync`, `detach`, `list_jobs`, `tail_log`, `kill_job`). The MCP server's session id = the Claude Code process PID, so each Claude Code instance is independent.
+Claude Code gets 14 tools via stdio MCP (`run`, `cd`, `pwd`, `use`, `status`, `check`, `list_profiles`, `push`, `pull`, `sync`, `detach`, `list_jobs`, `tail_log`, `kill_job`). The MCP server's session id = the Claude Code process PID, so each Claude Code instance is independent.
 
-**Claude Code** (one-time, user scope):
+**Claude Code** — pick one of three scopes depending on how you want it shared:
+
+| Scope | Written to | Use case |
+|---|---|---|
+| `user` | `~/.claude.json` | Available in every project, **recommended for personal use** |
+| `project` | `<repo>/.mcp.json` | **Shared with teammates** — commit and they get it on clone |
+| `local` | per-project user file | Only in this project, only for you, not committed |
 
 ```sh
+# 1) personal global (works in any directory)
 claude mcp add srv --scope user -- python D:\WorkSpace\server\srv\srv.py mcp
-claude mcp list   # should show srv: ✓ Connected
+
+# 2) project-shared (run from repo root; writes .mcp.json, commit it)
+cd <your-project>
+claude mcp add srv --scope project -- python D:\WorkSpace\server\srv\srv.py mcp
+
+# 3) project-private (not in .mcp.json, only you see it)
+cd <your-project>
+claude mcp add srv --scope local -- python D:\WorkSpace\server\srv\srv.py mcp
+
+# verify (works for any scope)
+claude mcp list   # should show  srv: ✓ Connected
 ```
 
-New Claude Code sessions pick it up automatically. Existing sessions need `/mcp` to reconnect.
+> On macOS / Linux replace the path with `/path/to/srv/srv.py` — or just `srv mcp` if `srv` is on PATH.
+
+New Claude Code sessions pick it up automatically; existing sessions need `/mcp` to reconnect.
 
 **Codex CLI** — `~/.codex/config.toml`:
 
@@ -406,4 +474,4 @@ The MCP server is loaded at session startup. Open a **new** Claude Code session,
 
 ## Version
 
-Currently **0.6.0**. Version bumps on breaking changes — see `srv version` and the `VERSION` constant near the top of `srv.py`.
+Currently **0.7.0**. Version bumps on breaking changes — see `srv version` and the `VERSION` constant near the top of `srv.py`.

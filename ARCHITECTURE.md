@@ -35,7 +35,7 @@ D:\WorkSpace\server\srv\
 | 8 | SSH / scp 命令构造:`_default_ssh_options` / `build_ssh_cmd` / `build_scp_cmd` |
 | 9 | 带重试的进程包装:`_ssh_call`(stream)/ `_ssh_run`(capture) |
 | 10 | 远端操作原语:`run_remote` / `run_remote_capture` / `change_remote_cwd` / `remote_target` / `resolve_remote_path` |
-| 11 | 子命令:`cmd_init` / `cmd_config` / `cmd_use` / `cmd_cd` / `cmd_pwd` / `cmd_status` / `cmd_run` / `cmd_push` / `cmd_pull` / `cmd_sessions` / `cmd_list_profiles_internal` |
+| 11 | 子命令:`cmd_init` / `cmd_config` / `cmd_use` / `cmd_cd` / `cmd_pwd` / `cmd_status` / `cmd_check` / `cmd_run` / `cmd_push` / `cmd_pull` / `cmd_sessions` / `cmd_list_profiles_internal`(连通诊断:`_ssh_check` / `_check_advice`) |
 | 11b | 批量同步:`_find_git_root` / `_git_changed_files` / `_mtime_changed_files` / `_glob_files` / `_matches_any_exclude` / `_normalize_for_tar` / `_tar_pipe_upload` / `_parse_sync_opts` / `_collect_sync_files` / `cmd_sync` |
 | 12 | 后台作业:`_gen_job_id` / `_find_job` / `_spawn_detached` / `cmd_detach` / `cmd_jobs` / `cmd_logs` / `cmd_kill` |
 | 13 | shell 补全脚本(三份字符串模板)+ `cmd_completion` |

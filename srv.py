@@ -12,6 +12,7 @@ Quick start:
   srv "ps aux | grep redis"      pipes/redirects: quote at local shell
   srv -t htop                    interactive (TTY) command
   srv -P dev rsync ...           override profile for a single call
+  srv check                      probe connectivity; diagnose key/host/port issues
 
 File transfer (uses scp):
   srv push ./local.py            upload to current cwd
@@ -84,13 +85,13 @@ SESSIONS_FILE = CONFIG_DIR / "sessions.json"
 JOBS_FILE = CONFIG_DIR / "jobs.json"
 
 RESERVED_SUBCOMMANDS = {
-    "init", "config", "use", "cd", "pwd", "status", "run", "exec",
+    "init", "config", "use", "cd", "pwd", "status", "check", "run", "exec",
     "push", "pull", "sync", "completion", "mcp", "_profiles",
     "jobs", "logs", "kill", "sessions",
     "help", "--help", "-h", "version", "--version",
 }
 
-VERSION = "0.6.0"
+VERSION = "0.7.0"
 
 # Connect-time failure window (seconds): if ssh exits 255 within this window,
 # the failure is presumed to be the handshake (not the user command),
@@ -565,6 +566,173 @@ def cmd_status(cfg: dict, profile_override: str | None) -> int:
     return 0
 
 
+def _ssh_check(profile: dict, timeout: float = 15.0) -> tuple[bool, int, str, str]:
+    """Probe SSH connectivity with BatchMode=yes (no password / passphrase /
+    host-key prompts to hang on) and a short timeout. Bypasses ControlMaster
+    so a stale socket can't fool the diagnosis.
+
+    Returns (ok, exit_code, diagnosis_tag, raw_stderr) where diagnosis_tag is
+    one of: 'ok', 'no-key', 'host-key-changed', 'dns', 'refused', 'no-route',
+    'tcp-timeout', 'timeout', 'ssh-not-found', 'perm-denied', 'unknown'.
+    """
+    cmd = ["ssh"]
+    if profile.get("port") and int(profile["port"]) != 22:
+        cmd += ["-p", str(profile["port"])]
+    if profile.get("identity_file"):
+        cmd += ["-i", os.path.expanduser(profile["identity_file"])]
+    cmd += [
+        "-o", "ControlMaster=no",
+        "-o", "ControlPath=none",
+        "-o", "BatchMode=yes",
+        "-o", "StrictHostKeyChecking=accept-new",
+        "-o", f"ConnectTimeout={profile.get('connect_timeout', 10)}",
+    ]
+    for opt in profile.get("ssh_options") or []:
+        cmd += ["-o", opt]
+    user = profile.get("user")
+    target = f"{user}@{profile['host']}" if user else profile["host"]
+    cmd += [target, "echo srv-check-ok"]
+
+    try:
+        r = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+    except subprocess.TimeoutExpired:
+        return (False, -1, "timeout", "")
+    except FileNotFoundError:
+        return (False, 127, "ssh-not-found", "")
+
+    if r.returncode == 0 and "srv-check-ok" in (r.stdout or ""):
+        return (True, 0, "ok", "")
+
+    err = (r.stderr or "").lower()
+    if "permission denied (publickey" in err:
+        diag = "no-key"
+    elif "host key verification failed" in err or "remote host identification has changed" in err:
+        diag = "host-key-changed"
+    elif "could not resolve hostname" in err or "name or service not known" in err \
+            or "nodename nor servname provided" in err:
+        diag = "dns"
+    elif "connection refused" in err:
+        diag = "refused"
+    elif "no route to host" in err or "network is unreachable" in err:
+        diag = "no-route"
+    elif "operation timed out" in err or "connection timed out" in err:
+        diag = "tcp-timeout"
+    elif "permission denied" in err:
+        diag = "perm-denied"
+    else:
+        diag = "unknown"
+    return (False, r.returncode, diag, r.stderr or "")
+
+
+def _check_advice(diag: str, profile: dict, profile_name: str) -> list[str]:
+    """Return human-readable, actionable lines for a given diagnosis."""
+    user = profile.get("user", "")
+    host = profile["host"]
+    port = profile.get("port", 22)
+    target = f"{user}@{host}" if user else host
+    identity = profile.get("identity_file") or "~/.ssh/id_rsa"
+    pub = identity if identity.endswith(".pub") else identity + ".pub"
+
+    if diag == "no-key":
+        return [
+            f"key authentication rejected -- your local public key is NOT in the",
+            f"server's authorized_keys.",
+            "",
+            f"Fix it (pick one):",
+            f"  ssh-copy-id -i {pub} {target}",
+            f"  # PowerShell equivalent (no ssh-copy-id on Windows):",
+            f"  type {pub.replace('~', '$env:USERPROFILE')} | ssh {target} \"cat >> ~/.ssh/authorized_keys && chmod 600 ~/.ssh/authorized_keys\"",
+            f"",
+            f"After authorizing, re-run: srv check",
+        ]
+    if diag == "host-key-changed":
+        return [
+            f"server host key doesn't match the one in known_hosts (or first connection",
+            f"with strict host-key checking).",
+            "",
+            f"If you trust this is the same server and the key really changed:",
+            f"  ssh-keygen -R {host}",
+            f"  ssh-keyscan -H {host} >> ~/.ssh/known_hosts",
+            f"",
+            f"Otherwise verify with the server's admin first.",
+        ]
+    if diag == "dns":
+        return [
+            f"can't resolve hostname {host!r}.",
+            f"  - check the host spelling: srv config show {profile_name}",
+            f"  - if it's an IP, double-check digits",
+        ]
+    if diag == "refused":
+        return [
+            f"connection refused at {host}:{port}.",
+            f"  - is sshd running on the server?",
+            f"  - is port {port} correct? (try: srv config set {profile_name} port <N>)",
+            f"  - is a firewall blocking?",
+        ]
+    if diag == "no-route":
+        return [
+            f"no route to {host}.",
+            f"  network unreachable -- check VPN / firewall / interface state.",
+        ]
+    if diag == "tcp-timeout":
+        return [
+            f"connection timed out reaching {host}:{port}.",
+            f"  - server may be down or unreachable",
+            f"  - firewall may be silently dropping",
+            f"  - try a longer timeout: srv config set {profile_name} connect_timeout 30",
+        ]
+    if diag == "timeout":
+        return [
+            f"probe took longer than the watchdog (15s). Server may be hanging on",
+            f"connection setup; try interactively: ssh {target}",
+        ]
+    if diag == "ssh-not-found":
+        return [
+            "ssh not in PATH; install OpenSSH client.",
+            "  Windows: Add-WindowsCapability -Online -Name OpenSSH.Client~~~~0.0.1.0",
+        ]
+    if diag == "perm-denied":
+        return [
+            "auth failed -- the server didn't accept any of your keys, and",
+            "password auth is either disabled or BatchMode prevented prompting.",
+            "Verify which key the server expects, and ensure it's in authorized_keys.",
+        ]
+    return ["unknown failure mode -- see stderr above."]
+
+
+def cmd_check(cfg: dict, profile_override: str | None) -> int:
+    name, profile = resolve_profile(cfg, profile_override)
+    user = profile.get("user", "")
+    host = profile["host"]
+    port = profile.get("port", 22)
+    identity = profile.get("identity_file")
+    target = f"{user}@{host}" if user else host
+
+    print(f"checking {name}: {target}:{port}")
+    if identity:
+        print(f"  key : {identity}")
+    else:
+        print(f"  key : (ssh default search; commonly ~/.ssh/id_rsa or id_ed25519)")
+    print()
+
+    ok, rc, diag, stderr = _ssh_check(profile)
+
+    if ok:
+        print("OK -- connected; key authentication works.")
+        return 0
+
+    print(f"FAIL ({diag}; ssh exit {rc})")
+    if stderr:
+        print()
+        print("ssh stderr:")
+        for line in stderr.rstrip().splitlines():
+            print(f"  {line}")
+    print()
+    for line in _check_advice(diag, profile, name):
+        print(line)
+    return 1
+
+
 def _prompt(question: str, default: str | None = None) -> str:
     suffix = f" [{default}]" if default else ""
     try:
@@ -603,7 +771,9 @@ def cmd_init(cfg: dict) -> int:
         cfg["default_profile"] = name
     save_config(cfg)
     print(f"saved profile {name!r} to {CONFIG_FILE}")
-    print("test it with: srv status")
+    print()
+    print("next: verify connectivity with `srv check` (it'll tell you exactly")
+    print("      what to fix if your key isn't in the server's authorized_keys).")
     return 0
 
 
@@ -1316,7 +1486,7 @@ _srv() {
     COMPREPLY=()
     cur="${COMP_WORDS[COMP_CWORD]}"
     prev="${COMP_WORDS[COMP_CWORD-1]:-}"
-    local subs="init config use cd pwd status run exec push pull sync jobs logs kill sessions completion mcp help version"
+    local subs="init config use cd pwd status check run exec push pull sync jobs logs kill sessions completion mcp help version"
     local sub=""
     local i
     for ((i=1; i<COMP_CWORD; i++)); do
@@ -1382,6 +1552,7 @@ _srv() {
         'cd:change persistent remote cwd'
         'pwd:show remote cwd'
         'status:show profile and cwd'
+        'check:probe SSH connectivity and diagnose failures'
         'run:run a command on remote'
         'push:upload via scp'
         'pull:download via scp'
@@ -1437,7 +1608,7 @@ Register-ArgumentCompleter -Native -CommandName srv -ScriptBlock {
         $sub = $t
         break
     }
-    $subs = 'init','config','use','cd','pwd','status','run','exec','push','pull','sync','jobs','logs','kill','sessions','completion','mcp','help','version'
+    $subs = 'init','config','use','cd','pwd','status','check','run','exec','push','pull','sync','jobs','logs','kill','sessions','completion','mcp','help','version'
     if (-not $sub -or $sub -eq $wordToComplete) {
         $subs | Where-Object { $_ -like "$wordToComplete*" } |
             ForEach-Object { [System.Management.Automation.CompletionResult]::new($_, $_, 'ParameterValue', $_) }
@@ -1542,6 +1713,14 @@ def _mcp_tool_defs() -> list[dict]:
             "name": "list_profiles",
             "description": "List configured SSH profiles, the global default, and what's pinned for this session.",
             "inputSchema": {"type": "object", "properties": {}},
+        },
+        {
+            "name": "check",
+            "description": "Probe SSH connectivity (BatchMode=yes, no hangs). Returns a diagnosis tag (ok / no-key / host-key-changed / dns / refused / no-route / tcp-timeout / timeout / perm-denied / unknown) and human-readable fix steps for failures.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {"profile": {"type": "string"}},
+            },
         },
         {
             "name": "push",
@@ -1733,6 +1912,31 @@ def _mcp_handle_tool(name: str, args: dict, cfg: dict) -> dict:
         }
         return {
             "content": [{"type": "text", "text": json.dumps(info, indent=2)}],
+            "structuredContent": info,
+        }
+
+    if name == "check":
+        prof_name, profile = resolve_profile(cfg, profile_override)
+        ok, rc, diag, stderr = _ssh_check(profile)
+        advice = _check_advice(diag, profile, prof_name) if not ok else []
+        info = {
+            "profile": prof_name,
+            "host": profile["host"],
+            "user": profile.get("user"),
+            "port": profile.get("port", 22),
+            "ok": ok,
+            "diagnosis": diag,
+            "exit_code": rc,
+            "stderr": stderr,
+            "advice": advice,
+        }
+        if ok:
+            text = f"OK -- {prof_name}: {profile.get('user') or ''}@{profile['host']} key auth works."
+        else:
+            text = f"FAIL ({diag}): {stderr.strip() or '(no stderr)'}\n\n" + "\n".join(advice)
+        return {
+            "content": [{"type": "text", "text": text}],
+            "isError": not ok,
             "structuredContent": info,
         }
 
@@ -2041,6 +2245,8 @@ def main(argv: list[str] | None = None) -> int:
         return cmd_pwd(cfg, opts["profile"])
     if sub == "status":
         return cmd_status(cfg, opts["profile"])
+    if sub == "check":
+        return cmd_check(cfg, opts["profile"])
     if sub == "push":
         return cmd_push(rest[1:], cfg, opts["profile"])
     if sub == "pull":

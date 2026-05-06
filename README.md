@@ -2,9 +2,38 @@
 
 [English](./README.en.md) | 中文
 
-跨平台 SSH 服务器命令工具:本地配置 SSH 信息,然后 `srv <cmd>` 直接在远端跑,自动维护持久化 cwd、连接复用、会话隔离、后台作业。Claude Code / Codex 可通过 Bash 或 MCP 调用。
+> 跨平台 SSH 命令工具:本地配置,远端执行。持久 cwd / 连接复用 / 会话隔离 / 后台作业。Claude Code / Codex 可通过 Bash 或 MCP 调用。零三方依赖,只要 Python 3 + 系统 `ssh` / `scp`。
 
-零三方依赖——纯 Python 3 标准库 + 系统 `ssh` / `scp`。
+## 速查
+
+| 想做的事 | 命令 |
+|---|---|
+| 首次配置 + 验证 | `srv init && srv check` |
+| 远端执行命令 | `srv ls -la` / `srv "ps aux \| grep x"` |
+| 持久化 cwd | `srv cd /opt/app` |
+| 切服务器(本 shell) | `srv use <profile>` |
+| 推已变更文件 | `srv sync` |
+| 推单个文件 | `srv push ./a.py` |
+| 后台长任务 | `srv -d ./build.sh` |
+| 查后台任务 | `srv jobs` / `srv logs <id> -f` |
+| 连不上排查 | `srv check` |
+| 交互式(vim/htop) | `srv -t <cmd>` |
+| Claude Code 集成 | 见 [Claude Code / Codex 集成](#claude-code--codex-集成) |
+
+## 目录
+
+1. [解决什么问题](#解决什么问题)
+2. [安装](#安装)
+3. [快速开始](#快速开始)
+4. [子命令参考](#子命令参考)
+5. [profile 可调键](#profile-可调键)
+6. [多服务器、多终端](#多服务器多终端)
+7. [网络弹性](#网络弹性)
+8. [Claude Code / Codex 集成](#claude-code--codex-集成)
+9. [文件布局](#文件布局)
+10. [环境变量](#环境变量)
+11. [故障排查](#故障排查)
+12. [设计取舍 / 已知限制](#设计取舍--已知限制)
 
 ---
 
@@ -128,6 +157,26 @@ srv 'find . -name "*.py"'
 srv "FOO=1 python script.py"            # 一次性环境变量
 srv "bash -ic 'myalias arg'"            # 走交互 shell 取别名
 ```
+
+### 连通性诊断
+
+```
+srv check        # 用 BatchMode=yes 短超时探一次连接,失败时给出针对性修复指引
+```
+
+不会 hang(关掉 ControlMaster + 不读 stdin),自动接受首次连接的 host key。失败分类:
+
+| diagnosis | 含义 | 提示输出 |
+|---|---|---|
+| `no-key` | 服务器拒绝 publickey 认证 | 给出 `ssh-copy-id` 命令和 PowerShell 等价管道 |
+| `host-key-changed` | host key 不匹配 | 给出 `ssh-keygen -R` + `ssh-keyscan` 命令 |
+| `dns` | 主机名解析失败 | 提示检查 host 拼写 |
+| `refused` | 连接被拒 | sshd 没起 / 端口错 / 防火墙 |
+| `no-route` | 网络不可达 | VPN / 路由问题 |
+| `tcp-timeout` | TCP 超时 | 服务器宕 / 防火墙静默丢包 |
+| `perm-denied` | 一般 auth 失败 | 检查 key 配对 |
+
+`srv init` 完成后会提示你紧接着跑一次 `srv check`,初次配完立刻知道能不能用。
 
 ### cwd
 
@@ -305,16 +354,35 @@ srv -d "python long.py"
 
 ### 方式 2:MCP server(结构化工具)
 
-Claude Code 通过 stdio MCP 拿到 13 个工具(run/cd/pwd/use/status/list_profiles/push/pull/sync/detach/list_jobs/tail_log/kill_job)。MCP 服务器实例的 session id = Claude Code 进程 PID,每个 Claude Code 实例独立。
+Claude Code 通过 stdio MCP 拿到 14 个工具(run/cd/pwd/use/status/check/list_profiles/push/pull/sync/detach/list_jobs/tail_log/kill_job)。MCP 服务器实例的 session id = Claude Code 进程 PID,每个 Claude Code 实例独立。
 
-**Claude Code 注册**(用户级,一次性):
+**Claude Code 注册** —— 3 种作用域,按使用场景选一个:
+
+| Scope | 配置写到 | 适用场景 |
+|---|---|---|
+| `user` | `~/.claude.json` | 所有项目共享,**个人机器推荐** |
+| `project` | `<repo>/.mcp.json` | **团队共享**——提交 git 后队友 clone 即用 |
+| `local` | 项目+用户级私有文件 | 只在某个项目用,且不想入库 |
 
 ```sh
+# 1) 个人全局(任何目录里都能用)
 claude mcp add srv --scope user -- python D:\WorkSpace\server\srv\srv.py mcp
-claude mcp list   # 应显示 srv: ✓ Connected
+
+# 2) 项目级共享(在 repo 根目录跑;生成 .mcp.json,可入 git)
+cd <your-project>
+claude mcp add srv --scope project -- python D:\WorkSpace\server\srv\srv.py mcp
+
+# 3) 项目级私有(不写进 .mcp.json,只你能看到)
+cd <your-project>
+claude mcp add srv --scope local -- python D:\WorkSpace\server\srv\srv.py mcp
+
+# 验证(任一 scope 之后都能跑)
+claude mcp list   # 应显示  srv: ✓ Connected
 ```
 
-新开 Claude Code 会话即生效(已运行的会话需要 `/mcp` 重连)。
+> macOS / Linux 把命令里的路径换成 `/path/to/srv/srv.py`(或者直接用 `srv mcp` 如果 `srv` 已在 PATH)。
+
+新开 Claude Code 会话即生效;已运行的会话需要 `/mcp` 重连。
 
 **Codex CLI** ——`~/.codex/config.toml`:
 
@@ -405,4 +473,4 @@ MCP 服务器在 Claude Code 会话启动时加载。**新开 Claude Code 会话
 
 ## 版本
 
-当前 **0.6.0**。版本号在破坏性变更时增加,详见 `srv version` 和源文件顶部 `VERSION` 常量。完整变更记录见 [CHANGELOG.md](./CHANGELOG.md)。
+当前 **0.7.0**。版本号在破坏性变更时增加,详见 `srv version` 和源文件顶部 `VERSION` 常量。完整变更记录见 [CHANGELOG.md](./CHANGELOG.md)。

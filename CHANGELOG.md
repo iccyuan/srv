@@ -4,6 +4,21 @@
 
 ---
 
+## [0.7.0] — 2026-05-06
+
+### Added
+- **`srv check`** —— 主动连通性诊断。用 `BatchMode=yes` + `StrictHostKeyChecking=accept-new` + 关闭 ControlMaster 起一条干净的探测连接,15 秒超时,**永不 hang**。失败时按 stderr 模式分类,给出对应修复命令:
+  - `no-key`(`Permission denied (publickey`)→ 输出本机的 `ssh-copy-id` 命令和 PowerShell 的等价管道
+  - `host-key-changed` → `ssh-keygen -R` + `ssh-keyscan`
+  - `dns` / `refused` / `no-route` / `tcp-timeout` / `perm-denied` / `unknown` 各自有针对性提示
+- `srv init` 末尾追加提示语,引导用户立刻跑 `srv check`。
+- MCP 工具 `check`,返回 `{ok, diagnosis, advice, exit_code, stderr}`,Agent 客户端能自动分流处理。
+
+### Fixed
+- 改善了 SSH 配置错误的可发现性。原先用户没在服务器配 key 时,看到的只是模糊的 "Read from remote host..." 之类底层报错;现在 `srv check` 会明确告诉他们 "key 没加到 authorized_keys" 和怎么加。
+
+---
+
 ## [0.6.0] — 2026-05-06
 
 ### Added
