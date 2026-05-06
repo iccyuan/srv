@@ -2,6 +2,40 @@
 
 格式参考 [Keep a Changelog](https://keepachangelog.com)。版本号在破坏性变更时增加。
 
+Python 版本和 Go 版本走独立版本号:Python 在 `0.x` 序列,Go 从 `2.0` 起步。两版**共享 `~/.srv/` 配置和状态目录**,可来回切换使用。
+
+---
+
+## [Go 2.0.0] — 2026-05-07
+
+完整的 Go 重写,放在 [`go/`](./go) 子目录,**Python 版本继续保留**在 `src/`。
+
+### 用 Go 解决了什么
+
+Python 版本因为包装系统 `ssh.exe`,在 Windows 上累积了一连串 OpenSSH 9.5p2 的 quirk(ControlMaster 把 stdout 管道锁住、stdin 默认转发要按两次 Enter、`getsockname failed: Not a socket`、`Read from remote host: Unknown error` 等)。Go 版用 `golang.org/x/crypto/ssh` 自实现 SSH 协议,**彻底绕开这些坑**;同时编译成单二进制,部署等于"复制文件"。
+
+### 包含的所有功能(对齐 Python 0.7.5,无遗漏)
+
+- 全部 18 个子命令:`init` / `config <list|use|remove|show|set>` / `use` / `cd` / `pwd` / `status` / `check` / `run`(默认)/ `exec` / `push` / `pull` / `sync` / `jobs` / `logs` / `kill` / `sessions <list|show|clear|prune>` / `completion` / `mcp` / `_profiles`(内部)/ `help` / `version`
+- 全部 3 个全局 flag:`-P/--profile`、`-t/--tty`、`-d/--detach`
+- 所有 profile 键(`multiplex` 和 `control_persist` 在 Go 版无操作—用进程内连接代替 ControlMaster)
+- 完整的 session 模型:Windows 进程树游走跳过 `cmd.exe`/`python.exe` 中间层,Unix 用 `os.Getppid()`,`SRV_SESSION` 显式覆盖
+- 完整的 sync 模式:git(all/staged/modified/untracked)/ mtime / glob / list,加 `--exclude`、`--root`、`--no-git`、`--dry-run`、`sync_root`、`sync_exclude`、11 项默认排除
+- 完整的 14 个 MCP 工具:`run` / `cd` / `pwd` / `use` / `status` / `check` / `list_profiles` / `push` / `pull` / `sync` / `detach` / `list_jobs` / `tail_log` / `kill_job`,协议 2024-11-05
+- check 的 9 类诊断 + 针对性修复建议
+- 后台作业:nohup + base64 编码避免引号问题,jobs.json 索引,前缀匹配
+- shell 补全:bash / zsh / powershell
+
+### 实现要点
+
+- `crypto/ssh` 主连接 + `pkg/sftp` 文件传输 + 内置 `archive/tar` 自打包(sync 不再调用本地 tar)
+- 已知 hosts:`golang.org/x/crypto/ssh/knownhosts` accept-new
+- 认证:ssh-agent → profile.identity_file → 默认 `~/.ssh/id_ed25519` / `id_rsa` / `id_ecdsa`,passphrase 交互
+- 跨平台编译:`GOOS=linux/darwin/windows go build -o srv .`
+- 与 Python 版**共享 `~/.srv/{config,sessions,jobs}.json`**,两版可任意切换
+
+详见 [`go/README.md`](./go/README.md)。
+
 ---
 
 ## [0.7.5] — 2026-05-06
