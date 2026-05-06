@@ -91,7 +91,7 @@ RESERVED_SUBCOMMANDS = {
     "help", "--help", "-h", "version", "--version",
 }
 
-VERSION = "0.7.2"
+VERSION = "0.7.4"
 
 # Connect-time failure window (seconds): if ssh exits 255 within this window,
 # the failure is presumed to be the handshake (not the user command),
@@ -245,7 +245,20 @@ def _read_json(path: Path, default: Any) -> Any:
 
 def _write_json(path: Path, data: Any) -> None:
     CONFIG_DIR.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
+    tmp = path.with_name(
+        f".{path.name}.{os.getpid()}.{secrets.token_hex(4)}.tmp"
+    )
+    try:
+        tmp.write_text(
+            json.dumps(data, indent=2, ensure_ascii=False),
+            encoding="utf-8",
+        )
+        os.replace(tmp, path)
+    finally:
+        try:
+            tmp.unlink()
+        except OSError:
+            pass
 
 
 def load_config() -> dict:
@@ -352,11 +365,30 @@ def set_session_profile(name: str | None) -> str:
 # SSH / scp builders                                                          #
 # --------------------------------------------------------------------------- #
 
-def _default_ssh_options(profile: dict) -> list[str]:
+def _default_ssh_options(profile: dict, capture: bool = False) -> list[str]:
     """Resilience defaults applied to every ssh/scp call. User-supplied
-    `ssh_options` come AFTER these so they always win."""
+    `ssh_options` come AFTER these so they always win.
+
+    ControlMaster is force-disabled in two cases:
+      1. capture=True (subprocess.PIPE stdio): the spawned master inherits
+         the parent ssh's stdout pipe, holds it open across parent exit,
+         and the capturing process's communicate() reads a half-closed
+         pipe -- "Read from remote host: Unknown error".
+      2. Windows host: Win32-OpenSSH 9.5p2 has flaky ControlMaster support
+         that triggers the same error on stream mode too. Disable globally;
+         user can override via profile.ssh_options if their environment
+         actually works.
+
+    Capture calls are typically one-shot probes (cd / status / push / pull)
+    where multiplexing helps less anyway. Windows users lose multiplexing
+    for now in exchange for stability."""
     opts: list[str] = []
-    if profile.get("multiplex", True):
+    multiplex_ok = (
+        profile.get("multiplex", True)
+        and not capture
+        and sys.platform != "win32"
+    )
+    if multiplex_ok:
         cm_dir = CONFIG_DIR / "cm"
         cm_dir.mkdir(parents=True, exist_ok=True)
         control_path = (cm_dir / "%C.sock").as_posix()
@@ -365,6 +397,8 @@ def _default_ssh_options(profile: dict) -> list[str]:
             f"ControlPath={control_path}",
             f"ControlPersist={profile.get('control_persist', '10m')}",
         ]
+    else:
+        opts += ["ControlMaster=no", "ControlPath=none"]
     opts += [
         f"ConnectTimeout={profile.get('connect_timeout', 10)}",
         f"ServerAliveInterval={profile.get('keepalive_interval', 30)}",
@@ -387,7 +421,7 @@ def build_ssh_cmd(profile: dict, remote_command: str, tty: bool = False,
         args += ["-p", str(profile["port"])]
     if profile.get("identity_file"):
         args += ["-i", os.path.expanduser(profile["identity_file"])]
-    for opt in _default_ssh_options(profile):
+    for opt in _default_ssh_options(profile, capture=capture):
         args += ["-o", opt]
     if capture:
         # Capture mode = non-interactive caller (MCP, internal probes, cd
@@ -413,7 +447,7 @@ def build_scp_cmd(profile: dict, src: str, dst: str,
         args += ["-P", str(profile["port"])]
     if profile.get("identity_file"):
         args += ["-i", os.path.expanduser(profile["identity_file"])]
-    for opt in _default_ssh_options(profile):
+    for opt in _default_ssh_options(profile, capture=capture):
         args += ["-o", opt]
     if capture:
         args += ["-o", "BatchMode=yes"]
@@ -447,10 +481,18 @@ def _ssh_call(cmd: list[str], retry: bool = True, max_attempts: int = 3) -> int:
 
 def _ssh_run(cmd: list[str], retry: bool = True, max_attempts: int = 3,
              timeout: float = 60.0) -> subprocess.CompletedProcess:
-    """Capture stdout/stderr. Closes child stdin (DEVNULL) so the spawned
-    ssh can't inherit a parent pipe (e.g., the MCP JSON-RPC stream) and
-    block forever on a prompt. Hard-caps wall time at `timeout` seconds;
-    on hit, returns a synthetic CompletedProcess with rc=124."""
+    """Capture stdout/stderr. In MCP mode, redirects the child stdin to
+    DEVNULL so the spawned ssh can't inherit the JSON-RPC pipe and block
+    on prompts. In CLI mode, lets stdin inherit the parent terminal --
+    BatchMode=yes (set by build_ssh_cmd capture mode) already blocks
+    prompts, and Windows ssh.exe is finicky with DEVNULL on stdin
+    (manifests as a "Read from remote host: Unknown error" mid-channel).
+    Hard-caps wall time at `timeout` seconds; on hit, returns a synthetic
+    CompletedProcess with rc=124."""
+    # Only force-close stdin when the parent is feeding us a non-tty
+    # bidirectional pipe (the MCP transport). CLI invocation has a terminal
+    # (or a benign pipe) and Windows ssh.exe trips on DEVNULL there.
+    stdin_arg = subprocess.DEVNULL if _IN_MCP_MODE else None
     attempts = max_attempts if retry else 1
     r = None
     for i in range(attempts):
@@ -459,7 +501,7 @@ def _ssh_run(cmd: list[str], retry: bool = True, max_attempts: int = 3,
             r = subprocess.run(
                 cmd,
                 capture_output=True, text=True,
-                stdin=subprocess.DEVNULL,
+                stdin=stdin_arg,
                 timeout=timeout,
             )
         except subprocess.TimeoutExpired as e:
@@ -993,6 +1035,18 @@ def _find_git_root(start: str) -> str | None:
 def _git_changed_files(repo_root: str, scope: str = "all") -> list[str]:
     """Return relative paths of changed files. scope: all|staged|modified|untracked."""
     out: set[str] = set()
+
+    def run_git(args: list[str]) -> subprocess.CompletedProcess:
+        try:
+            r = subprocess.run(args, capture_output=True, check=False)
+        except FileNotFoundError:
+            sys.exit("error: `git` not found in PATH.")
+        if r.returncode != 0:
+            stderr = r.stderr.decode("utf-8", "replace").strip()
+            detail = f": {stderr}" if stderr else ""
+            sys.exit(f"error: git command failed{detail}")
+        return r
+
     if scope in ("all", "modified", "untracked"):
         flags = []
         if scope in ("all", "modified"):
@@ -1000,23 +1054,15 @@ def _git_changed_files(repo_root: str, scope: str = "all") -> list[str]:
         if scope in ("all", "untracked"):
             flags += ["--others", "--exclude-standard"]
         if flags:
-            r = subprocess.run(
-                ["git", "-C", repo_root, "ls-files", "-z", *flags],
-                capture_output=True, check=False,
-            )
-            if r.returncode == 0:
-                for p in r.stdout.decode("utf-8", "replace").split("\x00"):
-                    if p:
-                        out.add(p)
-    if scope in ("all", "staged"):
-        r = subprocess.run(
-            ["git", "-C", repo_root, "diff", "--name-only", "--cached", "-z"],
-            capture_output=True, check=False,
-        )
-        if r.returncode == 0:
+            r = run_git(["git", "-C", repo_root, "ls-files", "-z", *flags])
             for p in r.stdout.decode("utf-8", "replace").split("\x00"):
                 if p:
                     out.add(p)
+    if scope in ("all", "staged"):
+        r = run_git(["git", "-C", repo_root, "diff", "--name-only", "--cached", "-z"])
+        for p in r.stdout.decode("utf-8", "replace").split("\x00"):
+            if p:
+                out.add(p)
     return sorted(out)
 
 
@@ -1090,15 +1136,13 @@ def _matches_any_exclude(path: str, patterns: list[str]) -> bool:
 def _normalize_for_tar(local_root: str, path: str) -> str | None:
     """Return path relative to local_root using forward slashes, or None if
     the input falls outside the root."""
-    abs_path = os.path.abspath(path)
-    abs_root = os.path.abspath(local_root)
+    abs_path = Path(path).resolve()
+    abs_root = Path(local_root).resolve()
     try:
-        rel = os.path.relpath(abs_path, abs_root)
+        rel = abs_path.relative_to(abs_root)
     except ValueError:
         return None
-    if rel.startswith("..") or os.path.isabs(rel):
-        return None
-    return rel.replace("\\", "/")
+    return rel.as_posix()
 
 
 def _tar_pipe_upload(profile: dict, local_root: str, files: list[str],
@@ -1121,11 +1165,14 @@ def _tar_pipe_upload(profile: dict, local_root: str, files: list[str],
             sys.exit("error: `ssh` not found in PATH.")
         if p1.stdout:
             p1.stdout.close()
-        rc = p2.wait()
-        p1.wait()
+        ssh_rc = p2.wait()
+        tar_rc = p1.wait()
     except FileNotFoundError as e:
         sys.exit(f"error: {e}")
-    return rc
+    if tar_rc != 0:
+        sys.stderr.write(f"srv: local tar failed with exit {tar_rc}\n")
+        return tar_rc
+    return ssh_rc
 
 
 def _parse_sync_opts(args: list[str]) -> dict:
@@ -1135,6 +1182,12 @@ def _parse_sync_opts(args: list[str]) -> dict:
         "files": [], "root": None, "dry_run": False,
     }
     positional: list[str] = []
+
+    def require_value(option: str, index: int) -> str:
+        if index + 1 >= len(args):
+            sys.exit(f"error: {option} requires a value.")
+        return args[index + 1]
+
     i = 0
     while i < len(args):
         a = args[i]
@@ -1161,7 +1214,7 @@ def _parse_sync_opts(args: list[str]) -> dict:
             continue
         if a == "--since":
             opts["mode"] = "mtime"
-            opts["since"] = args[i + 1]
+            opts["since"] = require_value(a, i)
             i += 2
             continue
         if a.startswith("--since="):
@@ -1171,7 +1224,7 @@ def _parse_sync_opts(args: list[str]) -> dict:
             continue
         if a == "--include":
             opts["mode"] = "glob"
-            opts["include"].append(args[i + 1])
+            opts["include"].append(require_value(a, i))
             i += 2
             continue
         if a.startswith("--include="):
@@ -1180,7 +1233,7 @@ def _parse_sync_opts(args: list[str]) -> dict:
             i += 1
             continue
         if a == "--exclude":
-            opts["exclude"].append(args[i + 1])
+            opts["exclude"].append(require_value(a, i))
             i += 2
             continue
         if a.startswith("--exclude="):
@@ -1189,11 +1242,11 @@ def _parse_sync_opts(args: list[str]) -> dict:
             continue
         if a == "--files":
             opts["mode"] = "list"
-            opts["files"].append(args[i + 1])
+            opts["files"].append(require_value(a, i))
             i += 2
             continue
         if a == "--root":
-            opts["root"] = args[i + 1]
+            opts["root"] = require_value(a, i)
             i += 2
             continue
         if a.startswith("--root="):

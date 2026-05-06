@@ -4,6 +4,28 @@
 
 ---
 
+## [0.7.4] — 2026-05-06
+
+### Fixed
+**Windows 上 `srv cd` / `srv ls` 等出现 "Read from remote host: Unknown error" / "getsockname failed: Not a socket" 的真凶** —— 不是 stdin、也不是远端,是 ControlMaster 多路复用在 Windows OpenSSH 9.5p2 + 某些远端组合下直接破:子 master 进程继承父 ssh 的 stdout 管道,父退后 master 还把管道占着,Python `communicate()` 读半关闭管道炸掉。直接在 PowerShell 里跑同样的 `ssh -o ControlMaster=auto ... root@host echo ok` 也会复现。
+
+修法:`_default_ssh_options` 在两种情形下强制 `ControlMaster=no` + `ControlPath=none`:
+- `capture=True`(stdio 是 PIPE)—— 一次性探测命令(cd / push / pull / MCP run / MCP probe)反正用不上 multiplex
+- `sys.platform == "win32"`(任何模式)—— Windows 上索性不开,等以后 Win32-OpenSSH 自己修了再说;Linux / macOS 上 `profile.multiplex` 仍然按用户设置生效
+
+代价:Windows 用户失去 multiplex 的握手加速。但稳定性 > 速度,且 Windows 用户可在 `profile.ssh_options` 里手工塞 ControlMaster 绕过(自担风险)。
+
+---
+
+## [0.7.3] — 2026-05-06
+
+### Fixed
+0.7.2 给 `_ssh_run` 一律加了 `stdin=subprocess.DEVNULL` 防止 MCP 模式下子 ssh 继承 JSON-RPC 管道。但**Windows OpenSSH 9.5p2 收到 NUL 设备作为 stdin 时会失败**,表现为 "Read from remote host: Unknown error" —— 这一下把 CLI 的 `srv cd` / `srv pwd`(走 capture 路径)搞挂了。
+
+修法:`stdin=DEVNULL` 改成**仅 MCP 模式启用**(那里才真有 JSON-RPC 管道需要隔离)。CLI 模式让 stdin 继承父终端,与 `srv check` 走的逻辑一致。
+
+---
+
 ## [0.7.2] — 2026-05-06
 
 ### Fixed
