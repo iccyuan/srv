@@ -91,7 +91,7 @@ RESERVED_SUBCOMMANDS = {
     "help", "--help", "-h", "version", "--version",
 }
 
-VERSION = "0.7.1"
+VERSION = "0.7.2"
 
 # Connect-time failure window (seconds): if ssh exits 255 within this window,
 # the failure is presumed to be the handshake (not the user command),
@@ -389,6 +389,12 @@ def build_ssh_cmd(profile: dict, remote_command: str, tty: bool = False,
         args += ["-i", os.path.expanduser(profile["identity_file"])]
     for opt in _default_ssh_options(profile):
         args += ["-o", opt]
+    if capture:
+        # Capture mode = non-interactive caller (MCP, internal probes, cd
+        # validation, detach spawn). BatchMode prevents ssh from hanging
+        # forever on a prompt (passphrase / host-key / fallback password)
+        # while reading from a parent stdin that can't satisfy it.
+        args += ["-o", "BatchMode=yes"]
     for opt in profile.get("ssh_options") or []:
         args += ["-o", opt]
     user = profile.get("user")
@@ -399,7 +405,7 @@ def build_ssh_cmd(profile: dict, remote_command: str, tty: bool = False,
 
 
 def build_scp_cmd(profile: dict, src: str, dst: str,
-                  recursive: bool = False) -> list[str]:
+                  recursive: bool = False, capture: bool = False) -> list[str]:
     args = ["scp"]
     if recursive:
         args.append("-r")
@@ -409,6 +415,8 @@ def build_scp_cmd(profile: dict, src: str, dst: str,
         args += ["-i", os.path.expanduser(profile["identity_file"])]
     for opt in _default_ssh_options(profile):
         args += ["-o", opt]
+    if capture:
+        args += ["-o", "BatchMode=yes"]
     for opt in profile.get("ssh_options") or []:
         args += ["-o", opt]
     args += [src, dst]
@@ -437,14 +445,29 @@ def _ssh_call(cmd: list[str], retry: bool = True, max_attempts: int = 3) -> int:
     return rc
 
 
-def _ssh_run(cmd: list[str], retry: bool = True,
-             max_attempts: int = 3) -> subprocess.CompletedProcess:
-    """Capture stdout/stderr. Same retry policy as _ssh_call."""
+def _ssh_run(cmd: list[str], retry: bool = True, max_attempts: int = 3,
+             timeout: float = 60.0) -> subprocess.CompletedProcess:
+    """Capture stdout/stderr. Closes child stdin (DEVNULL) so the spawned
+    ssh can't inherit a parent pipe (e.g., the MCP JSON-RPC stream) and
+    block forever on a prompt. Hard-caps wall time at `timeout` seconds;
+    on hit, returns a synthetic CompletedProcess with rc=124."""
     attempts = max_attempts if retry else 1
     r = None
     for i in range(attempts):
         t0 = time.monotonic()
-        r = subprocess.run(cmd, capture_output=True, text=True)
+        try:
+            r = subprocess.run(
+                cmd,
+                capture_output=True, text=True,
+                stdin=subprocess.DEVNULL,
+                timeout=timeout,
+            )
+        except subprocess.TimeoutExpired as e:
+            return subprocess.CompletedProcess(
+                args=cmd, returncode=124,
+                stdout=(e.stdout or ""),
+                stderr=(e.stderr or "") + f"\nsrv: timeout after {timeout:.0f}s",
+            )
         elapsed = time.monotonic() - t0
         if r.returncode != 255 or elapsed >= HANDSHAKE_FAILURE_WINDOW_S:
             return r
@@ -1957,7 +1980,7 @@ def _mcp_handle_tool(name: str, args: dict, cfg: dict) -> dict:
         remote_abs = resolve_remote_path(remote, cwd)
         recursive = bool(args.get("recursive")) or os.path.isdir(local)
         scp_cmd = build_scp_cmd(profile, local, remote_target(profile, remote_abs),
-                                recursive=recursive)
+                                recursive=recursive, capture=True)
         try:
             r = _ssh_run(scp_cmd)
         except FileNotFoundError:
@@ -1980,7 +2003,7 @@ def _mcp_handle_tool(name: str, args: dict, cfg: dict) -> dict:
         remote_abs = resolve_remote_path(remote, cwd)
         recursive = bool(args.get("recursive"))
         scp_cmd = build_scp_cmd(profile, remote_target(profile, remote_abs), local,
-                                recursive=recursive)
+                                recursive=recursive, capture=True)
         try:
             r = _ssh_run(scp_cmd)
         except FileNotFoundError:

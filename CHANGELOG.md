@@ -4,6 +4,22 @@
 
 ---
 
+## [0.7.2] — 2026-05-06
+
+### Fixed
+**MCP 工具调用 hang 死的根因**(用户反馈 `srv__cd` 长时间无响应):
+
+- `_ssh_run` 之前用 `subprocess.run(cmd, capture_output=True, text=True)` —— **没指定 stdin**,子 ssh 进程继承了父进程(MCP server)的 stdin,即 Claude Code 来的 JSON-RPC 管道。一旦 ssh 想 prompt 任何东西(passphrase、host-key 二次验证、密码 fallback)就读 stdin,读到 JSON-RPC 字节,一直试一直读,**永远不退出**。修法:`stdin=subprocess.DEVNULL`。
+- 同时给 `_ssh_run` 加 60s 硬超时,撞上就返回合成 `CompletedProcess(returncode=124)`,不再无限挂。
+- `build_ssh_cmd` / `build_scp_cmd` 在 `capture=True` 时自动追加 `-o BatchMode=yes`(capture 模式 = 非交互上下文,prompt 永远不应该出现;有的话快速失败远好过 hang)。MCP push / pull handler 显式传 `capture=True`。
+
+合并 0.7.1 的 4 处加固(UTF-8 stdio / BrokenPipe 兜底 / `_IN_MCP_MODE` 静默 stderr / readline 异常宽容),MCP server 现在应当不会再"很容易断"或"无响应"。
+
+### Note
+如果之前调试时把 `multiplex` 关了(`srv config set <prof> multiplex false`),建议改回:`srv config set <prof> multiplex true`。ControlMaster 让 ssh 复用一个已认证 socket,不每次重做握手,**根本上**避免 prompt 触发场景。
+
+---
+
 ## [0.7.1] — 2026-05-06
 
 ### Fixed
