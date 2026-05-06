@@ -72,9 +72,19 @@
 
 ### macOS / Linux
 
+把项目目录加到 PATH(推荐,改动最小):
+
 ```sh
-cp srv.py srv ~/.local/bin/
-chmod +x ~/.local/bin/srv
+echo 'export PATH="$PATH:/path/to/srv"' >> ~/.bashrc   # 或 ~/.zshrc
+chmod +x /path/to/srv/srv
+exec $SHELL && srv version
+```
+
+或者把 shim 软链到现有 PATH 目录(shim 已自动跟随符号链接):
+
+```sh
+chmod +x /path/to/srv/srv
+ln -s /path/to/srv/srv ~/.local/bin/srv
 srv version
 ```
 
@@ -366,21 +376,21 @@ Claude Code 通过 stdio MCP 拿到 14 个工具(run/cd/pwd/use/status/check/lis
 
 ```sh
 # 1) 个人全局(任何目录里都能用)
-claude mcp add srv --scope user -- python D:\WorkSpace\server\srv\srv.py mcp
+claude mcp add srv --scope user -- python D:\WorkSpace\server\srv\src\srv.py mcp
 
 # 2) 项目级共享(在 repo 根目录跑;生成 .mcp.json,可入 git)
 cd <your-project>
-claude mcp add srv --scope project -- python D:\WorkSpace\server\srv\srv.py mcp
+claude mcp add srv --scope project -- python D:\WorkSpace\server\srv\src\srv.py mcp
 
 # 3) 项目级私有(不写进 .mcp.json,只你能看到)
 cd <your-project>
-claude mcp add srv --scope local -- python D:\WorkSpace\server\srv\srv.py mcp
+claude mcp add srv --scope local -- python D:\WorkSpace\server\srv\src\srv.py mcp
 
 # 验证(任一 scope 之后都能跑)
 claude mcp list   # 应显示  srv: ✓ Connected
 ```
 
-> macOS / Linux 把命令里的路径换成 `/path/to/srv/srv.py`(或者直接用 `srv mcp` 如果 `srv` 已在 PATH)。
+> macOS / Linux 把命令里的路径换成 `/path/to/srv/src/srv.py`(或者直接用 `srv mcp` 如果 `srv` 已在 PATH)。
 
 新开 Claude Code 会话即生效;已运行的会话需要 `/mcp` 重连。
 
@@ -389,7 +399,7 @@ claude mcp list   # 应显示  srv: ✓ Connected
 ```toml
 [mcp_servers.srv]
 command = "python"
-args = ["D:\\WorkSpace\\server\\srv\\srv.py", "mcp"]
+args = ["D:\\WorkSpace\\server\\srv\\src\\srv.py", "mcp"]
 ```
 
 ---

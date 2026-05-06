@@ -72,9 +72,19 @@ Open a new PowerShell, then `srv version`.
 
 ### macOS / Linux
 
+Add the project directory to PATH (recommended; least intrusive):
+
 ```sh
-cp srv.py srv ~/.local/bin/
-chmod +x ~/.local/bin/srv
+echo 'export PATH="$PATH:/path/to/srv"' >> ~/.bashrc   # or ~/.zshrc
+chmod +x /path/to/srv/srv
+exec $SHELL && srv version
+```
+
+Or symlink the shim into an existing PATH directory (the shim follows symlinks):
+
+```sh
+chmod +x /path/to/srv/srv
+ln -s /path/to/srv/srv ~/.local/bin/srv
 srv version
 ```
 
@@ -367,21 +377,21 @@ Claude Code gets 14 tools via stdio MCP (`run`, `cd`, `pwd`, `use`, `status`, `c
 
 ```sh
 # 1) personal global (works in any directory)
-claude mcp add srv --scope user -- python D:\WorkSpace\server\srv\srv.py mcp
+claude mcp add srv --scope user -- python D:\WorkSpace\server\srv\src\srv.py mcp
 
 # 2) project-shared (run from repo root; writes .mcp.json, commit it)
 cd <your-project>
-claude mcp add srv --scope project -- python D:\WorkSpace\server\srv\srv.py mcp
+claude mcp add srv --scope project -- python D:\WorkSpace\server\srv\src\srv.py mcp
 
 # 3) project-private (not in .mcp.json, only you see it)
 cd <your-project>
-claude mcp add srv --scope local -- python D:\WorkSpace\server\srv\srv.py mcp
+claude mcp add srv --scope local -- python D:\WorkSpace\server\srv\src\srv.py mcp
 
 # verify (works for any scope)
 claude mcp list   # should show  srv: ✓ Connected
 ```
 
-> On macOS / Linux replace the path with `/path/to/srv/srv.py` — or just `srv mcp` if `srv` is on PATH.
+> On macOS / Linux replace the path with `/path/to/srv/src/srv.py` — or just `srv mcp` if `srv` is on PATH.
 
 New Claude Code sessions pick it up automatically; existing sessions need `/mcp` to reconnect.
 
@@ -390,7 +400,7 @@ New Claude Code sessions pick it up automatically; existing sessions need `/mcp`
 ```toml
 [mcp_servers.srv]
 command = "python"
-args = ["D:\\WorkSpace\\server\\srv\\srv.py", "mcp"]
+args = ["D:\\WorkSpace\\server\\srv\\src\\srv.py", "mcp"]
 ```
 
 ---

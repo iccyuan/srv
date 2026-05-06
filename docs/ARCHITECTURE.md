@@ -1,6 +1,6 @@
 # Architecture
 
-`srv` 是单文件 Python 工具,刻意避免引入第三方依赖。这份文档介绍代码结构和怎么扩展。用户向文档在 [README.md](./README.md)。
+`srv` 是单文件 Python 工具,刻意避免引入第三方依赖。这份文档介绍代码结构和怎么扩展。用户向文档在 [../README.md](../README.md)。
 
 ---
 
@@ -8,9 +8,10 @@
 
 ```
 srv/
-├── srv.py            所有逻辑(单文件,~1500 行)
-├── srv.cmd           Windows shim:找 python / py 后调 srv.py
-├── srv               POSIX bash shim:调 python3 srv.py
+├── src/
+│   └── srv.py        所有逻辑(单文件,~1500 行)
+├── srv.cmd           Windows shim:找 python / py 后调 src\srv.py
+├── srv               POSIX bash shim(symlink-safe):调 python3 src/srv.py
 ├── README.md         用户文档(中文)
 ├── README.en.md      用户文档(英文)
 ├── CHANGELOG.md      版本历史
