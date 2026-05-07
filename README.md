@@ -278,20 +278,51 @@ srv sessions clear    # 删当前 session 记录
 srv sessions prune    # GC:删所有 PID 已不存在的 session
 ```
 
-### shell 补全
+### shell 补全(tab 自动补全)
 
-```sh
-# bash
-srv completion bash > ~/.bash_completion.d/srv
+**PowerShell**(永久生效——加到 `$PROFILE`,新开 shell 即用):
 
-# zsh
-srv completion zsh > "${fpath[1]}/_srv"
+```powershell
+# 一次性写入,新开 PowerShell 自动加载
+"`n# srv tab completion`nsrv completion powershell | Out-String | Invoke-Expression" |
+    Add-Content $PROFILE
+```
 
-# PowerShell — 加到 $PROFILE:
+或者只在当前 session 临时启用:
+
+```powershell
 srv completion powershell | Out-String | Invoke-Expression
 ```
 
-覆盖:子命令、`config` 子动作、`-P` 后接 profile 名、`use` 后接 profile 名、`sessions` 子动作、`completion` 后接 shell 名。
+**bash**(写进 `~/.bashrc` 永久生效):
+
+```sh
+echo 'source <(srv completion bash)' >> ~/.bashrc
+```
+
+**zsh**(同 bash,写进 `~/.zshrc`):
+
+```sh
+echo 'source <(srv completion zsh)' >> ~/.zshrc
+```
+
+**覆盖范围**:
+
+| 你输入 | 补全结果 |
+|---|---|
+| `srv <TAB>` | 所有子命令(init/config/use/cd/pwd/status/check/run/...) |
+| `srv c<TAB>` | 前缀过滤(config/cd/check/completion) |
+| `srv config <TAB>` | list/use/remove/show/set |
+| `srv config use <TAB>` | 已配置 profile 名 |
+| `srv config remove <TAB>` | 已配置 profile 名 |
+| `srv config show <TAB>` | 已配置 profile 名 |
+| `srv use <TAB>` | profile 名 + `--clear` |
+| `srv -P <TAB>` | profile 名 |
+| `srv sessions <TAB>` | list/show/clear/prune |
+| `srv completion <TAB>` | bash/zsh/powershell |
+| `srv push <TAB>` | 本地文件 |
+
+PowerShell 的脚本会**烧入 srv.exe 的绝对路径**(因为 ArgumentCompleter 作用域里 PATH 不一定可见),所以从任何目录跑都能查 profile 名。
 
 ---
 

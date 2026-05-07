@@ -279,20 +279,49 @@ srv sessions clear    # drop current session record
 srv sessions prune    # GC: remove records whose pid no longer exists
 ```
 
-### Shell completion
+### Shell completion (tab completion)
 
-```sh
-# bash
-srv completion bash > ~/.bash_completion.d/srv
+**PowerShell** (persistent — added to `$PROFILE`, picked up by every new shell):
 
-# zsh
-srv completion zsh > "${fpath[1]}/_srv"
+```powershell
+# Append once; new PowerShell sessions load it automatically
+"`n# srv tab completion`nsrv completion powershell | Out-String | Invoke-Expression" |
+    Add-Content $PROFILE
+```
 
-# PowerShell — add to $PROFILE:
+Current-session only:
+
+```powershell
 srv completion powershell | Out-String | Invoke-Expression
 ```
 
-Covers: subcommands, `config` actions, profile names after `-P` and `use`, `sessions` actions, shell names after `completion`.
+**bash** (persistent via `~/.bashrc`):
+
+```sh
+echo 'source <(srv completion bash)' >> ~/.bashrc
+```
+
+**zsh** (same idea, `~/.zshrc`):
+
+```sh
+echo 'source <(srv completion zsh)' >> ~/.zshrc
+```
+
+**What it completes**:
+
+| Input | Completion |
+|---|---|
+| `srv <TAB>` | all subcommands |
+| `srv c<TAB>` | prefix-filtered (config/cd/check/completion) |
+| `srv config <TAB>` | list/use/remove/show/set |
+| `srv config use\|remove\|show <TAB>` | configured profile names |
+| `srv use <TAB>` | profile names + `--clear` |
+| `srv -P <TAB>` | profile names |
+| `srv sessions <TAB>` | list/show/clear/prune |
+| `srv completion <TAB>` | bash/zsh/powershell |
+| `srv push <TAB>` | local files |
+
+The PowerShell script bakes in `srv.exe`'s absolute path (since the ArgumentCompleter scope doesn't always inherit PATH), so profile-name lookup works from any directory.
 
 ---
 

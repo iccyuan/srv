@@ -23,6 +23,20 @@ Python 版本最后一次有意义的迭代是 0.7.5(MCP 加固 + ControlMaster 
 
 ---
 
+## [Go 2.0.2] — 2026-05-07
+
+### Fixed
+- **PowerShell tab 补全**实际上不工作,踩了三个坑全修了:
+  1. **单元素管道收缩成标量** —— `Where-Object` 过滤后只剩一个 token 时,PowerShell 会把数组拆掉,后续 `foreach` 按字符迭代。`@(...)` 强制装箱。
+  2. **profile 名拼接 `--clear` 变字符串相加** —— `(@profiles + '--clear')` 同样的问题,需要 `@(@profiles) + '--clear'`。
+  3. **ArgumentCompleter 作用域 PATH 不可见** —— 完成器内 `& srv _profiles` 找不到 srv 命令。修法:`srv completion powershell` 输出时**烧入 srv.exe 的绝对路径**(`os.Executable()`)。bash/zsh 不受影响(用户能跑 `srv completion bash` 就说明 srv 在 PATH 上)。
+- 同时补齐:`srv config use|remove|show <TAB>` 现在也补 profile 名(原先只补 list/use/remove/show/set);`srv push <TAB>` 补本地文件。
+
+### Notes
+README 加了 PowerShell `$PROFILE` 的永久安装一行命令,以及详细的"什么场景补什么"对照表。
+
+---
+
 ## [Go 2.0.1] — 2026-05-07
 
 ### Changed
