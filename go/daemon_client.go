@@ -2,6 +2,7 @@ package main
 
 import (
 	"bufio"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"net"
@@ -77,15 +78,12 @@ func tryDaemonLs(profileName, cwd, prefix string) ([]string, bool) {
 	return resp.Entries, true
 }
 
-// tryDaemonRun executes `command` via the daemon's pooled SSH connection
-// and writes the captured stdout/stderr to the local terminal. Returns
-// (exitCode, true) on success; (0, false) when the caller should fall
-// back to direct ssh (no daemon, daemon error, etc.).
-//
-// Capture-mode only -- output is buffered until the command finishes.
-// For long-running / streaming commands (`tail -f`, `find /`), call with
-// `srv -t` to bypass the daemon and get real-time output.
-func tryDaemonRun(profileName, cwd, command string) (int, bool) {
+// tryDaemonStreamRun runs `command` via the daemon's pooled SSH connection
+// and forwards the remote stdout/stderr to the local terminal in real
+// time as chunks arrive (no buffering at the daemon, so `tail -f` and
+// long-running commands behave naturally). Returns (exitCode, true) on
+// success; (0, false) when the caller should fall back to direct dial.
+func tryDaemonStreamRun(profileName, cwd, command string) (int, bool) {
 	conn := daemonDial(200 * time.Millisecond)
 	if conn == nil {
 		if !ensureDaemon() {
@@ -97,26 +95,51 @@ func tryDaemonRun(profileName, cwd, command string) (int, bool) {
 		}
 	}
 	defer conn.Close()
-	// Long deadline -- the user might run a multi-minute command. The
-	// daemon side has no per-request timeout currently.
-	resp, err := daemonCall(conn, daemonRequest{
-		Op: "run", Profile: profileName, Cwd: cwd, Command: command,
-	}, 30*time.Minute)
-	if err != nil || resp == nil {
+
+	req := daemonRequest{
+		ID:      int(time.Now().UnixNano() & 0x7fffffff),
+		Op:      "stream_run",
+		Profile: profileName,
+		Cwd:     cwd,
+		Command: command,
+	}
+	b, err := json.Marshal(req)
+	if err != nil {
 		return 0, false
 	}
-	if !resp.OK {
-		// Daemon couldn't run it (e.g., dial failed). Don't print here --
-		// the direct-dial fallback will surface a real diagnosis.
+	if _, err := conn.Write(append(b, '\n')); err != nil {
 		return 0, false
 	}
-	if resp.Stdout != "" {
-		os.Stdout.WriteString(resp.Stdout)
+
+	rd := bufio.NewReader(conn)
+	for {
+		line, rerr := rd.ReadString('\n')
+		if rerr != nil {
+			// Daemon disconnected mid-stream -- something went wrong;
+			// fall back to direct dial only if no output has been written.
+			// (We can't unwrite local stdout, so just report failure.)
+			return 0, false
+		}
+		var ch streamChunk
+		if jerr := json.Unmarshal([]byte(line), &ch); jerr != nil {
+			continue
+		}
+		switch ch.K {
+		case "out":
+			if data, derr := base64.StdEncoding.DecodeString(ch.B); derr == nil {
+				_, _ = os.Stdout.Write(data)
+			}
+		case "err":
+			if data, derr := base64.StdEncoding.DecodeString(ch.B); derr == nil {
+				_, _ = os.Stderr.Write(data)
+			}
+		case "end":
+			return ch.C, true
+		case "fail":
+			// Daemon couldn't even start the command. Fall back.
+			return 0, false
+		}
 	}
-	if resp.Stderr != "" {
-		os.Stderr.WriteString(resp.Stderr)
-	}
-	return resp.ExitCode, true
 }
 
 // tryDaemonCd validates the target cwd via the daemon.

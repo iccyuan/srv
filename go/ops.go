@@ -16,12 +16,12 @@ import (
 // stdio), and closes. Returns remote exit code.
 //
 // Non-TTY runs go through the daemon when one is available -- the daemon's
-// pooled SSH connection saves the ~2.7s handshake. The daemon returns
-// stdout/stderr as one captured payload; for streaming output (long
-// `find`, `tail -f`) use `srv -t <cmd>` which forces a direct PTY session.
+// pooled SSH connection saves the ~2.7s handshake. The daemon streams
+// stdout/stderr as base64 chunks (stream_run op) so commands like
+// `tail -f` and `find /` produce real-time output, not buffered.
 func runRemoteStream(profile *Profile, cwd, cmd string, tty bool) int {
 	if !tty {
-		if rc, ok := tryDaemonRun(profile.Name, cwd, cmd); ok {
+		if rc, ok := tryDaemonStreamRun(profile.Name, cwd, cmd); ok {
 			return rc
 		}
 	}

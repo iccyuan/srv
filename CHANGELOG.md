@@ -23,6 +23,46 @@ Python 版本最后一次有意义的迭代是 0.7.5(MCP 加固 + ControlMaster 
 
 ---
 
+## [Go 2.4.0] — 2026-05-07
+
+### Added
+**daemon 协议加流式输出**(`stream_run` op),解决 v2.3.0 留下的"`tail -f` 走 daemon 会被 buffer 到命令结束才出现"的问题。
+
+**协议**:CLI 发 `{"op":"stream_run",...}`,daemon 每收到 4 KB stdout/stderr 就发一帧:
+
+```json
+{"id":1,"k":"out","b":"<base64>"}      // stdout 块
+{"id":1,"k":"err","b":"<base64>"}      // stderr 块
+{"id":1,"k":"end","c":0}               // 命令退出码
+{"id":1,"k":"fail","err":"reason"}     // 启动前失败(dial / 没 profile)
+```
+
+CLI 边收边解码写本地终端,无 buffer。
+
+### Implementation notes
+- `handleConn` 在写 `wr` 上加了 `wrMu`(stdout / stderr 两条转发 goroutine 并发写),非流式响应路径也用同一把锁。
+- 转发 goroutine 写失败(client 断了,典型是用户 Ctrl+C)→ `sess.Close()`,远端命令收 SIGHUP,**不漏进程**。
+- `tryDaemonRun` 移除,`tryDaemonStreamRun` 取代。`runRemoteStream(tty=false)` 走流式 daemon。
+- 输出帧大小 4 KB(`bytes.Buffer` 默认),适配 ssh.Session 的 channel 流控,无需调参。
+- base64 编码代价 ~33% 字节膨胀;over unix-socket 在本机,可忽略。
+
+### Verified
+
+```
+$ srv 'for i in 1 2 3; do echo "remote:$(date +%T.%N) line $i"; sleep 1; done'
+local-recv: 19:29:46.356 | remote:11:29:46.243663125 line 1
+local-recv: 19:29:47.358 | remote:11:29:47.246116125 line 2
+local-recv: 19:29:48.359 | remote:11:29:48.248527427 line 3
+```
+
+每行本地接收时间和远端 echo 时间一一对应,差 1 秒——证实是边写边收,不是 buffer 到末尾。
+
+### Edge cases
+- **stdin 转发暂未实现**:管道喂入(`cat foo | srv "wc -l"`)走 daemon 会丢掉本地 stdin。当前 `runRemoteStream` 只在 tty=false 时走 daemon;再加一条"stdin 是 TTY 时才走 daemon"判据可以更稳——但 `runRemoteStream` 调用方还没这个上下文。后续如果用户报问题再补。
+- **Ctrl+C 干净退出**:CLI 进程退,unix socket close,daemon 转发 goroutine 写失败 → 关 ssh session → 远端进程收 SIGHUP。已经处理。
+
+---
+
 ## [Go 2.3.0] — 2026-05-07
 
 ### Added

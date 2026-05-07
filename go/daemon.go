@@ -2,8 +2,11 @@ package main
 
 import (
 	"bufio"
+	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
 	"net"
 	"os"
 	"os/signal"
@@ -12,6 +15,8 @@ import (
 	"sync"
 	"syscall"
 	"time"
+
+	"golang.org/x/crypto/ssh"
 )
 
 // Daemon protocol -- one JSON line per request, one JSON line per response.
@@ -55,6 +60,20 @@ type daemonResponse struct {
 	ExitCode int      `json:"exit_code,omitempty"`
 	Profiles []string `json:"profiles_pooled,omitempty"`
 	Uptime   int64    `json:"uptime_sec,omitempty"`
+}
+
+// streamChunk is one frame of the stream_run multi-line response.
+//
+//	K = "out"  -> stdout chunk; B is base64-encoded bytes
+//	K = "err"  -> stderr chunk; B is base64-encoded bytes
+//	K = "end"  -> command completed; C is exit code
+//	K = "fail" -> pre-execution failure (e.g. dial); Err carries reason
+type streamChunk struct {
+	ID  int    `json:"id,omitempty"`
+	K   string `json:"k"`
+	B   string `json:"b,omitempty"`
+	C   int    `json:"c,omitempty"`
+	Err string `json:"err,omitempty"`
 }
 
 type pooledClient struct {
@@ -169,6 +188,9 @@ func (s *daemonState) handleConn(conn net.Conn) {
 	defer conn.Close()
 	rd := bufio.NewReader(conn)
 	wr := bufio.NewWriter(conn)
+	// Multiple goroutines (stdout/stderr forwarders during stream_run) can
+	// write to wr concurrently; serialize.
+	var wrMu sync.Mutex
 	for {
 		line, err := rd.ReadString('\n')
 		if err != nil {
@@ -180,15 +202,23 @@ func (s *daemonState) handleConn(conn net.Conn) {
 		}
 		var req daemonRequest
 		if jerr := json.Unmarshal([]byte(line), &req); jerr != nil {
+			wrMu.Lock()
 			s.write(wr, daemonResponse{OK: false, Err: "parse: " + jerr.Error()})
+			wrMu.Unlock()
 			continue
 		}
 		s.mu.Lock()
 		s.lastReq = time.Now()
 		s.mu.Unlock()
+		if req.Op == "stream_run" {
+			s.handleStreamRun(req, wr, &wrMu)
+			continue
+		}
 		resp := s.dispatch(req)
 		resp.ID = req.ID
+		wrMu.Lock()
 		s.write(wr, resp)
+		wrMu.Unlock()
 		if req.Op == "shutdown" {
 			s.requestStop()
 			return
@@ -459,6 +489,102 @@ func (s *daemonState) handlePwd(req daemonRequest) daemonResponse {
 		cwd = "~"
 	}
 	return daemonResponse{OK: true, Cwd: cwd}
+}
+
+// handleStreamRun runs `req.Command` on the remote and forwards stdout
+// and stderr back to the client as base64-encoded chunks, line by line.
+// Final frame {"k":"end","c":<exit>}. If the daemon's writer fails (the
+// CLI disconnected, e.g. user hit Ctrl+C), the ssh session is closed so
+// the remote process gets a SIGHUP and we don't leak it.
+func (s *daemonState) handleStreamRun(req daemonRequest, wr *bufio.Writer, wrMu *sync.Mutex) {
+	emit := func(ch streamChunk) error {
+		ch.ID = req.ID
+		b, _ := json.Marshal(ch)
+		wrMu.Lock()
+		defer wrMu.Unlock()
+		if _, err := wr.Write(b); err != nil {
+			return err
+		}
+		if err := wr.WriteByte('\n'); err != nil {
+			return err
+		}
+		return wr.Flush()
+	}
+	fail := func(why string) {
+		_ = emit(streamChunk{K: "fail", Err: why})
+	}
+
+	c, _, err := s.getClient(req.Profile)
+	if err != nil {
+		fail(err.Error())
+		return
+	}
+	sess, err := c.Conn.NewSession()
+	if err != nil {
+		fail("new session: " + err.Error())
+		return
+	}
+	defer sess.Close()
+
+	stdout, err := sess.StdoutPipe()
+	if err != nil {
+		fail("stdout pipe: " + err.Error())
+		return
+	}
+	stderr, err := sess.StderrPipe()
+	if err != nil {
+		fail("stderr pipe: " + err.Error())
+		return
+	}
+
+	full := req.Command
+	if cwd := req.Cwd; cwd != "" {
+		full = fmt.Sprintf("cd %s && (%s)", shQuotePath(cwd), req.Command)
+	}
+	if err := sess.Start(full); err != nil {
+		fail("start: " + err.Error())
+		return
+	}
+
+	var wg sync.WaitGroup
+	forward := func(src io.Reader, kind string) {
+		defer wg.Done()
+		buf := make([]byte, 4096)
+		for {
+			n, rerr := src.Read(buf)
+			if n > 0 {
+				ch := streamChunk{
+					K: kind,
+					B: base64.StdEncoding.EncodeToString(buf[:n]),
+				}
+				if werr := emit(ch); werr != nil {
+					// Client gone -- kill the remote command.
+					_ = sess.Close()
+					return
+				}
+			}
+			if rerr != nil {
+				return
+			}
+		}
+	}
+	wg.Add(2)
+	go forward(stdout, "out")
+	go forward(stderr, "err")
+
+	waitErr := sess.Wait()
+	wg.Wait()
+
+	exit := 0
+	if waitErr != nil {
+		var ee *ssh.ExitError
+		if errors.As(waitErr, &ee) {
+			exit = ee.ExitStatus()
+		} else {
+			exit = -1
+		}
+	}
+	_ = emit(streamChunk{K: "end", C: exit})
 }
 
 func (s *daemonState) handleRun(req daemonRequest) daemonResponse {
