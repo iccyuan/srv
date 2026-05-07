@@ -35,7 +35,7 @@ File transfer (uses SFTP via the same SSH session):
 
 Bulk sync of changed files (tar | ssh tar; preserves relative paths):
   srv sync                       in a git repo: modified+staged+untracked
-  srv sync --staged              only `+"`"+`git add`+"`"+`-ed files
+  srv sync --staged              only ` + "`" + `git add` + "`" + `-ed files
   srv sync --since 2h            files mtime'd within 2 hours
   srv sync --include "src/**/*.go"   glob mode (repeatable)
   srv sync --files a.go b/c.go   explicit list
@@ -129,12 +129,12 @@ func main() {
 
 func run(args []string) int {
 	if len(args) == 0 {
-		fmt.Println(helpText)
+		fmt.Print(helpText)
 		return 0
 	}
 	opts, rest := parseGlobalFlags(args)
 	if len(rest) == 0 {
-		fmt.Println(helpText)
+		fmt.Print(helpText)
 		return 0
 	}
 
@@ -143,7 +143,7 @@ func run(args []string) int {
 	// Help / version are pure local, no config needed.
 	switch sub {
 	case "help", "--help", "-h":
-		fmt.Println(helpText)
+		fmt.Print(helpText)
 		return 0
 	case "version", "--version":
 		fmt.Printf("srv %s\n", Version)

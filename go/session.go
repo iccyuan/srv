@@ -31,7 +31,9 @@ func loadSessionsFile() *sessionsFile {
 	if err != nil {
 		return s
 	}
-	_ = json.Unmarshal(data, s)
+	if err := json.Unmarshal(data, s); err != nil {
+		fatal("error: %s is not valid JSON: %v", SessionsFile(), err)
+	}
 	if s.Sessions == nil {
 		s.Sessions = map[string]*SessionRecord{}
 	}
@@ -39,14 +41,7 @@ func loadSessionsFile() *sessionsFile {
 }
 
 func writeSessionsFile(s *sessionsFile) error {
-	if err := os.MkdirAll(ConfigDir(), 0o755); err != nil {
-		return err
-	}
-	b, err := json.MarshalIndent(s, "", "  ")
-	if err != nil {
-		return err
-	}
-	return os.WriteFile(SessionsFile(), b, 0o600)
+	return writeJSONFile(SessionsFile(), s)
 }
 
 // _INTERMEDIATE_EXES (Windows): exes that are transparent layers between the

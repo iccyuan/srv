@@ -28,7 +28,9 @@ func loadJobsFile() *jobsFile {
 	if err != nil {
 		return j
 	}
-	_ = json.Unmarshal(data, j)
+	if err := json.Unmarshal(data, j); err != nil {
+		fatal("error: %s is not valid JSON: %v", JobsFile(), err)
+	}
 	if j.Jobs == nil {
 		j.Jobs = []*JobRecord{}
 	}
@@ -36,14 +38,7 @@ func loadJobsFile() *jobsFile {
 }
 
 func saveJobsFile(j *jobsFile) error {
-	if err := os.MkdirAll(ConfigDir(), 0o755); err != nil {
-		return err
-	}
-	b, err := json.MarshalIndent(j, "", "  ")
-	if err != nil {
-		return err
-	}
-	return os.WriteFile(JobsFile(), b, 0o600)
+	return writeJSONFile(JobsFile(), j)
 }
 
 func findJob(j *jobsFile, idOrPrefix string) *JobRecord {

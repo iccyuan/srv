@@ -35,6 +35,12 @@ type syncOpts struct {
 func parseSyncOpts(args []string) *syncOpts {
 	o := &syncOpts{gitScope: "all"}
 	positional := []string{}
+	requireValue := func(option string, index int) string {
+		if index+1 >= len(args) {
+			fatal("error: %s requires a value.", option)
+		}
+		return args[index+1]
+	}
 	i := 0
 	for i < len(args) {
 		a := args[i]
@@ -68,7 +74,7 @@ func parseSyncOpts(args []string) *syncOpts {
 			continue
 		case a == "--since":
 			o.mode = "mtime"
-			o.since = args[i+1]
+			o.since = requireValue(a, i)
 			i += 2
 			continue
 		case strings.HasPrefix(a, "--since="):
@@ -78,7 +84,7 @@ func parseSyncOpts(args []string) *syncOpts {
 			continue
 		case a == "--include":
 			o.mode = "glob"
-			o.include = append(o.include, args[i+1])
+			o.include = append(o.include, requireValue(a, i))
 			i += 2
 			continue
 		case strings.HasPrefix(a, "--include="):
@@ -87,7 +93,7 @@ func parseSyncOpts(args []string) *syncOpts {
 			i++
 			continue
 		case a == "--exclude":
-			o.exclude = append(o.exclude, args[i+1])
+			o.exclude = append(o.exclude, requireValue(a, i))
 			i += 2
 			continue
 		case strings.HasPrefix(a, "--exclude="):
@@ -96,11 +102,11 @@ func parseSyncOpts(args []string) *syncOpts {
 			continue
 		case a == "--files":
 			o.mode = "list"
-			o.files = append(o.files, args[i+1])
+			o.files = append(o.files, requireValue(a, i))
 			i += 2
 			continue
 		case a == "--root":
-			o.root = args[i+1]
+			o.root = requireValue(a, i)
 			i += 2
 			continue
 		case strings.HasPrefix(a, "--root="):
@@ -146,8 +152,20 @@ func findGitRoot(start string) string {
 }
 
 // gitChangedFiles runs `git ls-files`/`git diff` and returns relative paths.
-func gitChangedFiles(repoRoot, scope string) []string {
+func gitChangedFiles(repoRoot, scope string) ([]string, error) {
 	out := map[string]struct{}{}
+	runGit := func(args ...string) ([]byte, error) {
+		cmd := exec.Command("git", args...)
+		b, err := cmd.CombinedOutput()
+		if err != nil {
+			detail := strings.TrimSpace(string(b))
+			if detail == "" {
+				detail = err.Error()
+			}
+			return nil, fmt.Errorf("git command failed: %s", detail)
+		}
+		return b, nil
+	}
 	if scope == "all" || scope == "modified" || scope == "untracked" {
 		flags := []string{"-C", repoRoot, "ls-files", "-z"}
 		if scope == "all" || scope == "modified" {
@@ -156,25 +174,24 @@ func gitChangedFiles(repoRoot, scope string) []string {
 		if scope == "all" || scope == "untracked" {
 			flags = append(flags, "--others", "--exclude-standard")
 		}
-		// The flags slice already starts with "-C". `ls-files` is at index 2.
-		cmd := exec.Command("git", flags...)
-		b, err := cmd.Output()
-		if err == nil {
-			for _, p := range strings.Split(string(b), "\x00") {
-				if p != "" {
-					out[p] = struct{}{}
-				}
+		b, err := runGit(flags...)
+		if err != nil {
+			return nil, err
+		}
+		for _, p := range strings.Split(string(b), "\x00") {
+			if p != "" {
+				out[p] = struct{}{}
 			}
 		}
 	}
 	if scope == "all" || scope == "staged" {
-		cmd := exec.Command("git", "-C", repoRoot, "diff", "--name-only", "--cached", "-z")
-		b, err := cmd.Output()
-		if err == nil {
-			for _, p := range strings.Split(string(b), "\x00") {
-				if p != "" {
-					out[p] = struct{}{}
-				}
+		b, err := runGit("-C", repoRoot, "diff", "--name-only", "--cached", "-z")
+		if err != nil {
+			return nil, err
+		}
+		for _, p := range strings.Split(string(b), "\x00") {
+			if p != "" {
+				out[p] = struct{}{}
 			}
 		}
 	}
@@ -183,7 +200,7 @@ func gitChangedFiles(repoRoot, scope string) []string {
 		files = append(files, k)
 	}
 	sort.Strings(files)
-	return files
+	return files, nil
 }
 
 // parseDuration parses '2h', '30m', '1d', '90s' (or bare digits = seconds).
@@ -386,7 +403,7 @@ func normalizeForTar(root, p string) string {
 	if err != nil {
 		return ""
 	}
-	if strings.HasPrefix(rel, "..") || filepath.IsAbs(rel) {
+	if rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) || filepath.IsAbs(rel) {
 		return ""
 	}
 	return filepath.ToSlash(rel)
@@ -396,7 +413,11 @@ func collectSyncFiles(o *syncOpts, localRoot string, allExcludes []string) ([]st
 	var files []string
 	switch o.mode {
 	case "git":
-		files = gitChangedFiles(localRoot, o.gitScope)
+		var err error
+		files, err = gitChangedFiles(localRoot, o.gitScope)
+		if err != nil {
+			return nil, err
+		}
 	case "mtime":
 		var err error
 		files, err = mtimeChangedFiles(localRoot, o.since, allExcludes)

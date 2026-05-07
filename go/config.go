@@ -30,20 +30,20 @@ func JobsFile() string     { return filepath.Join(ConfigDir(), "jobs.json") }
 //     accessor methods)
 //   - Most ints/strings have sensible zero defaults applied at use time
 type Profile struct {
-	Host          string   `json:"host"`
-	User          string   `json:"user,omitempty"`
-	Port          int      `json:"port,omitempty"`
-	IdentityFile  string   `json:"identity_file,omitempty"`
-	DefaultCwd    string   `json:"default_cwd,omitempty"`
-	Multiplex     *bool    `json:"multiplex,omitempty"`
-	Compression   *bool    `json:"compression,omitempty"`
-	ConnectTimeout    int  `json:"connect_timeout,omitempty"`
-	KeepaliveInterval int  `json:"keepalive_interval,omitempty"`
-	KeepaliveCount    int  `json:"keepalive_count,omitempty"`
-	ControlPersist    string `json:"control_persist,omitempty"`
-	SyncRoot      string   `json:"sync_root,omitempty"`
-	SyncExclude   []string `json:"sync_exclude,omitempty"`
-	SshOptions    []string `json:"ssh_options,omitempty"`
+	Host              string   `json:"host"`
+	User              string   `json:"user,omitempty"`
+	Port              int      `json:"port,omitempty"`
+	IdentityFile      string   `json:"identity_file,omitempty"`
+	DefaultCwd        string   `json:"default_cwd,omitempty"`
+	Multiplex         *bool    `json:"multiplex,omitempty"`
+	Compression       *bool    `json:"compression,omitempty"`
+	ConnectTimeout    int      `json:"connect_timeout,omitempty"`
+	KeepaliveInterval int      `json:"keepalive_interval,omitempty"`
+	KeepaliveCount    int      `json:"keepalive_count,omitempty"`
+	ControlPersist    string   `json:"control_persist,omitempty"`
+	SyncRoot          string   `json:"sync_root,omitempty"`
+	SyncExclude       []string `json:"sync_exclude,omitempty"`
+	SshOptions        []string `json:"ssh_options,omitempty"`
 	// Free-form bag for unknown keys forwarded from older Python configs.
 	Extra map[string]any `json:"-"`
 }
@@ -120,14 +120,32 @@ func LoadConfig() (*Config, error) {
 }
 
 func SaveConfig(cfg *Config) error {
-	if err := os.MkdirAll(ConfigDir(), 0o755); err != nil {
+	return writeJSONFile(ConfigFile(), cfg)
+}
+
+func writeJSONFile(path string, v any) error {
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return err
 	}
-	b, err := json.MarshalIndent(cfg, "", "  ")
+	b, err := json.MarshalIndent(v, "", "  ")
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(ConfigFile(), b, 0o600)
+	tmp := filepath.Join(
+		filepath.Dir(path),
+		fmt.Sprintf(".%s.%d.%s.tmp", filepath.Base(path), os.Getpid(), randHex4()),
+	)
+	if err := os.WriteFile(tmp, b, 0o600); err != nil {
+		return err
+	}
+	if err := os.Rename(tmp, path); err != nil {
+		_ = os.Remove(path)
+		if err2 := os.Rename(tmp, path); err2 != nil {
+			_ = os.Remove(tmp)
+			return err2
+		}
+	}
+	return nil
 }
 
 // ResolveProfile picks the active profile by precedence:
