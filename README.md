@@ -540,6 +540,16 @@ MCP 服务器在 Claude Code 会话启动时加载。**新开 Claude Code 会话
 
 当前 **Go 2.4.x**(`srv version` 输出)。版本号在破坏性变更时增加;Python 实现停在 0.7.5 后不再更新。完整变更记录见 [CHANGELOG.md](./CHANGELOG.md)。
 
+## 开发(给贡献者)
+
+仓库自带一个 pre-commit hook(`.githooks/pre-commit`),提交前跑 `gofmt -l` + `go vet`,不干净就拒掉(可用 `--no-verify` 应急绕过)。clone 后**一次性激活**:
+
+```sh
+git config core.hooksPath .githooks
+```
+
+之后每次 `git commit` 自动校验 Go 文件。只有当本次提交动了 `go/*.go` 时才走检查,改 docs 不会被拖慢。
+
 ## 发版(给维护者)
 
 发布走 GitHub Actions + goreleaser:推一个 `vX.Y.Z` tag 就自动产 5 平台二进制 + 校验和 + GitHub Release。

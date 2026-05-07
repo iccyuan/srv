@@ -539,6 +539,16 @@ The MCP server is loaded at session startup. Open a **new** Claude Code session,
 
 Currently **Go 2.4.x** (what `srv version` prints). Version bumps on breaking changes; the Python implementation is frozen at 0.7.5 and won't receive further updates. Full history in [CHANGELOG.md](./CHANGELOG.md).
 
+## Development (contributors)
+
+The repo ships a pre-commit hook at `.githooks/pre-commit` that runs `gofmt -l` + `go vet` and rejects unformatted / unsafe code (bypass with `--no-verify` when you really mean it). Activate **once after cloning**:
+
+```sh
+git config core.hooksPath .githooks
+```
+
+Each `git commit` then runs the checks automatically. The hook only fires when `go/*.go` files are staged, so doc-only commits stay fast.
+
 ## Releasing (maintainers)
 
 Releases are driven by GitHub Actions + goreleaser. Push a `vX.Y.Z` tag and binaries for 5 OS/arch combos plus checksums get published as a GitHub Release.

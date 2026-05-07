@@ -1,0 +1,43 @@
+#!/usr/bin/env bash
+# pre-commit: reject commits that fail gofmt / vet on the Go module.
+#
+# Activation (once after clone):
+#   git config core.hooksPath .githooks
+#
+# Skip with: git commit --no-verify  (use only when you mean it)
+
+set -e
+
+# Only enforce when go/ files are actually staged. Pure-doc commits
+# shouldn't pay the gofmt round-trip.
+if ! git diff --cached --name-only | grep -q '^go/.*\.go$'; then
+    exit 0
+fi
+
+if ! command -v gofmt >/dev/null 2>&1; then
+    echo "pre-commit: gofmt not in PATH; skipping (install Go to enable)." >&2
+    exit 0
+fi
+
+cd go || exit 0
+
+# gofmt -l prints any file that's not canonically formatted.
+unformatted=$(gofmt -l .)
+if [ -n "$unformatted" ]; then
+    echo "pre-commit: gofmt rejected the following files:" >&2
+    echo "$unformatted" | sed 's/^/  /' >&2
+    echo
+    echo "Fix with:  cd go && go fmt ./..." >&2
+    exit 1
+fi
+
+# go vet on the whole package. Catches things gofmt doesn't (unused
+# imports, struct-tag typos, printf format mismatch, etc.).
+if command -v go >/dev/null 2>&1; then
+    if ! go vet ./... >/dev/null; then
+        echo "pre-commit: go vet found issues. Fix them or commit with --no-verify." >&2
+        exit 1
+    fi
+fi
+
+exit 0
