@@ -30,6 +30,7 @@ type syncOpts struct {
 	files      []string
 	root       string
 	dryRun     bool
+	watch      bool
 }
 
 func parseSyncOpts(args []string) *syncOpts {
@@ -115,6 +116,10 @@ func parseSyncOpts(args []string) *syncOpts {
 			continue
 		case a == "--dry-run":
 			o.dryRun = true
+			i++
+			continue
+		case a == "--watch":
+			o.watch = true
 			i++
 			continue
 		case strings.HasPrefix(a, "-"):
@@ -622,7 +627,11 @@ func cmdSync(args []string, cfg *Config, profileOverride string) int {
 	}
 	rc, err := tarUploadStream(profile, localRoot, files, remoteRoot)
 	if err != nil {
-		fmt.Fprintln(os.Stderr, err)
+		printDiagError(err, profile)
+	}
+	if o.watch {
+		fmt.Fprintln(os.Stderr)
+		return runSyncWatch(o, profile, localRoot, remoteRoot, allExcludes)
 	}
 	return rc
 }

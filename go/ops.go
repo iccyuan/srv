@@ -17,13 +17,13 @@ import (
 func runRemoteStream(profile *Profile, cwd, cmd string, tty bool) int {
 	c, err := Dial(profile)
 	if err != nil {
-		fmt.Fprintln(os.Stderr, err)
+		printDiagError(err, profile)
 		return 255
 	}
 	defer c.Close()
 	rc, err := c.RunInteractive(cmd, cwd, tty)
 	if err != nil {
-		fmt.Fprintln(os.Stderr, err)
+		printDiagError(err, profile)
 		if rc == 0 {
 			return 255
 		}

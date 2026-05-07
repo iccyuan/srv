@@ -44,8 +44,16 @@ type Profile struct {
 	SyncRoot          string   `json:"sync_root,omitempty"`
 	SyncExclude       []string `json:"sync_exclude,omitempty"`
 	SshOptions        []string `json:"ssh_options,omitempty"`
+	// Jump (ProxyJump) -- one or more bastion hops dialed in order before
+	// the final target. Each entry: "[user@]host[:port]". Auth uses the
+	// same agent + identity_file + default key chain as the profile.
+	Jump              []string `json:"jump,omitempty"`
 	// Free-form bag for unknown keys forwarded from older Python configs.
 	Extra map[string]any `json:"-"`
+	// Name is the profile's lookup key in Config.Profiles. Populated by
+	// ResolveProfile so deeper layers can include it in diagnostics
+	// without threading the name through every signature. NOT serialized.
+	Name string `json:"-"`
 }
 
 func (p *Profile) GetPort() int {
@@ -171,6 +179,7 @@ func ResolveProfile(cfg *Config, override string) (string, *Profile, error) {
 	if !ok {
 		return "", nil, fmt.Errorf("error: profile %q not found. Run `srv config list`.", name)
 	}
+	p.Name = name
 	return name, p, nil
 }
 

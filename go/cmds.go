@@ -229,6 +229,21 @@ func applyProfileSet(p *Profile, key, value string) {
 		p.ControlPersist = value
 	case "sync_root":
 		p.SyncRoot = value
+	case "jump":
+		// Comma-separated list of "[user@]host[:port]" hops. Empty / null
+		// clears.
+		if v == "" || v == "null" || v == "none" {
+			p.Jump = nil
+		} else {
+			parts := strings.Split(value, ",")
+			out := make([]string, 0, len(parts))
+			for _, s := range parts {
+				if s = strings.TrimSpace(s); s != "" {
+					out = append(out, s)
+				}
+			}
+			p.Jump = out
+		}
 	default:
 		// unknown key -> store stringly
 		if p.Extra == nil {
@@ -303,7 +318,7 @@ func cmdCd(path string, cfg *Config, profileOverride string) int {
 	}
 	newCwd, err := changeRemoteCwd(name, profile, path)
 	if err != nil {
-		fmt.Fprintln(os.Stderr, err)
+		printDiagError(err, profile)
 		return 1
 	}
 	fmt.Println(newCwd)
@@ -352,6 +367,25 @@ func cmdStatus(cfg *Config, profileOverride string) int {
 	return 0
 }
 
+func cmdShell(cfg *Config, profileOverride string) int {
+	name, profile, err := ResolveProfile(cfg, profileOverride)
+	if err != nil {
+		fatal("%v", err)
+	}
+	cwd := GetCwd(name, profile)
+	c, err := Dial(profile)
+	if err != nil {
+		printDiagError(err, profile)
+		return 255
+	}
+	defer c.Close()
+	rc, err := c.Shell(cwd)
+	if err != nil {
+		printDiagError(err, profile)
+	}
+	return rc
+}
+
 func cmdRun(args []string, cfg *Config, profileOverride string, tty bool) int {
 	if len(args) == 0 {
 		fatal("error: nothing to run.")
@@ -388,7 +422,7 @@ func cmdPush(args []string, cfg *Config, profileOverride string) int {
 	abs := resolveRemotePath(remote, cwd)
 	rc, err := pushPath(profile, local, abs, recursive)
 	if err != nil {
-		fmt.Fprintln(os.Stderr, err)
+		printDiagError(err, profile)
 	}
 	return rc
 }
@@ -411,7 +445,7 @@ func cmdPull(args []string, cfg *Config, profileOverride string) int {
 	abs := resolveRemotePath(remote, cwd)
 	rc, err := pullPath(profile, abs, local, recursive)
 	if err != nil {
-		fmt.Fprintln(os.Stderr, err)
+		printDiagError(err, profile)
 	}
 	return rc
 }

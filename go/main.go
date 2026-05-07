@@ -10,7 +10,7 @@ import (
 	"os"
 )
 
-const Version = "2.0.4"
+const Version = "2.1.0"
 
 const helpText = `srv - run commands on a remote SSH server with persistent cwd.
 
@@ -26,6 +26,7 @@ Quick start:
   srv -t htop                    interactive (TTY) command
   srv -P dev rsync ...           override profile for a single call
   srv check                      probe connectivity; diagnose key/host/port issues
+  srv shell                      interactive remote shell (cwd-positioned)
 
 File transfer (uses SFTP via the same SSH session):
   srv push ./local.py            upload to current cwd
@@ -41,6 +42,7 @@ Bulk sync of changed files (tar | ssh tar; preserves relative paths):
   srv sync --files a.go b/c.go   explicit list
   srv sync --dry-run             show what would push, don't transfer
   srv sync /opt/app              override remote root (else cwd or sync_root)
+  srv sync --watch               keep syncing on every local file change
 
 Detached jobs (background on remote, log to ~/.srv-jobs/<id>.log):
   srv -d ./long-build.sh         kick off, return immediately, print job id
@@ -73,7 +75,7 @@ Jobs: ~/.srv/jobs.json
 // Any first-arg outside this set is run on the remote.
 var reservedSubcommands = map[string]bool{
 	"init": true, "config": true, "use": true, "cd": true, "pwd": true,
-	"status": true, "check": true, "run": true, "exec": true,
+	"status": true, "check": true, "shell": true, "run": true, "exec": true,
 	"push": true, "pull": true, "sync": true,
 	"completion": true, "mcp": true, "_profiles": true, "_ls": true,
 	"jobs": true, "logs": true, "kill": true, "sessions": true,
@@ -184,6 +186,8 @@ func run(args []string) int {
 		return cmdStatus(cfg, opts.profile)
 	case "check":
 		return cmdCheck(cfg, opts.profile)
+	case "shell":
+		return cmdShell(cfg, opts.profile)
 	case "push":
 		return cmdPush(rest[1:], cfg, opts.profile)
 	case "pull":

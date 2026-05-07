@@ -8,6 +8,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -19,10 +20,13 @@ import (
 )
 
 // Client holds an ssh.Client, the profile it connected with, and a lazily
-// opened *sftp.Client for file transfer.
+// opened *sftp.Client for file transfer. When connecting through ProxyJump
+// hosts, the intermediate ssh.Client objects are stashed in `chain` so
+// Close() can tear them down in reverse order without leaking sockets.
 type Client struct {
 	Profile *Profile
 	Conn    *ssh.Client
+	chain   []*ssh.Client
 	sftpMu  sync.Mutex
 	sftp    *sftp.Client
 }
@@ -56,32 +60,117 @@ func DialOpts(profile *Profile, opts dialOpts) (*Client, error) {
 	if timeout == 0 {
 		timeout = time.Duration(profile.GetConnectTimeout()) * time.Second
 	}
-	user := profile.User
-	if user == "" {
-		user = os.Getenv("USER")
-		if user == "" {
-			user = os.Getenv("USERNAME")
+	defaultUser := profile.User
+	if defaultUser == "" {
+		defaultUser = os.Getenv("USER")
+		if defaultUser == "" {
+			defaultUser = os.Getenv("USERNAME")
 		}
 	}
-	cfg := &ssh.ClientConfig{
-		User:            user,
-		Auth:            auths,
-		HostKeyCallback: hkc,
-		Timeout:         timeout,
+
+	mkConfig := func(user string) *ssh.ClientConfig {
+		return &ssh.ClientConfig{
+			User:            user,
+			Auth:            auths,
+			HostKeyCallback: hkc,
+			Timeout:         timeout,
+		}
 	}
-	addr := net.JoinHostPort(profile.Host, intToStr(profile.GetPort()))
-	conn, err := ssh.Dial("tcp", addr, cfg)
+
+	// Walk through any ProxyJump hops, building up a chain of ssh.Clients.
+	var chain []*ssh.Client
+	for _, spec := range profile.Jump {
+		hopUser, hopHost, hopPort := parseHostSpec(spec, defaultUser, 22)
+		hopAddr := net.JoinHostPort(hopHost, intToStr(hopPort))
+		hopCfg := mkConfig(hopUser)
+		var hop *ssh.Client
+		if len(chain) == 0 {
+			hop, err = ssh.Dial("tcp", hopAddr, hopCfg)
+		} else {
+			hop, err = dialThrough(chain[len(chain)-1], hopAddr, hopCfg, timeout)
+		}
+		if err != nil {
+			closeChain(chain)
+			return nil, fmt.Errorf("jump %q: %w", spec, err)
+		}
+		chain = append(chain, hop)
+	}
+
+	// Final dial to the target host (through the last hop, if any).
+	targetAddr := net.JoinHostPort(profile.Host, intToStr(profile.GetPort()))
+	targetCfg := mkConfig(defaultUser)
+	var conn *ssh.Client
+	if len(chain) == 0 {
+		conn, err = ssh.Dial("tcp", targetAddr, targetCfg)
+	} else {
+		conn, err = dialThrough(chain[len(chain)-1], targetAddr, targetCfg, timeout)
+	}
 	if err != nil {
+		closeChain(chain)
 		return nil, err
 	}
 
-	c := &Client{Profile: profile, Conn: conn}
+	c := &Client{Profile: profile, Conn: conn, chain: chain}
 
 	// Optional: send keepalives so the server doesn't drop us on idle.
 	if interval := profile.GetKeepaliveInterval(); interval > 0 {
 		go c.runKeepalive(interval, profile.GetKeepaliveCount())
 	}
 	return c, nil
+}
+
+// dialThrough opens a TCP connection from `via` to `addr`, then performs the
+// SSH handshake on it, returning a new ssh.Client tunneled through `via`.
+func dialThrough(via *ssh.Client, addr string, cfg *ssh.ClientConfig, timeout time.Duration) (*ssh.Client, error) {
+	// via.Dial doesn't honor a deadline directly, but the handshake call
+	// below does via cfg.Timeout. We accept the dial-itself blocking on
+	// network conditions; the cfg.Timeout protects the SSH handshake.
+	netConn, err := via.Dial("tcp", addr)
+	if err != nil {
+		return nil, err
+	}
+	if timeout > 0 {
+		_ = netConn.SetDeadline(time.Now().Add(timeout))
+	}
+	clientConn, chans, reqs, err := ssh.NewClientConn(netConn, addr, cfg)
+	if err != nil {
+		_ = netConn.Close()
+		return nil, err
+	}
+	// Clear the deadline so subsequent traffic isn't bounded.
+	_ = netConn.SetDeadline(time.Time{})
+	return ssh.NewClient(clientConn, chans, reqs), nil
+}
+
+// parseHostSpec splits a "[user@]host[:port]" into its components, falling
+// back to defaultUser / defaultPort when omitted.
+func parseHostSpec(spec, defaultUser string, defaultPort int) (user, host string, port int) {
+	user = defaultUser
+	port = defaultPort
+	if i := strings.Index(spec, "@"); i >= 0 {
+		user = spec[:i]
+		spec = spec[i+1:]
+	}
+	if i := strings.LastIndex(spec, ":"); i >= 0 {
+		// IPv6 literals are bracketed; only treat the trailing :N as a port
+		// when there's no closing ']' after it (i.e., the colon isn't part
+		// of an [::1]:22 form, which we leave to net.JoinHostPort downstream).
+		portStr := spec[i+1:]
+		if p, err := strconv.Atoi(portStr); err == nil {
+			port = p
+			spec = spec[:i]
+		}
+	}
+	host = strings.TrimPrefix(strings.TrimSuffix(spec, "]"), "[")
+	return
+}
+
+// closeChain tears down a chain of ssh.Clients in reverse order. Used when
+// a later hop in a ProxyJump chain fails so we don't leak earlier ones.
+func closeChain(chain []*ssh.Client) {
+	for i := len(chain) - 1; i >= 0; i-- {
+		_ = chain[i].Close()
+	}
 }
 
 func (c *Client) runKeepalive(intervalSec, maxFails int) {
@@ -112,12 +201,16 @@ func (c *Client) Close() error {
 		c.sftp = nil
 	}
 	c.sftpMu.Unlock()
+	var err error
 	if c.Conn != nil {
-		err := c.Conn.Close()
+		err = c.Conn.Close()
 		c.Conn = nil
-		return err
 	}
-	return nil
+	// Tear down ProxyJump intermediates in reverse order. Errors here are
+	// best-effort; the primary connection's error is what we surface.
+	closeChain(c.chain)
+	c.chain = nil
+	return err
 }
 
 // SFTP returns a lazily-opened sftp client. Caller must NOT close it; it's
@@ -229,6 +322,57 @@ func (c *Client) RunInteractive(command string, cwd string, tty bool) (int, erro
 
 	err = sess.Run(full)
 	if err != nil {
+		var ee *ssh.ExitError
+		if errors.As(err, &ee) {
+			return ee.ExitStatus(), nil
+		}
+		return -1, err
+	}
+	return 0, nil
+}
+
+// Shell opens an interactive remote shell with a PTY allocated. Honors
+// `cwd` by chaining `cd <cwd> && exec $SHELL -l` so the shell starts in
+// the persisted directory and replaces our session (clean exit code).
+func (c *Client) Shell(cwd string) (int, error) {
+	sess, err := c.Conn.NewSession()
+	if err != nil {
+		return -1, err
+	}
+	defer sess.Close()
+
+	modes := ssh.TerminalModes{
+		ssh.ECHO:          1,
+		ssh.TTY_OP_ISPEED: 14400,
+		ssh.TTY_OP_OSPEED: 14400,
+	}
+	w, h := 80, 24
+	if cw, ch := terminalSize(); cw > 0 && ch > 0 {
+		w, h = cw, ch
+	}
+	term := os.Getenv("TERM")
+	if term == "" {
+		term = "xterm-256color"
+	}
+	if err := sess.RequestPty(term, h, w, modes); err != nil {
+		return -1, err
+	}
+
+	restore, _ := makeStdinRaw()
+	if restore != nil {
+		defer restore()
+	}
+
+	sess.Stdin = os.Stdin
+	sess.Stdout = os.Stdout
+	sess.Stderr = os.Stderr
+
+	shellCmd := `exec "${SHELL:-/bin/bash}" -l`
+	if cwd != "" {
+		shellCmd = fmt.Sprintf("cd %s && %s", shQuotePath(cwd), shellCmd)
+	}
+
+	if err := sess.Run(shellCmd); err != nil {
 		var ee *ssh.ExitError
 		if errors.As(err, &ee) {
 			return ee.ExitStatus(), nil

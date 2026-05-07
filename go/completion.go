@@ -12,7 +12,7 @@ _srv() {
     COMPREPLY=()
     cur="${COMP_WORDS[COMP_CWORD]}"
     prev="${COMP_WORDS[COMP_CWORD-1]:-}"
-    local subs="init config use cd pwd status check run exec push pull sync jobs logs kill sessions completion mcp help version"
+    local subs="init config use cd pwd status check shell run exec push pull sync jobs logs kill sessions completion mcp help version"
 
     # Track first and second positional args, skipping global flags. The
     # AST-style tokens give us context for nested completion (e.g. for
@@ -112,6 +112,7 @@ _srv() {
         'pwd:show remote cwd'
         'status:show profile and cwd'
         'check:probe SSH connectivity and diagnose failures'
+        'shell:interactive remote shell'
         'run:run a command on remote'
         'push:upload via SFTP'
         'pull:download via SFTP'
@@ -237,7 +238,7 @@ Register-ArgumentCompleter -Native -CommandName srv -ScriptBlock {
         return
     }
 
-    $subs = 'init','config','use','cd','pwd','status','check','run','exec','push','pull','sync','jobs','logs','kill','sessions','completion','mcp','help','version'
+    $subs = 'init','config','use','cd','pwd','status','check','shell','run','exec','push','pull','sync','jobs','logs','kill','sessions','completion','mcp','help','version'
     if (-not $sub) {
         & $emit $subs
         return

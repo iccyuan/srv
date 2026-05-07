@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"os"
 	"strings"
 	"time"
 )
@@ -202,6 +203,29 @@ func checkAdvice(diag string, profile *Profile, profileName string) []string {
 		}
 	}
 	return []string{"unknown failure mode -- see stderr above."}
+}
+
+// printDiagError writes an error to stderr, augmenting with a diagnosis tag
+// and actionable fix steps if the error matches a known SSH failure mode
+// (no-key / refused / dns / etc.). Falls back to the raw error otherwise.
+func printDiagError(err error, profile *Profile) {
+	if err == nil {
+		return
+	}
+	diag := classifyDialError(err)
+	if diag == "" || diag == "unknown" {
+		fmt.Fprintln(os.Stderr, err)
+		return
+	}
+	fmt.Fprintf(os.Stderr, "srv: %v\n", err)
+	fmt.Fprintf(os.Stderr, "diagnosis: %s\n\n", diag)
+	name := ""
+	if profile != nil {
+		name = profile.Name
+	}
+	for _, line := range checkAdvice(diag, profile, name) {
+		fmt.Fprintln(os.Stderr, line)
+	}
 }
 
 func cmdCheck(cfg *Config, profileOverride string) int {

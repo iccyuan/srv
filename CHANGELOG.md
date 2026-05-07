@@ -23,6 +23,18 @@ Python 版本最后一次有意义的迭代是 0.7.5(MCP 加固 + ControlMaster 
 
 ---
 
+## [Go 2.1.0] — 2026-05-07
+
+### Added
+**Phase 1 of the optimization roadmap (4 features)**:
+
+- **`profile.jump`** —— ProxyJump 支持。一个或多个堆叠跳板,格式 `[user@]host[:port]`,JSON 数组或 `srv config set <prof> jump bastion1,bastion2`。底层在 `crypto/ssh` 的 `Client.Dial` 上链式打 TCP 隧道,中间 client 由 srv 的 Client 持有,Close 时反向拆除,不漏 socket。
+- **`srv shell`** —— 交互式远端 shell,自动 cwd 定位(`cd <cwd> && exec ${SHELL:-/bin/bash} -l`),PTY + raw-mode stdin。
+- **`srv sync --watch`** —— fsnotify 递归 watcher 跟踪 localRoot,250ms debounce 后触发 sync;新建子目录自动加 watch;Ctrl+C 优雅退出(刷一次队列里待 sync 的)。第一次 sync 是普通 sync,之后进 watch loop。
+- **错误分类化贯穿到所有 SSH 路径**:`runRemoteStream` / `cmdCd` / `cmdPush` / `cmdPull` / `cmdSync` 失败时调 `printDiagError(err, profile)`,把原 `srv check` 的 9 类诊断 + 修复建议(no-key / host-key-changed / dns / refused 等)统一给 CLI 命令。Profile 加 transient `Name` 字段(`json:"-"`)由 `ResolveProfile` 填,深层不用串签名。
+
+---
+
 ## [Go 2.0.4] — 2026-05-07
 
 ### Added
