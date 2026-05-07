@@ -164,18 +164,22 @@ func warnIfNewerSchema(path string, version int) {
 }
 
 func writeJSONFile(path string, v any) error {
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
-		return err
-	}
 	b, err := json.MarshalIndent(v, "", "  ")
 	if err != nil {
+		return err
+	}
+	return writeFileAtomic(path, b, 0o600)
+}
+
+func writeFileAtomic(path string, data []byte, perm os.FileMode) error {
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return err
 	}
 	tmp := filepath.Join(
 		filepath.Dir(path),
 		fmt.Sprintf(".%s.%d.%s.tmp", filepath.Base(path), os.Getpid(), randHex4()),
 	)
-	if err := os.WriteFile(tmp, b, 0o600); err != nil {
+	if err := os.WriteFile(tmp, data, perm); err != nil {
 		return err
 	}
 	if err := os.Rename(tmp, path); err != nil {

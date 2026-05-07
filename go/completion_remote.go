@@ -176,9 +176,6 @@ func readLsCache(key string, ttl time.Duration) ([]string, bool) {
 }
 
 func writeLsCache(key string, lines []string) error {
-	if err := os.MkdirAll(cacheDir(), 0o755); err != nil {
-		return err
-	}
 	p := filepath.Join(cacheDir(), "ls-"+key+".txt")
-	return os.WriteFile(p, []byte(strings.Join(lines, "\n")+"\n"), 0o600)
+	return writeFileAtomic(p, []byte(strings.Join(lines, "\n")+"\n"), 0o600)
 }

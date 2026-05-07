@@ -14,6 +14,8 @@
 | 切服务器(本 shell) | `srv use <profile>` |
 | 推已变更文件 | `srv sync` |
 | 推单个文件 | `srv push ./a.py` |
+| 端口转发(看远端 dev server) | `srv tunnel 8080` |
+| 远端文件本地编辑器改 | `srv edit /etc/foo.conf` |
 | 后台长任务 | `srv -d ./build.sh` |
 | 查后台任务 | `srv jobs` / `srv logs <id> -f` |
 | 连不上排查 | `srv check` |
@@ -253,6 +255,36 @@ srv sync --no-git                     # 在 git 仓库里也不走 git 模式
 
 文件以 git 顶层(git 模式)或当前目录(其它模式)为锚点,远端在 `remote_root/<relative_path>` 落盘。
 
+### 端口转发(`srv tunnel`)
+
+`ssh -L` 等价,**只本地→远端方向**。常见场景:远端跑 dev server / Jupyter / DB,本地浏览器或客户端连。
+
+```
+srv tunnel 8080            # 本地 127.0.0.1:8080  ->  远端 127.0.0.1:8080
+srv tunnel 8080:9090       # 本地 127.0.0.1:8080  ->  远端 127.0.0.1:9090
+srv tunnel 8080:db:5432    # 本地 127.0.0.1:8080  ->  db:5432(在远端解析主机名)
+```
+
+行为:`Ctrl-C` 停;远端 SSH 连接断开会被检测到并自动停。每个进入连接独立一个 goroutine 双向 copy。本地端口固定绑 `127.0.0.1`,不暴露到 LAN。
+
+> 反向(`-R`,本地服务暴露给远端)按需后加,目前未实现。
+
+### 远端文件本地编辑(`srv edit`)
+
+```
+srv edit /etc/nginx/conf.d/api.conf      # 拉到本地 -> $EDITOR -> 改完自动推回
+```
+
+流程:SFTP 拉到 `os.MkdirTemp` 临时目录(基名保留方便编辑器识别语法)→ 启 `$VISUAL` / `$EDITOR`(按空格切分,所以 `EDITOR='code --wait'` 这种带参数的 OK)→ 编辑器退出后比 mtime+size,变了就推回,没变打 "no changes"。
+
+Editor 选取顺序:`$VISUAL` → `$EDITOR` → Windows: `notepad.exe` → 其它:`vim` / `vi` / `nano`。
+
+**已知坑**:
+
+- **不上锁**。同一文件被另一会话同时编辑会被无声覆盖。共享盒子直接 ssh 进去 vim 更稳。
+- **VS Code 必须 `--wait`**。`EDITOR=code` 不阻塞,srv 会立刻看到"没改"然后退出。改成 `EDITOR='code --wait'`。
+- **Notepad 转 CRLF**,Windows 上等同于"整文件都修改了"。建议设 `$EDITOR` 用 vim / notepad++ / `code --wait`。
+
 ### 后台作业
 
 ```
@@ -324,6 +356,7 @@ echo 'source <(srv completion zsh)' >> ~/.zshrc
 | `srv push <local> <TAB>` | **远端**目录 / 文件 |
 | `srv cd <TAB>` / `srv cd /opt/<TAB>` | **远端目录**(只 dirs) |
 | `srv pull <TAB>` / `srv pull /etc/<TAB>` | **远端**目录 / 文件 |
+| `srv edit <TAB>` / `srv edit /etc/<TAB>` | **远端**目录 / 文件 |
 
 **远端补全**机制:`srv _ls <prefix>` 内部命令在远端跑 `ls -1Ap`,把结果缓存到 `~/.srv/cache/`(5 秒 TTL)。第一次 tab 走完整 SSH 握手(典型 2-3 秒),之后命中缓存秒回(~60ms)。每次 tab 都会用最新 cwd / pinned profile,所以 `srv use` 切换后远端补全自动跟着切。
 

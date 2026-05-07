@@ -432,7 +432,11 @@ func (s *daemonState) cacheListing(profileName, target string, entries []string)
 // (sequential here -- the SSH session multiplexer can handle several
 // channels but we keep it simple).
 func (s *daemonState) prefetchSubdirs(profileName, parent string, entries []string) {
-	defer func() { _ = recover() }()
+	defer func() {
+		if r := recover(); r != nil {
+			fmt.Fprintln(os.Stderr, "daemon prefetch panic:", r)
+		}
+	}()
 	c, _, err := s.getClient(profileName)
 	if err != nil {
 		return

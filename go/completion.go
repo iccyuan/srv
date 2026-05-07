@@ -12,7 +12,7 @@ _srv() {
     COMPREPLY=()
     cur="${COMP_WORDS[COMP_CWORD]}"
     prev="${COMP_WORDS[COMP_CWORD-1]:-}"
-    local subs="init config use cd pwd status check shell run exec push pull sync jobs logs kill sessions completion mcp help version"
+    local subs="init config use cd pwd status check shell run exec push pull sync tunnel edit jobs logs kill sessions completion mcp help version"
 
     # Track first and second positional args, skipping global flags. The
     # AST-style tokens give us context for nested completion (e.g. for
@@ -86,6 +86,9 @@ _srv() {
         cd)
             _srv_remote_ls dirs
             ;;
+        edit)
+            _srv_remote_ls all
+            ;;
         pull)
             if [[ -z $sub2 ]]; then _srv_remote_ls all
             else COMPREPLY=( $(compgen -f -- "$cur") )
@@ -117,6 +120,8 @@ _srv() {
         'push:upload via SFTP'
         'pull:download via SFTP'
         'sync:bulk-sync changed files (git/mtime/glob/list)'
+        'tunnel:forward a local port to a remote port'
+        'edit:open a remote file in $EDITOR, save back on close'
         'jobs:list detached jobs'
         'logs:tail a detached job log'
         'kill:terminate a detached job'
@@ -185,6 +190,7 @@ _srv() {
         sessions) _values 'action' list show clear prune ;;
         completion) _values 'shell' bash zsh powershell ;;
         cd) _srv_remote_ls dirs ;;
+        edit) _srv_remote_ls all ;;
         pull)
             if [[ -z $sub2 ]]; then _srv_remote_ls all
             else _files
@@ -238,7 +244,7 @@ Register-ArgumentCompleter -Native -CommandName srv -ScriptBlock {
         return
     }
 
-    $subs = 'init','config','use','cd','pwd','status','check','shell','run','exec','push','pull','sync','jobs','logs','kill','sessions','completion','mcp','help','version'
+    $subs = 'init','config','use','cd','pwd','status','check','shell','run','exec','push','pull','sync','tunnel','edit','jobs','logs','kill','sessions','completion','mcp','help','version'
     if (-not $sub) {
         & $emit $subs
         return
@@ -276,6 +282,9 @@ Register-ArgumentCompleter -Native -CommandName srv -ScriptBlock {
         'cd' {
             # Remote directory completion (only dirs).
             & $remote_ls $true
+        }
+        'edit' {
+            & $remote_ls $false
         }
         'pull' {
             # First positional = remote path (any entry).

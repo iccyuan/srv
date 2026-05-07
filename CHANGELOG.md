@@ -23,6 +23,40 @@ Python 版本最后一次有意义的迭代是 0.7.5(MCP 加固 + ControlMaster 
 
 ---
 
+## [Go 2.5.0] — 2026-05-07
+
+### Added
+**两个本地工作流缺口补齐 —— `srv tunnel` 和 `srv edit`**
+
+#### `srv tunnel <localPort>[:[<remoteHost>:]<remotePort>]` —— SSH 端口转发(`ssh -L` 等价)
+
+```
+srv tunnel 8080            # 本地 8080 -> 远端 127.0.0.1:8080
+srv tunnel 8080:9090       # 本地 8080 -> 远端 127.0.0.1:9090
+srv tunnel 8080:db:5432    # 本地 8080 -> db:5432(远端解析)
+```
+
+实现:本地 `net.Listen` + `c.Conn.Dial("tcp", remote)` 双向 `io.Copy`,每个连接一个 goroutine。Ctrl-C 关 listener;SSH 连接断开时通过 `c.Conn.Wait()` 监听,自动停。**仅本地→远端方向**,反向(`-R`)按需后加。
+
+适用场景:远端 Jupyter / dev server / 数据库,本地浏览器或客户端访问。
+
+#### `srv edit <remote_path>` —— 远端文件本地编辑器编辑
+
+流程:SFTP 拉到 `os.MkdirTemp` 临时目录(基名保留,编辑器靠扩展名识别语法)→ 启动 `$VISUAL`/`$EDITOR`(支持 `code --wait` 这种带参数的形式 —— 按空格切分)→ 编辑器退出后,对比本地文件 mtime+size:有改动则 SFTP 推回,没改动打印 "no changes; not uploading" 不动。
+
+Editor fallback 顺序:`$VISUAL` → `$EDITOR` → Windows: `notepad.exe` → 其它: `vim` / `vi` / `nano`。
+
+**已知限制**(README 已注明):
+- 不上锁。如果同一文件正被另一会话编辑,save-back 会无声覆盖。共享盒子上请直接 ssh 进去 vim。
+- VS Code 默认 *不* 阻塞,必须配 `EDITOR='code --wait'`,否则 srv 在编辑器还开着的时候就走完 mtime 比对、得出 "no changes"。
+- Notepad 在 Windows 上把 LF 转 CRLF —— 整文件都被识别为"已修改"。建议设 `$EDITOR` 用其它编辑器。
+
+#### Tab 补全
+
+`cd` 用 dir-only,`edit` 走 all-entries(含文件)。bash / zsh / PowerShell 三套都加了。
+
+---
+
 ## [Go 2.4.2] — 2026-05-07
 
 ### Fixed

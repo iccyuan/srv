@@ -12,7 +12,7 @@ import (
 
 // Version is overridable at build time via -ldflags "-X main.Version=...".
 // goreleaser sets it from the git tag on release builds.
-var Version = "2.4.2"
+var Version = "2.5.0"
 
 const helpText = `srv - run commands on a remote SSH server with persistent cwd.
 
@@ -29,6 +29,9 @@ Quick start:
   srv -P dev rsync ...           override profile for a single call
   srv check                      probe connectivity; diagnose key/host/port issues
   srv shell                      interactive remote shell (cwd-positioned)
+  srv tunnel 8080                forward localhost:8080 -> remote 127.0.0.1:8080
+  srv tunnel 8080:db:5432        forward localhost:8080 -> db:5432 from remote
+  srv edit /etc/foo.conf         pull, open in $EDITOR, push back if changed
 
 File transfer (uses SFTP via the same SSH session):
   srv push ./local.py            upload to current cwd
@@ -81,7 +84,7 @@ Jobs: ~/.srv/jobs.json
 var reservedSubcommands = map[string]bool{
 	"init": true, "config": true, "use": true, "cd": true, "pwd": true,
 	"status": true, "check": true, "shell": true, "run": true, "exec": true,
-	"push": true, "pull": true, "sync": true,
+	"push": true, "pull": true, "sync": true, "tunnel": true, "edit": true,
 	"completion": true, "mcp": true, "daemon": true,
 	"_profiles": true, "_ls": true,
 	"jobs": true, "logs": true, "kill": true, "sessions": true,
@@ -200,6 +203,10 @@ func run(args []string) int {
 		return cmdPull(rest[1:], cfg, opts.profile)
 	case "sync":
 		return cmdSync(rest[1:], cfg, opts.profile)
+	case "tunnel":
+		return cmdTunnel(rest[1:], cfg, opts.profile)
+	case "edit":
+		return cmdEdit(rest[1:], cfg, opts.profile)
 	case "jobs":
 		return cmdJobs(cfg, opts.profile)
 	case "logs":

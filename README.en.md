@@ -14,6 +14,8 @@
 | Switch profile (this shell) | `srv use <profile>` |
 | Push changed files | `srv sync` |
 | Push a single file | `srv push ./a.py` |
+| Forward a port (see remote dev server) | `srv tunnel 8080` |
+| Edit a remote file in $EDITOR | `srv edit /etc/foo.conf` |
 | Long-running background task | `srv -d ./build.sh` |
 | Inspect background jobs | `srv jobs` / `srv logs <id> -f` |
 | Diagnose connection issues | `srv check` |
@@ -254,6 +256,36 @@ Default excludes: `.git`, `node_modules`, `__pycache__`, `.venv`, `venv`, `.idea
 
 Files are anchored at the git toplevel (git mode) or current dir (other modes); the remote receives them at `remote_root/<relative_path>`.
 
+### Port forwarding (`srv tunnel`)
+
+`ssh -L` equivalent, **local-to-remote direction only**. Common case: a dev server / Jupyter / DB on the remote, your local browser or client connects through it.
+
+```
+srv tunnel 8080            # local 127.0.0.1:8080  ->  remote 127.0.0.1:8080
+srv tunnel 8080:9090       # local 127.0.0.1:8080  ->  remote 127.0.0.1:9090
+srv tunnel 8080:db:5432    # local 127.0.0.1:8080  ->  db:5432 (resolved on the remote)
+```
+
+Behavior: `Ctrl-C` stops it; if the SSH connection itself drops, `srv tunnel` notices and stops too. Each incoming connection runs in its own goroutine (bidirectional `io.Copy`). The local side binds `127.0.0.1` only — not exposed to the LAN.
+
+> Reverse direction (`-R`, exposing a local service to the remote) is not implemented yet — add on demand.
+
+### Edit a remote file locally (`srv edit`)
+
+```
+srv edit /etc/nginx/conf.d/api.conf      # pull -> $EDITOR -> push back if changed
+```
+
+Flow: SFTP-pull into an `os.MkdirTemp` directory (basename preserved so editor syntax detection works) → spawn `$VISUAL` / `$EDITOR` (split on whitespace, so `EDITOR='code --wait'` works) → after editor exit, compare mtime+size: changed → upload back; unchanged → "no changes; not uploading".
+
+Editor resolution: `$VISUAL` → `$EDITOR` → Windows: `notepad.exe` → otherwise: `vim` / `vi` / `nano`.
+
+**Known caveats**:
+
+- **No locking**. If someone else is editing the same file concurrently, save-back silently overwrites them. On shared boxes prefer SSHing in and using vim directly.
+- **VS Code requires `--wait`**. `EDITOR=code` returns immediately, so srv sees "no changes" and exits while the editor is still open. Set `EDITOR='code --wait'` instead.
+- **Notepad converts LF → CRLF** on Windows, which makes the entire file look modified. Set `$EDITOR` to vim, notepad++, or `code --wait` instead.
+
 ### Detached jobs
 
 ```
@@ -323,6 +355,7 @@ echo 'source <(srv completion zsh)' >> ~/.zshrc
 | `srv push <local> <TAB>` | **remote** dirs / files |
 | `srv cd <TAB>` / `srv cd /opt/<TAB>` | **remote dirs only** |
 | `srv pull <TAB>` / `srv pull /etc/<TAB>` | **remote** dirs / files |
+| `srv edit <TAB>` / `srv edit /etc/<TAB>` | **remote** dirs / files |
 
 **Remote completion** uses an internal `srv _ls <prefix>` that runs `ls -1Ap` on the remote and caches results in `~/.srv/cache/` (5-second TTL). The first tab on a fresh prefix pays one full SSH handshake (~2-3 s); subsequent tabs hit the cache (~60 ms). Each invocation respects the current `cwd` and pinned profile, so remote completion follows `srv use` automatically.
 

@@ -740,7 +740,13 @@ func cmdMcp(cfg *Config) int {
 				Name      string         `json:"name"`
 				Arguments map[string]any `json:"arguments"`
 			}
-			_ = json.Unmarshal(req.Params, &p)
+			if err := json.Unmarshal(req.Params, &p); err != nil {
+				mcpSend(mcpResponse(req.ID, nil, &jsonRPCError{
+					Code:    -32602,
+					Message: "invalid tools/call params: " + err.Error(),
+				}))
+				continue
+			}
 			args := p.Arguments
 			if args == nil {
 				args = map[string]any{}
