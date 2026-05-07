@@ -12,15 +12,18 @@ import (
 
 // Version is overridable at build time via -ldflags "-X main.Version=...".
 // goreleaser sets it from the git tag on release builds.
-var Version = "2.6.0"
+var Version = "2.6.1"
 
 const helpText = `srv - run commands on a remote SSH server with persistent cwd.
 
 Quick start:
   srv init                       configure a profile interactively
   srv config list                show profiles
+  srv use                        interactive picker (TTY): pin a profile to this shell
   srv use <profile>              pin a profile for this shell (quick switch)
   srv use --clear                unpin (fall back to default)
+  srv config default             interactive picker: set the global default profile
+  srv config default <profile>   set the global default profile (persists)
   srv cd /opt                    set persistent remote cwd (per session+profile)
   srv pwd                        show current remote cwd
   srv ls -la                     run on remote in current cwd
@@ -95,7 +98,7 @@ var reservedSubcommands = map[string]bool{
 	"init": true, "config": true, "use": true, "cd": true, "pwd": true,
 	"status": true, "check": true, "shell": true, "run": true, "exec": true,
 	"push": true, "pull": true, "sync": true, "tunnel": true, "edit": true,
-	"open": true, "code": true, "diff": true, "doctor": true, "profiles": true,
+	"open": true, "code": true, "diff": true, "doctor": true,
 	"env": true, "completion": true, "mcp": true, "daemon": true,
 	"_profiles": true, "_ls": true,
 	"jobs": true, "logs": true, "kill": true, "sessions": true,
@@ -208,8 +211,6 @@ func run(args []string) int {
 		return cmdCheck(cfg, opts.profile)
 	case "doctor":
 		return cmdDoctor(cfg, opts.profile)
-	case "profiles":
-		return cmdProfiles(rest[1:], cfg)
 	case "shell":
 		return cmdShell(cfg, opts.profile)
 	case "push":

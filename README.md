@@ -152,13 +152,11 @@ $ srv -d ./long-build.sh         # 后台
 srv init                            # 交互式向导添加 profile
 srv config list                     # 列出 profile;* = 全局默认,@ = 当前 session 已 pin
 srv config show [name]              # 输出 profile 的完整 JSON
-srv config use <name>               # 设全局默认
+srv config default <name>           # 设全局默认(persists 到 ~/.srv/config.json,所有 shell 共用)
+srv config default                  # TTY 下:↑↓ 弹窗选默认;非 TTY:打印当前默认
 srv config remove <name>            # 删 profile
 srv config set <prof> <key> <val>   # 改单个键(true/false/数字/null 自动转型)
 srv config edit [name]              # 用 $EDITOR 编辑单个 profile JSON
-srv profiles                        # config list 简写
-srv profiles use <name>             # srv use <name> 简写
-srv profiles edit <name>            # config edit <name> 简写
 srv env list                        # 列出 profile 级远端环境变量
 srv env set KEY value               # 运行远端命令前自动注入 KEY=value
 srv env unset KEY                   # 删除一个环境变量
@@ -167,11 +165,24 @@ srv env clear                       # 清空当前 profile 的环境变量
 
 ### profile 快切
 
+**两个作用域要分清**(选错了就是经典翻车):
+
+| 命令 | 作用范围 | 持久化 |
+|---|---|---|
+| `srv use <name>` | **当前 shell 一会话**(pin 在 `~/.srv/sessions.json`) | 该 shell 退出即没 |
+| `srv config default <name>` | **全局**(写 `~/.srv/config.json` 的 `default_profile`) | 永久,所有 shell 共用 |
+
+`srv use` 是临时切,`config default` 是改默认。两者不冲突 —— shell pin 优先级高于 default。
+
 ```
-srv use <profile>     # 把 <profile> pin 到当前 shell,后续 srv 调用都用它
-srv use --clear       # 取消 pin
-srv use               # 显示当前 shell 的 pin / 默认 / active
+srv use                # TTY 下:↑↓ 弹窗选(/ 过滤,Enter 选,q 取消)
+srv use <profile>      # 直接 pin
+srv use --clear        # 取消 pin
 ```
+
+弹窗里行尾标记会区分 `[this shell]`(黄,本 shell 已 pin)和 `[default]`(青,全局默认),两者可同时出现。
+
+`srv use` 在非 TTY(管道、脚本、CI)下保持原行为:打印当前 pin / default / active 状态。
 
 **优先级**(高 → 低):
 
@@ -179,7 +190,7 @@ srv use               # 显示当前 shell 的 pin / 默认 / active
 -P/--profile (单条命令)
   > srv use 设的 session pin
   > $SRV_PROFILE 环境变量
-  > srv config use 设的全局默认
+  > srv config default 设的全局默认
 ```
 
 ### 远端命令执行
@@ -387,7 +398,7 @@ echo 'source <(srv completion zsh)' >> ~/.zshrc
 | `srv <TAB>` | 所有子命令(init/config/use/cd/pwd/status/check/run/...) |
 | `srv c<TAB>` | 前缀过滤(config/cd/check/completion) |
 | `srv config <TAB>` | list/use/remove/show/set |
-| `srv config use <TAB>` | 已配置 profile 名 |
+| `srv config default <TAB>` | 已配置 profile 名 |
 | `srv config remove <TAB>` | 已配置 profile 名 |
 | `srv config show <TAB>` | 已配置 profile 名 |
 | `srv use <TAB>` | profile 名 + `--clear` |

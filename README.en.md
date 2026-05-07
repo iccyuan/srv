@@ -152,13 +152,11 @@ $ srv -d ./long-build.sh         # detached
 srv init                            # interactive wizard for a new profile
 srv config list                     # list profiles; * = global default, @ = pinned to this session
 srv config show [name]              # full JSON for one profile
-srv config use <name>               # set the global default
+srv config default <name>           # set the global default (persists in ~/.srv/config.json, all shells)
+srv config default                  # TTY: arrow-key picker; non-TTY: print current default
 srv config remove <name>            # delete a profile
 srv config set <prof> <key> <val>   # set one key (true/false/int/null are auto-typed)
 srv config edit [name]              # edit one profile as JSON in $EDITOR
-srv profiles                        # short alias for config list
-srv profiles use <name>             # short alias for srv use <name>
-srv profiles edit <name>            # short alias for config edit <name>
 srv env list                        # list profile-level remote env vars
 srv env set KEY value               # inject KEY=value before remote commands
 srv env unset KEY                   # remove one profile env var
@@ -167,11 +165,24 @@ srv env clear                       # drop all env vars for this profile
 
 ### Quick profile switching
 
+**Two scopes — get them straight or you'll trip over yourself:**
+
+| Command | Scope | Persistence |
+|---|---|---|
+| `srv use <name>` | **this shell session** (pinned in `~/.srv/sessions.json`) | Gone when this shell exits |
+| `srv config default <name>` | **global** (writes `default_profile` in `~/.srv/config.json`) | Persists; shared by all shells |
+
+`srv use` is a temporary switch; `config default` changes the fallback. They don't fight — a session pin always wins over the default.
+
 ```
-srv use <profile>     # pin <profile> to this shell; subsequent srv calls use it
-srv use --clear       # unpin
-srv use               # show current pin / default / active
+srv use                # TTY: arrow-key picker (/ filter, Enter select, q cancel)
+srv use <profile>      # pin directly
+srv use --clear        # unpin
 ```
+
+In the picker each row gets a marker: `[this shell]` (yellow, the current shell's pin) and `[default]` (cyan, the global default). Both can apply to the same profile.
+
+`srv use` off a TTY (pipes / scripts / CI) keeps the original behavior: prints current pin / default / active.
 
 **Resolution order** (highest first):
 
@@ -179,7 +190,7 @@ srv use               # show current pin / default / active
 -P/--profile (per call)
   > srv use session pin
   > $SRV_PROFILE
-  > srv config use default
+  > srv config default global default
 ```
 
 ### Running on the remote
@@ -390,7 +401,7 @@ echo 'source <(srv completion zsh)' >> ~/.zshrc
 | `srv <TAB>` | all subcommands |
 | `srv c<TAB>` | prefix-filtered (config/cd/check/completion) |
 | `srv config <TAB>` | list/use/remove/show/set |
-| `srv config use\|remove\|show <TAB>` | configured profile names |
+| `srv config default\|remove\|show\|edit <TAB>` | configured profile names |
 | `srv use <TAB>` | profile names + `--clear` |
 | `srv -P <TAB>` | profile names |
 | `srv sessions <TAB>` | list/show/clear/prune |

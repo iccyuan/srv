@@ -13,19 +13,6 @@ import (
 	"strings"
 )
 
-func cmdProfiles(args []string, cfg *Config) int {
-	if len(args) == 0 || args[0] == "list" {
-		return cmdConfig([]string{"list"}, cfg)
-	}
-	if args[0] == "use" {
-		return cmdUse(args[1:], cfg)
-	}
-	if args[0] == "edit" {
-		return cmdConfig(append([]string{"edit"}, args[1:]...), cfg)
-	}
-	return cmdConfig(args, cfg)
-}
-
 func cmdDoctor(cfg *Config, profileOverride string) int {
 	ok := true
 	check := func(name string, pass bool, detail string) {

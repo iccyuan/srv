@@ -45,12 +45,12 @@ GOOS=darwin  GOARCH=arm64 go build -o ../srv     .
 
 ```
 srv init                       配置 profile
-srv config <list|use|remove|show|set>
+srv config <list|default|remove|show|set|edit>
 srv use <profile> | --clear
 srv cd <path>          srv pwd          srv status        srv check
 srv <args...>          srv -t <cmd>     srv -d <cmd>      srv -P <prof> <cmd>
 srv push <l> [<r>]     srv pull <r> [<l>]    srv sync [...]
-srv doctor             srv profiles [...]     srv env [...]
+srv doctor             srv env [list|set|unset|clear]
 srv open <remote>      srv code [remote_dir]  srv diff <local> [remote]
 srv jobs               srv logs <id> [-f]    srv kill <id> [-9]
 srv sessions [list|show|clear|prune]
@@ -125,8 +125,9 @@ go/
 - [x] **`tunnel`** —— ssh -L 等价的本地→远端 TCP 转发(2.5)
 - [x] **`edit`** —— SFTP 拉到 temp / `$EDITOR` / mtime 改了推回(2.5)
 - [x] **`open` / `code` / `diff` / `doctor`** —— 本地工作流辅助(2.6)
-- [x] **`profiles` / `config edit`** —— profile 管理别名(2.6)
+- [x] **`config edit`** + **`config default`**(原 `config use`,2.6.1 改名以避开和 `srv use` 的语义碰撞)
 - [x] **`env list / set / unset / clear`** + profile 级 `env` 字段,运行远端命令前自动注入(2.6)
+- [x] **`srv use` / `srv config default` 无参 + TTY 弹出 ↑↓ 选择器**(`/` 过滤、Enter 选、q 取消;`[this shell]` / `[default]` 双标记区分作用域,2.6.1)
 
 ## 已知不同(刻意为之)
 
@@ -146,4 +147,4 @@ srv status
 python ../python/srv.py status
 ```
 
-`config use <name>` 在哪一版改都对另一版生效。
+`config default <name>` 在哪一版改都对另一版生效。

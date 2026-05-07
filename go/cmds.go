@@ -77,7 +77,7 @@ func prompt(rd *bufio.Reader, q, def string) string {
 
 func cmdConfig(args []string, cfg *Config) int {
 	if len(args) == 0 {
-		fatal("usage: srv config <list|use|remove|show|set> [args]")
+		fatal("usage: srv config <list|default|remove|show|set|edit> [args]")
 	}
 	action := args[0]
 	rest := args[1:]
@@ -118,9 +118,31 @@ func cmdConfig(args []string, cfg *Config) int {
 			fmt.Printf("\n@ = pinned to this session (%s)\n", sid)
 		}
 		return 0
-	case "use":
+	case "default":
+		// `srv config default` sets the global default profile (persists
+		// to ~/.srv/config.json, applies across all shells). Distinct
+		// from `srv use`, which only pins for the current shell session.
 		if len(rest) == 0 {
-			fatal("usage: srv config use <name>  (sets global default; for per-shell switching use `srv use <name>`)")
+			if isStdinTTY() {
+				items := buildPickerItems(cfg)
+				sel, ok := runProfilePicker(items, "Select global default profile (persists across shells):")
+				if !ok {
+					return 0
+				}
+				cfg.DefaultProfile = sel
+				if err := SaveConfig(cfg); err != nil {
+					fatal("error: %v", err)
+				}
+				fmt.Printf("global default profile = %s\n", sel)
+				return 0
+			}
+			// Non-TTY: print current.
+			cur := cfg.DefaultProfile
+			if cur == "" {
+				cur = "(none)"
+			}
+			fmt.Printf("global default profile = %s\n", cur)
+			return 0
 		}
 		if _, ok := cfg.Profiles[rest[0]]; !ok {
 			fatal("error: profile %q not found.", rest[0])
@@ -293,6 +315,28 @@ func applyProfileSet(p *Profile, key, value string) {
 
 func cmdUse(args []string, cfg *Config) int {
 	if len(args) == 0 {
+		// On a TTY, `srv use` opens an interactive picker that pins the
+		// chosen profile to this shell session. Off a TTY (pipe / CI),
+		// fall back to printing the current pin status so scripts that
+		// already capture the output keep working.
+		if isStdinTTY() && len(cfg.Profiles) > 0 {
+			items := buildPickerItems(cfg)
+			sel, ok := runProfilePicker(items, "Select a profile to pin to this shell:")
+			if !ok {
+				return 0
+			}
+			sid, err := SetSessionProfile(sel)
+			if err != nil {
+				fatal("error: %v", err)
+			}
+			cwd := cfg.Profiles[sel].GetDefaultCwd()
+			if c := GetCwd(sel, cfg.Profiles[sel]); c != "" {
+				cwd = c
+			}
+			fmt.Printf("session %s: pinned to %q  (cwd: %s)\n", sid, sel, cwd)
+			return 0
+		}
+
 		sid, rec := TouchSession()
 		var pinned string
 		if rec.Profile != nil {

@@ -1,5 +1,23 @@
 # Changelog
 
+## [Go 2.6.1] - 2026-05-08
+
+### Removed
+- **`srv profiles` 整套(`profiles` / `profiles use` / `profiles edit`)**:2.6.0 加的别名层,纯重复;直接删,无 deprecation。
+
+### Changed (BREAKING)
+- **`srv config use <name>` 改名为 `srv config default <name>`**:旧名和 `srv use`(本 shell pin)同动词不同语义,经典翻车点。直接换名,旧形不再识别。`srv config default` 无参 + TTY 时弹 ↑↓ 选择器;非 TTY 打印当前默认值。
+
+### Added
+- **`srv use` / `srv config default` 无参 + TTY 弹出交互式 ↑↓ 选择器**:
+  - `↑` / `↓` 或 `j` / `k` 移动,`Enter` 选中,`q` / Ctrl-C 取消
+  - `/` 进入过滤模式,边输边过滤;`ESC` 退过滤、`Backspace` 删字
+  - 行尾标记区分作用域:`[this shell]`(黄,本 shell pin)、`[default]`(青,全局默认),两者可同时出现
+  - 实现:`golang.org/x/term` raw mode + ANSI;无新依赖。非 TTY(管道 / CI)保持原行为
+- 命令面整体减少 4 条 → 8 条 profile 相关命令;不丢功能。
+
+---
+
 ## [Go 2.6.0] - 2026-05-07
 
 ### Added

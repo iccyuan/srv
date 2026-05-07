@@ -12,7 +12,7 @@ _srv() {
     COMPREPLY=()
     cur="${COMP_WORDS[COMP_CWORD]}"
     prev="${COMP_WORDS[COMP_CWORD-1]:-}"
-    local subs="init config use cd pwd status check shell run exec push pull sync tunnel edit jobs logs kill sessions completion mcp help version"
+    local subs="init config use cd pwd status check doctor shell run exec push pull sync tunnel edit open code diff env jobs logs kill sessions completion mcp daemon help version"
 
     # Track first and second positional args, skipping global flags. The
     # AST-style tokens give us context for nested completion (e.g. for
@@ -65,8 +65,8 @@ _srv() {
     case "$sub" in
         config)
             if [[ -z $sub2 ]]; then
-                COMPREPLY=( $(compgen -W "list use remove show set" -- "$cur") )
-            elif [[ "$sub2" == "use" || "$sub2" == "remove" || "$sub2" == "show" ]]; then
+                COMPREPLY=( $(compgen -W "list default remove show set edit" -- "$cur") )
+            elif [[ "$sub2" == "default" || "$sub2" == "remove" || "$sub2" == "show" || "$sub2" == "edit" ]]; then
                 local profs
                 profs=$(srv _profiles 2>/dev/null)
                 COMPREPLY=( $(compgen -W "$profs" -- "$cur") )
@@ -122,6 +122,11 @@ _srv() {
         'sync:bulk-sync changed files (git/mtime/glob/list)'
         'tunnel:forward a local port to a remote port'
         'edit:open a remote file in $EDITOR, save back on close'
+        'open:pull a remote file to a temp dir and open it locally'
+        'code:open a remote folder in VS Code Remote SSH'
+        'diff:compare a local file with the remote counterpart'
+        'doctor:local config / daemon / SSH readiness report'
+        'env:manage profile-level remote environment variables'
         'jobs:list detached jobs'
         'logs:tail a detached job log'
         'kill:terminate a detached job'
@@ -175,8 +180,8 @@ _srv() {
     case "$sub" in
         config)
             if [[ -z $sub2 ]]; then
-                _values 'action' list use remove show set
-            elif [[ $sub2 == (use|remove|show) ]]; then
+                _values 'action' list default remove show set edit
+            elif [[ $sub2 == (default|remove|show|edit) ]]; then
                 local profs
                 profs=("${(@f)$(srv _profiles 2>/dev/null)}")
                 _values 'profile' $profs
@@ -244,7 +249,7 @@ Register-ArgumentCompleter -Native -CommandName srv -ScriptBlock {
         return
     }
 
-    $subs = 'init','config','use','cd','pwd','status','check','shell','run','exec','push','pull','sync','tunnel','edit','jobs','logs','kill','sessions','completion','mcp','help','version'
+    $subs = 'init','config','use','cd','pwd','status','check','doctor','shell','run','exec','push','pull','sync','tunnel','edit','open','code','diff','env','jobs','logs','kill','sessions','completion','mcp','daemon','help','version'
     if (-not $sub) {
         & $emit $subs
         return
@@ -265,8 +270,8 @@ Register-ArgumentCompleter -Native -CommandName srv -ScriptBlock {
     switch ($sub) {
         'config' {
             if (-not $sub2) {
-                & $emit @('list','use','remove','show','set')
-            } elseif ($sub2 -in 'use','remove','show') {
+                & $emit @('list','default','remove','show','set','edit')
+            } elseif ($sub2 -in 'default','remove','show','edit') {
                 & $emit (& $profiles)
             }
         }
