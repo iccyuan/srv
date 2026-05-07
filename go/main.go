@@ -10,7 +10,7 @@ import (
 	"os"
 )
 
-const Version = "2.0.0"
+const Version = "2.0.1"
 
 const helpText = `srv - run commands on a remote SSH server with persistent cwd.
 

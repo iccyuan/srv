@@ -51,14 +51,22 @@
 
 ## 安装
 
+**默认就是 Go 版本** —— `srv` 是仓库根目录下的单二进制(由 [`go/`](./go) 源码编译)。Python 实现仍保留在 [`python/`](./python),需要时可以显式 `python python/srv.py`。
+
 ### 前置
 
-- Python 3.9+(Windows 自带的 Store Python 即可)
-- OpenSSH client(Win10+ 自带;macOS / Linux 通常默认有)
+- Go 1.22+(只构建时需要——https://go.dev/dl/)
+- 远端服务器跑了 OpenSSH(本地不需要 ssh 客户端,Go 二进制自实现 SSH 协议)
 
-### Windows
+### 编译
 
-把工具目录加到用户 PATH:
+```sh
+cd go
+go build -o ../srv.exe .          # Windows
+go build -o ../srv     .          # macOS / Linux
+```
+
+### Windows — 加 PATH
 
 ```powershell
 [Environment]::SetEnvironmentVariable(
@@ -68,25 +76,33 @@
 )
 ```
 
-新开 PowerShell,`srv version` 验证。
+新开 PowerShell,`srv version` 应当显示 `srv 2.x.x`。
 
-### macOS / Linux
-
-把项目目录加到 PATH(推荐,改动最小):
+### macOS / Linux — 加 PATH
 
 ```sh
 echo 'export PATH="$PATH:/path/to/srv"' >> ~/.bashrc   # 或 ~/.zshrc
-chmod +x /path/to/srv/srv
 exec $SHELL && srv version
 ```
 
-或者把 shim 软链到现有 PATH 目录(shim 已自动跟随符号链接):
+或软链到现有 PATH 目录:
 
 ```sh
-chmod +x /path/to/srv/srv
 ln -s /path/to/srv/srv ~/.local/bin/srv
 srv version
 ```
+
+### Python 版本(可选)
+
+不想编译、或者要在没装 Go 的机器上跑,Python 版本可直接调用:
+
+```sh
+python python/srv.py status
+python python/srv.py cd /opt
+# ...
+```
+
+两个版本**共享 `~/.srv/{config,sessions,jobs}.json`**,可来回切。
 
 ---
 
@@ -376,21 +392,21 @@ Claude Code 通过 stdio MCP 拿到 14 个工具(run/cd/pwd/use/status/check/lis
 
 ```sh
 # 1) 个人全局(任何目录里都能用)
-claude mcp add srv --scope user -- python D:\WorkSpace\server\srv\src\srv.py mcp
+claude mcp add srv --scope user -- D:\WorkSpace\server\srv\srv.exe mcp
 
 # 2) 项目级共享(在 repo 根目录跑;生成 .mcp.json,可入 git)
 cd <your-project>
-claude mcp add srv --scope project -- python D:\WorkSpace\server\srv\src\srv.py mcp
+claude mcp add srv --scope project -- D:\WorkSpace\server\srv\srv.exe mcp
 
 # 3) 项目级私有(不写进 .mcp.json,只你能看到)
 cd <your-project>
-claude mcp add srv --scope local -- python D:\WorkSpace\server\srv\src\srv.py mcp
+claude mcp add srv --scope local -- D:\WorkSpace\server\srv\srv.exe mcp
 
 # 验证(任一 scope 之后都能跑)
 claude mcp list   # 应显示  srv: ✓ Connected
 ```
 
-> macOS / Linux 把命令里的路径换成 `/path/to/srv/src/srv.py`(或者直接用 `srv mcp` 如果 `srv` 已在 PATH)。
+> macOS / Linux 把路径换成 `/path/to/srv/srv`(无 `.exe`)。或者直接用 `srv mcp` —— 如果 `srv` 在 PATH 上,这是最简的形式。
 
 新开 Claude Code 会话即生效;已运行的会话需要 `/mcp` 重连。
 
@@ -398,8 +414,8 @@ claude mcp list   # 应显示  srv: ✓ Connected
 
 ```toml
 [mcp_servers.srv]
-command = "python"
-args = ["D:\\WorkSpace\\server\\srv\\src\\srv.py", "mcp"]
+command = "D:\\WorkSpace\\server\\srv\\srv.exe"
+args = ["mcp"]
 ```
 
 ---

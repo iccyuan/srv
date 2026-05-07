@@ -6,6 +6,21 @@ Python 版本和 Go 版本走独立版本号:Python 在 `0.x` 序列,Go 从 `2.0
 
 ---
 
+## [Go 2.0.1] — 2026-05-07
+
+### Changed
+- **`src/` 重命名为 `python/`** —— 跟 `go/` 命名对称,标识"两个实现并列"。
+- **Go 二进制成为默认 `srv` 入口** —— 编译目标改为仓库根 (`../srv.exe` / `../srv`)。原先在仓库根的 Python shim(`srv.cmd` / `srv`)删除。
+- 用户 PATH 不变(仍指仓库根),但 `srv` 现在直接是 Go 二进制 —— 启动 <10ms,无 Python 依赖。
+- 文档一律推荐:`claude mcp add srv -- D:\...\srv\srv.exe mcp`(无 `python ...` 中转层)。
+- Python 实现仍可显式调用:`python python/srv.py ...`。两版共享 `~/.srv/{config,sessions,jobs}.json`。
+
+### Fixed
+- `RunCaptureResult` 加 JSON 标签(`stdout` / `stderr` / `exit_code` / `cwd`),MCP `run` 的 `structuredContent` 现在与 Python 版字段名一致。
+- 新增 `shQuotePath` 保留 `~`/`~/` 前缀的远端 shell 展开;`wrapWithCwd` / `RunDetached` / `changeRemoteCwd` / `tarUploadStream` 全部使用,修复了 cwd=`~` 时 `cd '~'` 不展开导致的 exit 1 + 空 stdout。
+
+---
+
 ## [Go 2.0.0] — 2026-05-07
 
 完整的 Go 重写,放在 [`go/`](./go) 子目录,**Python 版本继续保留**在 `src/`。

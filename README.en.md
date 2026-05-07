@@ -51,14 +51,22 @@ Developing locally but needing a real server to actually run things means a lot 
 
 ## Install
 
+**The default `srv` is the Go binary** — built from source under [`go/`](./go) into the repo root. The Python implementation is preserved in [`python/`](./python) and can be invoked explicitly via `python python/srv.py`.
+
 ### Prerequisites
 
-- Python 3.9+ (Windows Store Python is fine)
-- OpenSSH client (built-in on Windows 10+; usually default on macOS / Linux)
+- Go 1.22+ (only to build — https://go.dev/dl/)
+- OpenSSH server on the remote (the Go binary speaks SSH itself; no local ssh client needed)
 
-### Windows
+### Build
 
-Add the tool directory to your user PATH:
+```sh
+cd go
+go build -o ../srv.exe .          # Windows
+go build -o ../srv     .          # macOS / Linux
+```
+
+### Windows — add to PATH
 
 ```powershell
 [Environment]::SetEnvironmentVariable(
@@ -68,25 +76,33 @@ Add the tool directory to your user PATH:
 )
 ```
 
-Open a new PowerShell, then `srv version`.
+Open a new PowerShell; `srv version` should print `srv 2.x.x`.
 
-### macOS / Linux
-
-Add the project directory to PATH (recommended; least intrusive):
+### macOS / Linux — add to PATH
 
 ```sh
 echo 'export PATH="$PATH:/path/to/srv"' >> ~/.bashrc   # or ~/.zshrc
-chmod +x /path/to/srv/srv
 exec $SHELL && srv version
 ```
 
-Or symlink the shim into an existing PATH directory (the shim follows symlinks):
+Or symlink to a directory already on PATH:
 
 ```sh
-chmod +x /path/to/srv/srv
 ln -s /path/to/srv/srv ~/.local/bin/srv
 srv version
 ```
+
+### Python version (optional)
+
+If you don't want to build, or you're on a host without Go, the Python script is a drop-in equivalent:
+
+```sh
+python python/srv.py status
+python python/srv.py cd /opt
+# ...
+```
+
+Both versions **share `~/.srv/{config,sessions,jobs}.json`**, so you can switch back and forth freely.
 
 ---
 
@@ -377,21 +393,21 @@ Claude Code gets 14 tools via stdio MCP (`run`, `cd`, `pwd`, `use`, `status`, `c
 
 ```sh
 # 1) personal global (works in any directory)
-claude mcp add srv --scope user -- python D:\WorkSpace\server\srv\src\srv.py mcp
+claude mcp add srv --scope user -- D:\WorkSpace\server\srv\srv.exe mcp
 
 # 2) project-shared (run from repo root; writes .mcp.json, commit it)
 cd <your-project>
-claude mcp add srv --scope project -- python D:\WorkSpace\server\srv\src\srv.py mcp
+claude mcp add srv --scope project -- D:\WorkSpace\server\srv\srv.exe mcp
 
 # 3) project-private (not in .mcp.json, only you see it)
 cd <your-project>
-claude mcp add srv --scope local -- python D:\WorkSpace\server\srv\src\srv.py mcp
+claude mcp add srv --scope local -- D:\WorkSpace\server\srv\srv.exe mcp
 
 # verify (works for any scope)
 claude mcp list   # should show  srv: ✓ Connected
 ```
 
-> On macOS / Linux replace the path with `/path/to/srv/src/srv.py` — or just `srv mcp` if `srv` is on PATH.
+> On macOS / Linux replace the path with `/path/to/srv/srv` (no `.exe`). Or just `srv mcp` if `srv` is on PATH — that's the cleanest form.
 
 New Claude Code sessions pick it up automatically; existing sessions need `/mcp` to reconnect.
 
@@ -399,8 +415,8 @@ New Claude Code sessions pick it up automatically; existing sessions need `/mcp`
 
 ```toml
 [mcp_servers.srv]
-command = "python"
-args = ["D:\\WorkSpace\\server\\srv\\src\\srv.py", "mcp"]
+command = "D:\\WorkSpace\\server\\srv\\srv.exe"
+args = ["mcp"]
 ```
 
 ---

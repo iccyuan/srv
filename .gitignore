@@ -27,7 +27,9 @@ Thumbs.db
 # Local config that shouldn't be committed
 *.local
 
-# Go build artifacts
+# Go build artifacts (root binaries are the default `srv`/`srv.exe`)
+/srv
+/srv.exe
 go/srv
 go/srv.exe
 *.test

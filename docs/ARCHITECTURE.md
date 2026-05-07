@@ -8,18 +8,25 @@
 
 ```
 srv/
-├── src/
-│   └── srv.py        所有逻辑(单文件,~1500 行)
-├── srv.cmd           Windows shim:找 python / py 后调 src\srv.py
-├── srv               POSIX bash shim(symlink-safe):调 python3 src/srv.py
-├── README.md         用户文档(中文)
-├── README.en.md      用户文档(英文)
-├── CHANGELOG.md      版本历史
-├── LICENSE           Apache 2.0
+├── srv.exe / srv      默认入口:Go 编译产物(放在仓库根,gitignored)
+├── go/                Go 实现(默认版本,v2.x)
+│   ├── main.go        入口、全局 flag、派发
+│   ├── client.go      crypto/ssh + sftp 客户端
+│   ├── ops.go / cmds.go / check.go / jobs.go / sync.go / mcp.go ...
+│   ├── go.mod / go.sum
+│   └── README.md      Go 实现的差异和编译指南
+├── python/            Python 实现(保留,v0.7.x)
+│   └── srv.py         单文件,~1500 行
+├── README.md          用户文档(中文)
+├── README.en.md       用户文档(英文)
+├── CHANGELOG.md       版本历史
+├── LICENSE            Apache 2.0
 ├── .gitignore
 └── docs/
     └── ARCHITECTURE.md   本文(开发者文档)
 ```
+
+本文档主要描述 Python 实现的内部结构,因为 Go 版本是 1:1 对齐功能后的重写。Go 版本的模块组织见 [`../go/README.md`](../go/README.md)。
 
 运行时数据在 `~/.srv/`(可用 `$SRV_HOME` 改):`config.json` / `sessions.json` / `jobs.json` / `cm/<host>.sock`。
 
