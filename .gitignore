@@ -30,6 +30,7 @@ Thumbs.db
 # Go build artifacts (root binaries are the default `srv`/`srv.exe`)
 /srv
 /srv.exe
+/srv.exe~
 go/srv
 go/srv.exe
 *.test
