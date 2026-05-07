@@ -38,6 +38,9 @@ func daemonCall(conn net.Conn, req daemonRequest, deadline time.Duration) (*daem
 		_ = conn.SetDeadline(time.Now().Add(deadline))
 		defer conn.SetDeadline(time.Time{})
 	}
+	if req.V == 0 {
+		req.V = DaemonProtoVersion
+	}
 	if req.ID == 0 {
 		req.ID = int(time.Now().UnixNano() & 0x7fffffff)
 	}
@@ -56,6 +59,11 @@ func daemonCall(conn net.Conn, req daemonRequest, deadline time.Duration) (*daem
 	var resp daemonResponse
 	if jerr := json.Unmarshal([]byte(line), &resp); jerr != nil {
 		return nil, jerr
+	}
+	if resp.V > DaemonProtoVersion {
+		fmt.Fprintf(os.Stderr,
+			"srv: daemon protocol v%d, this srv knows v%d. Restart the daemon (`srv daemon stop`) or upgrade srv.\n",
+			resp.V, DaemonProtoVersion)
 	}
 	return &resp, nil
 }
@@ -97,6 +105,7 @@ func tryDaemonStreamRun(profileName, cwd, command string) (int, bool) {
 	defer conn.Close()
 
 	req := daemonRequest{
+		V:       DaemonProtoVersion,
 		ID:      int(time.Now().UnixNano() & 0x7fffffff),
 		Op:      "stream_run",
 		Profile: profileName,
@@ -112,6 +121,7 @@ func tryDaemonStreamRun(profileName, cwd, command string) (int, bool) {
 	}
 
 	rd := bufio.NewReader(conn)
+	versionChecked := false
 	for {
 		line, rerr := rd.ReadString('\n')
 		if rerr != nil {
@@ -123,6 +133,14 @@ func tryDaemonStreamRun(profileName, cwd, command string) (int, bool) {
 		var ch streamChunk
 		if jerr := json.Unmarshal([]byte(line), &ch); jerr != nil {
 			continue
+		}
+		if !versionChecked {
+			versionChecked = true
+			if ch.V > DaemonProtoVersion {
+				fmt.Fprintf(os.Stderr,
+					"srv: daemon protocol v%d, this srv knows v%d. Restart the daemon or upgrade srv.\n",
+					ch.V, DaemonProtoVersion)
+			}
 		}
 		switch ch.K {
 		case "out":

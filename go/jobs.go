@@ -19,7 +19,8 @@ type JobRecord struct {
 }
 
 type jobsFile struct {
-	Jobs []*JobRecord `json:"jobs"`
+	Version int          `json:"_version,omitempty"`
+	Jobs    []*JobRecord `json:"jobs"`
 }
 
 func loadJobsFile() *jobsFile {
@@ -34,10 +35,12 @@ func loadJobsFile() *jobsFile {
 	if j.Jobs == nil {
 		j.Jobs = []*JobRecord{}
 	}
+	warnIfNewerSchema(JobsFile(), j.Version)
 	return j
 }
 
 func saveJobsFile(j *jobsFile) error {
+	j.Version = SchemaVersion
 	return writeJSONFile(JobsFile(), j)
 }
 

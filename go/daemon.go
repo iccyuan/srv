@@ -35,7 +35,15 @@ import (
 // Heavy / streaming ops (push, pull, sync, shell, jobs) stay direct; the
 // daemon only short-circuits the cold-handshake hot paths.
 
+// DaemonProtoVersion is the wire format identifier sent on every request
+// and response. Bump when a verb's argument shape or response shape
+// changes incompatibly. Older daemons receive `"v": <newer>` and ignore
+// it (json.Unmarshal default for unknown fields); newer daemons receive
+// requests without `"v"` and treat them as v0 (unversioned, pre-2.4.1).
+const DaemonProtoVersion = 1
+
 type daemonRequest struct {
+	V       int    `json:"v,omitempty"`
 	ID      int    `json:"id"`
 	Op      string `json:"op"`
 	Profile string `json:"profile,omitempty"`
@@ -50,6 +58,7 @@ type daemonRequest struct {
 }
 
 type daemonResponse struct {
+	V        int      `json:"v,omitempty"`
 	ID       int      `json:"id"`
 	OK       bool     `json:"ok"`
 	Err      string   `json:"err,omitempty"`
@@ -69,6 +78,7 @@ type daemonResponse struct {
 //	K = "end"  -> command completed; C is exit code
 //	K = "fail" -> pre-execution failure (e.g. dial); Err carries reason
 type streamChunk struct {
+	V   int    `json:"v,omitempty"`
 	ID  int    `json:"id,omitempty"`
 	K   string `json:"k"`
 	B   string `json:"b,omitempty"`
@@ -236,6 +246,7 @@ func (s *daemonState) requestStop() {
 }
 
 func (s *daemonState) write(wr *bufio.Writer, resp daemonResponse) {
+	resp.V = DaemonProtoVersion
 	b, _ := json.Marshal(resp)
 	wr.Write(b)
 	wr.WriteByte('\n')
@@ -498,6 +509,7 @@ func (s *daemonState) handlePwd(req daemonRequest) daemonResponse {
 // the remote process gets a SIGHUP and we don't leak it.
 func (s *daemonState) handleStreamRun(req daemonRequest, wr *bufio.Writer, wrMu *sync.Mutex) {
 	emit := func(ch streamChunk) error {
+		ch.V = DaemonProtoVersion
 		ch.ID = req.ID
 		b, _ := json.Marshal(ch)
 		wrMu.Lock()

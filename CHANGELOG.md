@@ -23,6 +23,21 @@ Python 版本最后一次有意义的迭代是 0.7.5(MCP 加固 + ControlMaster 
 
 ---
 
+## [Go 2.4.1] — 2026-05-07
+
+### Added
+**数据格式 future-proofing + sync 压缩**——三处轻量改动:
+
+1. **JSON 文件加 `_version` 字段**(常量 `SchemaVersion = 1`):`config.json` / `sessions.json` / `jobs.json` 加载时若 `_version > SchemaVersion` 给一行 stderr 警告但仍尝试用,保存时总是写当前版本。日后字段语义重命名(比如 cwds 嵌套结构变化)有显式迁移点;新 srv 读老文件无 `_version` → 当作 v0,下次保存自动升级。
+2. **sync tar 流加 gzip 压缩**(`compress/gzip`,Level 默认 5):typical 文本/代码 ~70% 体积减少。Profile 键 `compress_sync`,默认 `true`;远端命令对应 `tar -xzf -`。LAN 上的 CPU 代价是单位毫秒级(本机 SHA256 测试也类似量级),不可感知;弱网 sync 时间显著下降。
+3. **Daemon 协议加 `v` 字段**(常量 `DaemonProtoVersion = 1`):`daemonRequest` / `daemonResponse` / `streamChunk` 都带上。CLI 收到 `v > DaemonProtoVersion` 给一行 stderr 警告(`Restart the daemon or upgrade srv`)。流式响应只在第一帧检查,不每帧 spam。
+
+### Notes
+- 三处改动全是**前向 / 后向兼容**的:老 srv 看不懂 `_version`/`v` 字段会被 json.Unmarshal 默默忽略;新 srv 看到没字段当 v0 处理。无破坏性。
+- 我刻意没引入"硬性版本拒绝"——目前 SchemaVersion=1,DaemonProtoVersion=1,只有"警告 + 尽力执行"的语义。实际有迁移需要时再升版本号 + 写 migration code。
+
+---
+
 ## [Go 2.4.0] — 2026-05-07
 
 ### Added

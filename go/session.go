@@ -22,6 +22,7 @@ type SessionRecord struct {
 }
 
 type sessionsFile struct {
+	Version  int                       `json:"_version,omitempty"`
 	Sessions map[string]*SessionRecord `json:"sessions"`
 }
 
@@ -37,10 +38,12 @@ func loadSessionsFile() *sessionsFile {
 	if s.Sessions == nil {
 		s.Sessions = map[string]*SessionRecord{}
 	}
+	warnIfNewerSchema(SessionsFile(), s.Version)
 	return s
 }
 
 func writeSessionsFile(s *sessionsFile) error {
+	s.Version = SchemaVersion
 	return writeJSONFile(SessionsFile(), s)
 }
 

@@ -2,6 +2,7 @@ package main
 
 import (
 	"archive/tar"
+	"compress/gzip"
 	"fmt"
 	"io"
 	"io/fs"
@@ -473,6 +474,8 @@ func collectSyncFiles(o *syncOpts, localRoot string, allExcludes []string) ([]st
 
 // tarUploadStream builds a tar stream of files (rooted at localRoot) entirely
 // in Go and pipes it into a remote `tar -xf -` running in remoteRoot.
+// Gzips the stream when profile.CompressSync is true (default) -- typical
+// 70% reduction on text/code, ~ms-level CPU cost.
 func tarUploadStream(profile *Profile, localRoot string, files []string, remoteRoot string) (int, error) {
 	c, err := Dial(profile)
 	if err != nil {
@@ -484,48 +487,66 @@ func tarUploadStream(profile *Profile, localRoot string, files []string, remoteR
 	if err != nil {
 		return 1, err
 	}
-	remoteCmd := fmt.Sprintf("mkdir -p %s && cd %s && tar -xf -", shQuotePath(expanded), shQuotePath(expanded))
+	tarFlag := "-xf"
+	if profile.GetCompressSync() {
+		tarFlag = "-xzf"
+	}
+	remoteCmd := fmt.Sprintf("mkdir -p %s && cd %s && tar %s -",
+		shQuotePath(expanded), shQuotePath(expanded), tarFlag)
 
-	// Build tar in-memory (for typical use cases this is fine; for very
-	// large transfers we could pipe via io.Pipe and a goroutine).
 	pr, pw := io.Pipe()
 	errCh := make(chan error, 1)
 	go func() {
 		defer pw.Close()
-		tw := tar.NewWriter(pw)
-		defer tw.Close()
-		for _, f := range files {
-			full := filepath.Join(localRoot, f)
-			info, err := os.Stat(full)
-			if err != nil {
-				errCh <- err
-				return
-			}
-			hdr, err := tar.FileInfoHeader(info, "")
-			if err != nil {
-				errCh <- err
-				return
-			}
-			hdr.Name = f // relative path with forward slashes
-			if err := tw.WriteHeader(hdr); err != nil {
-				errCh <- err
-				return
-			}
-			if !info.IsDir() {
-				src, err := os.Open(full)
+		// Sink chain: tar -> [gzip ->] pw
+		var sink io.WriteCloser = pw
+		if profile.GetCompressSync() {
+			sink = gzip.NewWriter(pw)
+		}
+		tw := tar.NewWriter(sink)
+		writeFiles := func() error {
+			for _, f := range files {
+				full := filepath.Join(localRoot, f)
+				info, err := os.Stat(full)
 				if err != nil {
-					errCh <- err
-					return
+					return err
 				}
-				if _, err := io.Copy(tw, src); err != nil {
-					src.Close()
-					errCh <- err
-					return
+				hdr, err := tar.FileInfoHeader(info, "")
+				if err != nil {
+					return err
 				}
+				hdr.Name = f
+				if err := tw.WriteHeader(hdr); err != nil {
+					return err
+				}
+				if info.IsDir() {
+					continue
+				}
+				src, oerr := os.Open(full)
+				if oerr != nil {
+					return oerr
+				}
+				_, copyErr := io.Copy(tw, src)
 				src.Close()
+				if copyErr != nil {
+					return copyErr
+				}
+			}
+			return nil
+		}
+		err := writeFiles()
+		// Order matters: tar.Writer.Close flushes its trailer; the gzip
+		// writer must Close after that to write its own trailer; only
+		// then can pw close so the remote tar sees clean EOF.
+		if cerr := tw.Close(); err == nil {
+			err = cerr
+		}
+		if sink != pw {
+			if cerr := sink.Close(); err == nil {
+				err = cerr
 			}
 		}
-		errCh <- nil
+		errCh <- err
 	}()
 
 	rc, runErr := c.RunStreamStdin(remoteCmd, pr)

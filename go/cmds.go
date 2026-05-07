@@ -216,6 +216,8 @@ func applyProfileSet(p *Profile, key, value string) {
 		p.Multiplex = asBool()
 	case "compression":
 		p.Compression = asBool()
+	case "compress_sync":
+		p.CompressSync = asBool()
 	case "connect_timeout":
 		n, _ := strconv.Atoi(value)
 		p.ConnectTimeout = n

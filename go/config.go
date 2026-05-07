@@ -48,6 +48,10 @@ type Profile struct {
 	// the final target. Each entry: "[user@]host[:port]". Auth uses the
 	// same agent + identity_file + default key chain as the profile.
 	Jump              []string `json:"jump,omitempty"`
+	// CompressSync controls whether `srv sync` gzips the tar stream over
+	// the wire. nil = default true. ~70% size reduction for code, single-
+	// digit ms CPU on the hot path.
+	CompressSync *bool `json:"compress_sync,omitempty"`
 	// Free-form bag for unknown keys forwarded from older Python configs.
 	Extra map[string]any `json:"-"`
 	// Name is the profile's lookup key in Config.Profiles. Populated by
@@ -91,6 +95,13 @@ func (p *Profile) GetCompression() bool {
 	return *p.Compression
 }
 
+func (p *Profile) GetCompressSync() bool {
+	if p.CompressSync == nil {
+		return true
+	}
+	return *p.CompressSync
+}
+
 func (p *Profile) GetDefaultCwd() string {
 	if p.DefaultCwd == "" {
 		return "~"
@@ -98,8 +109,16 @@ func (p *Profile) GetDefaultCwd() string {
 	return p.DefaultCwd
 }
 
+// SchemaVersion identifies the current on-disk JSON shape. Bumped when a
+// breaking field rename / semantic change requires migration. Older srv
+// reading a newer file logs a warning and proceeds best-effort; newer srv
+// reading an older file (or one without _version) treats it as version 0
+// and silently upgrades on next save.
+const SchemaVersion = 1
+
 // Config maps to ~/.srv/config.json.
 type Config struct {
+	Version        int                 `json:"_version,omitempty"`
 	DefaultProfile string              `json:"default_profile"`
 	Profiles       map[string]*Profile `json:"profiles"`
 }
@@ -124,11 +143,24 @@ func LoadConfig() (*Config, error) {
 	if cfg.Profiles == nil {
 		cfg.Profiles = map[string]*Profile{}
 	}
+	warnIfNewerSchema(ConfigFile(), cfg.Version)
 	return cfg, nil
 }
 
 func SaveConfig(cfg *Config) error {
+	cfg.Version = SchemaVersion
 	return writeJSONFile(ConfigFile(), cfg)
+}
+
+// warnIfNewerSchema emits one stderr line when an on-disk file declares a
+// schema we don't know about yet. We still try to use it (forward compat),
+// but the user should know they may need a srv upgrade.
+func warnIfNewerSchema(path string, version int) {
+	if version > SchemaVersion {
+		fmt.Fprintf(os.Stderr,
+			"srv: %s is schema version %d; this srv knows %d. Upgrade srv to be safe.\n",
+			path, version, SchemaVersion)
+	}
 }
 
 func writeJSONFile(path string, v any) error {
