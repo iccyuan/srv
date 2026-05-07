@@ -8,37 +8,65 @@ import (
 
 const bashCompletion = `# srv bash completion
 _srv() {
-    local cur prev words cword
+    local cur prev
     COMPREPLY=()
     cur="${COMP_WORDS[COMP_CWORD]}"
     prev="${COMP_WORDS[COMP_CWORD-1]:-}"
     local subs="init config use cd pwd status check run exec push pull sync jobs logs kill sessions completion mcp help version"
-    local sub=""
-    local i
-    for ((i=1; i<COMP_CWORD; i++)); do
+
+    # Track first and second positional args, skipping global flags. The
+    # AST-style tokens give us context for nested completion (e.g. for
+    # 'config use <prof>' we need both 'config' and 'use').
+    local sub="" sub2=""
+    local i=1
+    while [[ $i -lt $COMP_CWORD ]]; do
         case "${COMP_WORDS[i]}" in
             -P|--profile) i=$((i+1)) ;;
             --profile=*|-t|--tty|-d|--detach) ;;
-            *) sub="${COMP_WORDS[i]}"; break ;;
+            *)
+                if [[ -z $sub ]]; then sub="${COMP_WORDS[i]}"
+                elif [[ -z $sub2 ]]; then sub2="${COMP_WORDS[i]}"
+                fi
+                ;;
         esac
+        i=$((i+1))
     done
+
+    # Profile-name completion right after -P / --profile.
+    if [[ "$prev" == "-P" || "$prev" == "--profile" ]]; then
+        local profs
+        profs=$(srv _profiles 2>/dev/null)
+        COMPREPLY=( $(compgen -W "$profs" -- "$cur") )
+        return 0
+    fi
+
     if [[ -z "$sub" ]]; then
         COMPREPLY=( $(compgen -W "$subs" -- "$cur") )
         return 0
     fi
+
+    # Helper: load remote entries from 'srv _ls' into COMPREPLY (preserves
+    # spaces in names). Optional first arg "dirs" filters dirs-only.
+    # MSYS_NO_PATHCONV=1 stops git-bash from mangling absolute paths like
+    # /opt/ into C:/Program Files/Git/opt/ when invoking the native exe.
+    _srv_remote_ls() {
+        local mode="${1:-all}" line
+        local -a out=()
+        while IFS= read -r line; do
+            [[ -z $line ]] && continue
+            if [[ $mode == "dirs" && $line != */ ]]; then continue; fi
+            out+=("$line")
+        done < <(MSYS_NO_PATHCONV=1 srv _ls "$cur" 2>/dev/null)
+        COMPREPLY=("${out[@]}")
+        # Don't auto-append a space, so user can keep typing path components.
+        compopt -o nospace 2>/dev/null
+    }
+
     case "$sub" in
         config)
-            local action=""
-            for ((i=1; i<COMP_CWORD; i++)); do
-                case "${COMP_WORDS[i]}" in
-                    -P|--profile) i=$((i+1)) ;;
-                    config) ;;
-                    *) action="${COMP_WORDS[i]}"; break ;;
-                esac
-            done
-            if [[ "$action" == "config" || -z "$action" ]]; then
+            if [[ -z $sub2 ]]; then
                 COMPREPLY=( $(compgen -W "list use remove show set" -- "$cur") )
-            elif [[ "$action" == "use" || "$action" == "remove" || "$action" == "show" ]]; then
+            elif [[ "$sub2" == "use" || "$sub2" == "remove" || "$sub2" == "show" ]]; then
                 local profs
                 profs=$(srv _profiles 2>/dev/null)
                 COMPREPLY=( $(compgen -W "$profs" -- "$cur") )
@@ -55,15 +83,20 @@ _srv() {
         completion)
             COMPREPLY=( $(compgen -W "bash zsh powershell" -- "$cur") )
             ;;
+        cd)
+            _srv_remote_ls dirs
+            ;;
+        pull)
+            if [[ -z $sub2 ]]; then _srv_remote_ls all
+            else COMPREPLY=( $(compgen -f -- "$cur") )
+            fi
+            ;;
         push)
-            COMPREPLY=( $(compgen -f -- "$cur") )
+            if [[ -z $sub2 ]]; then COMPREPLY=( $(compgen -f -- "$cur") )
+            else _srv_remote_ls all
+            fi
             ;;
     esac
-    if [[ "$prev" == "-P" || "$prev" == "--profile" ]]; then
-        local profs
-        profs=$(srv _profiles 2>/dev/null)
-        COMPREPLY=( $(compgen -W "$profs" -- "$cur") )
-    fi
 }
 complete -F _srv srv
 `
@@ -92,15 +125,52 @@ _srv() {
         'help:show help'
         'version:show version'
     )
-    if (( CURRENT == 2 )); then
+
+    # Track first and second positional args, skipping global flags so
+    # 'srv -P prod cd <TAB>' still routes to remote-dir completion.
+    local sub sub2 i=2 token
+    while (( i < CURRENT )); do
+        token=$words[i]
+        case $token in
+            -P|--profile) (( i++ )) ;;
+            --profile=*|-t|--tty|-d|--detach) ;;
+            *)
+                if [[ -z $sub ]]; then sub=$token
+                elif [[ -z $sub2 ]]; then sub2=$token
+                fi
+                ;;
+        esac
+        (( i++ ))
+    done
+
+    # Profile-name completion right after -P / --profile.
+    if [[ $words[CURRENT-1] == (-P|--profile) ]]; then
+        local profs
+        profs=("${(@f)$(srv _profiles 2>/dev/null)}")
+        _values 'profile' $profs
+        return
+    fi
+
+    if [[ -z $sub ]]; then
         _describe 'subcommand' subs
         return
     fi
-    case "$words[2]" in
+
+    # Remote ls helper. Pass "dirs" to filter to directories only.
+    _srv_remote_ls() {
+        local mode="${1:-all}" entries
+        entries=("${(@f)$(srv _ls $words[CURRENT] 2>/dev/null)}")
+        if [[ $mode == "dirs" ]]; then
+            entries=(${(M)entries:#*/})
+        fi
+        compadd -S '' -- $entries
+    }
+
+    case "$sub" in
         config)
-            if (( CURRENT == 3 )); then
+            if [[ -z $sub2 ]]; then
                 _values 'action' list use remove show set
-            elif [[ "$words[3]" == (use|remove|show) ]]; then
+            elif [[ $sub2 == (use|remove|show) ]]; then
                 local profs
                 profs=("${(@f)$(srv _profiles 2>/dev/null)}")
                 _values 'profile' $profs
@@ -113,7 +183,17 @@ _srv() {
             ;;
         sessions) _values 'action' list show clear prune ;;
         completion) _values 'shell' bash zsh powershell ;;
-        push|pull) _files ;;
+        cd) _srv_remote_ls dirs ;;
+        pull)
+            if [[ -z $sub2 ]]; then _srv_remote_ls all
+            else _files
+            fi
+            ;;
+        push)
+            if [[ -z $sub2 ]]; then _files
+            else _srv_remote_ls all
+            fi
+            ;;
     esac
 }
 _srv "$@"

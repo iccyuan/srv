@@ -43,9 +43,14 @@ func cmdInternalLs(args []string, cfg *Config, profileOverride string) int {
 		return 0
 	}
 
-	// Live ls. Tight 3s deadline so completion never feels stuck.
-	listing, err := remoteList(profile, target, 3*time.Second)
+	// Live ls. Generous 10s deadline so first-connect handshake fits even
+	// on slow links. Subsequent calls within 5s hit the cache.
+	listing, err := remoteList(profile, target, 10*time.Second)
 	if err != nil {
+		// Surface the reason on stderr (visible to the shell when the user
+		// runs `srv _ls foo` directly; argument completers swallow stderr,
+		// so this doesn't pollute tab UX).
+		fmt.Fprintln(os.Stderr, "srv _ls:", err)
 		return 0
 	}
 	_ = writeLsCache(key, listing)
@@ -87,19 +92,24 @@ func remoteListTarget(dirPart, cwd string) string {
 // carry a trailing "/". Hidden entries are included (so `srv cd .ssh/`
 // completes), `.` and `..` are skipped.
 func remoteList(profile *Profile, target string, timeout time.Duration) ([]string, error) {
-	cmd := fmt.Sprintf("ls -1Ap %s 2>/dev/null", shQuotePath(target))
+	cmd := fmt.Sprintf("ls -1Ap -- %s", shQuotePath(target))
 	c, err := DialOpts(profile, dialOpts{timeout: timeout})
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("dial: %w", err)
 	}
 	defer c.Close()
 	res, err := c.RunCapture(cmd, "")
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("run: %w", err)
 	}
 	if res.ExitCode != 0 {
-		// Treat any non-zero (probably "no such directory") as empty.
-		return nil, nil
+		// Likely "no such directory" -- empty completion is the right answer,
+		// but surface the cause via error so the user sees it on direct calls.
+		stderr := strings.TrimSpace(res.Stderr)
+		if stderr == "" {
+			return nil, fmt.Errorf("ls exit %d", res.ExitCode)
+		}
+		return nil, fmt.Errorf("ls: %s", stderr)
 	}
 	out := []string{}
 	for _, line := range strings.Split(res.Stdout, "\n") {

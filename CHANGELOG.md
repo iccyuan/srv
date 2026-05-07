@@ -23,6 +23,25 @@ Python 版本最后一次有意义的迭代是 0.7.5(MCP 加固 + ControlMaster 
 
 ---
 
+## [Go 2.0.4] — 2026-05-07
+
+### Added
+**bash 和 zsh 也接上远端 tab 补全**(0.7.5 之前只有 PowerShell 有):
+
+- bash 模板:跟踪 `sub` / `sub2` 双层位置参数;`srv cd <TAB>` 只补远端目录,`srv pull <TAB>` 第一位远端、第二位本地,`srv push <TAB>` 反之
+- zsh 模板:同等行为,用 `compadd -S ''` 保留 dir 后斜杠不加空格
+- bash `_srv_remote_ls` 内置 `MSYS_NO_PATHCONV=1`——保护 git-bash 用户(否则 git-bash 会把 `/opt/` 自动转成 `C:/Program Files/Git/opt/` 再传给 native srv.exe)。Linux / macOS 上是无害空操作
+
+### Fixed
+- `srv _ls` 失败时把原因写到 stderr(原先静默)。argument completer 上下文里 stderr 不影响 UX,直接命令行调用时方便诊断("找不到目录 / 路径含 git-bash 路径转换 / 等")
+- `_ls` 超时从 3s 放宽到 10s——首连握手在慢链路下能装得下;命中缓存仍然 ~60ms
+
+### Notes
+- 验证脚本:bash 在 git-bash + 真服务器上 10/10 上下文通过(subcommand / config 二级 / `-P` profile / `use` profile + `--clear` / `cd` 远端 dirs / `pull` 远端 any / `push` 第一位本地 + 第二位远端)
+- zsh 模板按 zsh 约定写,未在本机测(没装 zsh);Linux 用户用过来反馈可以调
+
+---
+
 ## [Go 2.0.3] — 2026-05-07
 
 ### Added
