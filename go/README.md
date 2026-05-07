@@ -97,25 +97,36 @@ go/
 └── README.md           本文
 ```
 
-## 已实现的功能清单(对齐 Python 0.7.5)
+## 已实现的功能清单(2.6 基线;括注里是后于 Python 0.7.5 加的部分)
+
+**与 Python 0.7.5 对齐的核心**
 
 - [x] `init` / `config list / use / remove / show / set`(布尔/数字/null 自动转型)
 - [x] `use` / `use --clear` / `use`(无参 = 显示状态)
-- [x] `cd` / `pwd` / `status`(显示 multiplex / compression / connect_timeout)
-- [x] `check`(9 类诊断 + 针对性建议:no-key / host-key-changed / dns / refused / no-route / tcp-timeout / timeout / perm-denied / unknown)
+- [x] `cd` / `pwd` / `status` / `check`(9 类诊断 + 针对性建议)
 - [x] `run` / `exec`(默认子命令)、`-t` TTY、`-P` profile 覆盖
 - [x] `push` / `pull`(本地是目录自动 -r,SFTP 实现)
-- [x] `sync` —— git(--all/--staged/--modified/--untracked)、mtime(--since)、glob(--include)、list(--files / `--`)、--exclude / --root / --no-git / --dry-run、profile 的 `sync_root` 和 `sync_exclude`、默认排除 11 项
+- [x] `sync` —— git(--all/--staged/--modified/--untracked)、mtime(--since)、glob(--include)、list(--files / `--`)、--exclude / --root / --no-git / --dry-run、profile 的 `sync_root` 和 `sync_exclude`
 - [x] `-d` detach + `jobs` / `logs <id> [-f]` / `kill <id> [-9 | --signal=NAME]`
 - [x] `sessions list / show / clear / prune`(Windows 进程树跳过中间 exe)
-- [x] `completion bash / zsh / powershell`
-- [x] `mcp` —— 14 个工具(run / cd / pwd / use / status / check / list_profiles / push / pull / sync / detach / list_jobs / tail_log / kill_job),协议 2024-11-05
-- [x] `_profiles`(内部,补全用)
-- [x] `help` / `version`
-- [x] 全局 flag:`-P` / `-t` / `-d`,环境变量 `SRV_HOME` / `SRV_PROFILE` / `SRV_SESSION`
-- [x] Session 检测的 Windows 进程树游走(等价于 Python 的 `_walk_windows_processes` + intermediateExes 表)
-- [x] 已知 hosts 文件管理(accept-new on first connect)
-- [x] ssh-agent + identity_file + 默认密钥 fallback(`~/.ssh/id_ed25519` / `id_rsa` / `id_ecdsa`)+ passphrase 交互
+- [x] `completion bash / zsh / powershell` —— 含远端 tab 补全
+- [x] `mcp` —— 14 工具,协议 2024-11-05
+- [x] `_profiles` / `_ls`(补全内部用)、`help` / `version`
+- [x] 全局 flag `-P` / `-t` / `-d`,环境变量 `SRV_HOME` / `SRV_PROFILE` / `SRV_SESSION`
+- [x] Session 检测的 Windows 进程树游走、known_hosts accept-new、ssh-agent + identity_file + 默认密钥 fallback + passphrase 交互
+
+**Go 版本之后追加(超出 Python 0.7.5)**
+
+- [x] `shell`(原生 PTY 远端 shell,2.0)
+- [x] ProxyJump 跳板链 `profile.jump`(2.1+)
+- [x] daemon 池化连接(`srv daemon` / status / restart / stop / logs / prune-cache + auto-spawn,2.2-2.6)
+- [x] daemon 协议 streaming(`stream_run`,2.4)+ schema 版本字段(2.4.1)
+- [x] sync gzip 压缩 `compress_sync`(2.4.1)+ `sync --watch`(2.x)+ `sync --delete` git 模式(2.6)
+- [x] **`tunnel`** —— ssh -L 等价的本地→远端 TCP 转发(2.5)
+- [x] **`edit`** —— SFTP 拉到 temp / `$EDITOR` / mtime 改了推回(2.5)
+- [x] **`open` / `code` / `diff` / `doctor`** —— 本地工作流辅助(2.6)
+- [x] **`profiles` / `config edit`** —— profile 管理别名(2.6)
+- [x] **`env list / set / unset / clear`** + profile 级 `env` 字段,运行远端命令前自动注入(2.6)
 
 ## 已知不同(刻意为之)
 

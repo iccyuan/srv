@@ -18,6 +18,7 @@
 | 对比本地/远端文件 | `srv diff ./a.py` |
 | 端口转发(看远端 dev server) | `srv tunnel 8080` |
 | 远端文件本地编辑器改 | `srv edit /etc/foo.conf` |
+| VS Code 远程打开远端目录 | `srv code /opt/app` |
 | 打开远端文件本地副本 | `srv open logs/app.log` |
 | 后台长任务 | `srv -d ./build.sh` |
 | 查后台任务 | `srv jobs` / `srv logs <id> -f` |
@@ -161,6 +162,7 @@ srv profiles edit <name>            # config edit <name> 简写
 srv env list                        # 列出 profile 级远端环境变量
 srv env set KEY value               # 运行远端命令前自动注入 KEY=value
 srv env unset KEY                   # 删除一个环境变量
+srv env clear                       # 清空当前 profile 的环境变量
 ```
 
 ### profile 快切
@@ -334,6 +336,22 @@ srv sessions clear    # 删当前 session 记录
 srv sessions prune    # GC:删所有 PID 已不存在的 session
 ```
 
+### daemon 管理
+
+`srv` 在执行 `_ls` / 非 TTY 命令 / `cd` 时会自动起一个 daemon(`~/.srv/daemon.sock`),把 SSH 连接 pool 起来,后续命令省去 ~2.7s 握手。多数情况你不用管它,需要直接操作时:
+
+```
+srv daemon                          # 前台跑(主要给调试)
+srv daemon status                   # 看池里的 profile / uptime,可读格式
+srv daemon status --json            # 同上,机器可读 JSON
+srv daemon restart                  # 停掉再后台拉起
+srv daemon stop                     # 停
+srv daemon logs                     # cat 自动起的 daemon 的 stdout/stderr 日志(~/.srv/daemon.log)
+srv daemon prune-cache              # 清掉 _ls 远端补全缓存(~/.srv/cache/)
+```
+
+socket 在 `~/.srv/daemon.sock`(Windows 上 AF_UNIX,需 Win10 1803+)。Daemon 30 分钟全空闲会自停;每条 SSH 连接 10 分钟未用会被回收。
+
 ### shell 补全(tab 自动补全)
 
 **PowerShell**(永久生效——加到 `$PROFILE`,新开 shell 即用):
@@ -407,6 +425,9 @@ PowerShell 的脚本会**烧入 srv.exe 的绝对路径**(因为 ArgumentComplet
 | `control_persist` | `10m` | ControlMaster socket 闲置保留时长 |
 | `sync_root` | null | `srv sync` 的默认远端根(命令行不带位置参数时用) |
 | `sync_exclude` | `[]` | `srv sync` 的 profile 级追加排除(与默认排除合并) |
+| `compress_sync` | true | `srv sync` 的 tar 流走 gzip 压缩(代码 / 文本约 -70%;CPU 单位毫秒) |
+| `env` | `{}` | profile 级远端环境变量,在每条远端命令 / detached job 前注入(`srv env ...` 维护) |
+| `jump` | `[]` | ProxyJump 跳板链,每项 `[user@]host[:port]`,按数组顺序逐跳 |
 | `ssh_options` | `[]` | 任意原始 `-o` 选项数组,**最后**附加(覆盖前面的默认) |
 
 ---

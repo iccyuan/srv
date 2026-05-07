@@ -76,6 +76,7 @@ Integrations:
   srv daemon stop                        stop the running daemon
   srv daemon restart                     restart background daemon
   srv daemon logs                        print auto-spawn daemon log
+  srv daemon prune-cache                 drop the remote-completion (_ls) cache
 
 Profile resolution (highest first):
   -P/--profile flag  >  session pin (` + "`" + `srv use` + "`" + `)  >  $SRV_PROFILE  >  default

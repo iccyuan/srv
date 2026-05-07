@@ -18,6 +18,7 @@
 | Compare local/remote file | `srv diff ./a.py` |
 | Forward a port (see remote dev server) | `srv tunnel 8080` |
 | Edit a remote file in $EDITOR | `srv edit /etc/foo.conf` |
+| Open a remote folder in VS Code | `srv code /opt/app` |
 | Open a remote file locally | `srv open logs/app.log` |
 | Long-running background task | `srv -d ./build.sh` |
 | Inspect background jobs | `srv jobs` / `srv logs <id> -f` |
@@ -161,6 +162,7 @@ srv profiles edit <name>            # short alias for config edit <name>
 srv env list                        # list profile-level remote env vars
 srv env set KEY value               # inject KEY=value before remote commands
 srv env unset KEY                   # remove one profile env var
+srv env clear                       # drop all env vars for this profile
 ```
 
 ### Quick profile switching
@@ -337,6 +339,22 @@ srv sessions clear    # drop current session record
 srv sessions prune    # GC: remove records whose pid no longer exists
 ```
 
+### Daemon management
+
+`srv` auto-spawns a daemon (`~/.srv/daemon.sock`) the first time it needs `_ls`, a non-TTY command, or `cd` — pooling SSH connections so subsequent calls skip the ~2.7s handshake. You usually don't touch it; for direct control:
+
+```
+srv daemon                          # run in foreground (mainly for debugging)
+srv daemon status                   # show pooled profiles / uptime (human-readable)
+srv daemon status --json            # same, machine-readable JSON
+srv daemon restart                  # stop and respawn in the background
+srv daemon stop                     # stop
+srv daemon logs                     # cat the auto-spawned daemon's stdout/stderr log (~/.srv/daemon.log)
+srv daemon prune-cache              # drop the _ls remote-completion cache (~/.srv/cache/)
+```
+
+Socket lives at `~/.srv/daemon.sock` (AF_UNIX on Windows too — needs Win10 1803+). The daemon self-exits after 30 minutes idle; per-profile SSH connections are reaped after 10 minutes of disuse.
+
 ### Shell completion (tab completion)
 
 **PowerShell** (persistent — added to `$PROFILE`, picked up by every new shell):
@@ -408,7 +426,9 @@ Set with `srv config set <profile> <key> <value>`. Bool strings (`true`/`false`)
 | `control_persist` | `10m` | How long ControlMaster sockets linger idle |
 | `sync_root` | null | Default remote root for `srv sync` (used when no positional arg given) |
 | `sync_exclude` | `[]` | Profile-level extra excludes for `srv sync`, merged with defaults |
-| `env` | `{}` | Profile-level environment variables prepended to remote commands |
+| `compress_sync` | true | Gzip the `srv sync` tar stream (~70% smaller for code/text; ms-level CPU) |
+| `env` | `{}` | Profile-level environment variables, prepended to every remote command and detached job (managed via `srv env ...`) |
+| `jump` | `[]` | ProxyJump bastion chain. Each entry `[user@]host[:port]`, dialed in array order before the final target |
 | `ssh_options` | `[]` | Raw `-o` strings, appended **last** (overrides everything above) |
 
 ---
