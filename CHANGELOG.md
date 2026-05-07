@@ -2,7 +2,24 @@
 
 格式参考 [Keep a Changelog](https://keepachangelog.com)。版本号在破坏性变更时增加。
 
-Python 版本和 Go 版本走独立版本号:Python 在 `0.x` 序列,Go 从 `2.0` 起步。两版**共享 `~/.srv/` 配置和状态目录**,可来回切换使用。
+**维护状态(2026-05-07 起)**:
+
+- **Go 实现** (`go/`,**默认 `srv` 入口**):正常维护,接收新功能和 bug 修复
+- **Python 实现** (`python/`):**已冻结在 0.7.5**,不再接收功能或修复;仍可显式 `python python/srv.py ...` 调用,行为对齐 Go 2.0.1。后续可能从仓库移除,但 git 历史保留
+
+两版共享 `~/.srv/{config,sessions,jobs}.json`,迁移期间可来回切换。
+
+---
+
+## 维护策略变更 — 2026-05-07
+
+冻结 Python 实现,后续单走 Go。原因:
+
+1. Python 版本曾深度依赖系统 ssh/scp,在 Windows 上累积了一系列 OpenSSH 9.5p2 quirks 的 workaround;Go 版本用 `crypto/ssh` 直接做协议,这些坑根本不存在。
+2. 同时维护两份实现的迁移摩擦 > 收益(Python 的优势是"不用编译",但用户已经有 Go 工具链)。
+3. Go 二进制 8MB 单文件,部署体验比"Python + 系统 ssh + 各种 shim"明显更好。
+
+Python 版本最后一次有意义的迭代是 0.7.5(MCP 加固 + ControlMaster 修复 + tilde 引号 fix),与 Go 2.0.1 行为对齐;之后任何新坑只在 Go 侧修。
 
 ---
 

@@ -2,7 +2,7 @@
 
 [中文](./README.md) | English
 
-> Cross-platform SSH command runner. Configure locally, run on the remote. Persistent cwd, connection multiplexing, per-shell session isolation, detached jobs. Callable from Bash or as an MCP server (Claude Code / Codex). Zero third-party deps — just Python 3 + system `ssh` / `scp`.
+> Cross-platform SSH command runner. Configure locally, run on the remote. Persistent cwd, connection multiplexing, per-shell session isolation, detached jobs. Callable from Bash or as an MCP server (Claude Code / Codex). **Default is the Go binary** (zero runtime deps, built-in SSH protocol). The Python implementation is preserved in [`python/`](./python) but **no longer maintained**.
 
 ## Cheat sheet
 
@@ -92,9 +92,12 @@ ln -s /path/to/srv/srv ~/.local/bin/srv
 srv version
 ```
 
-### Python version (optional)
+### Python version (frozen, unmaintained)
 
-If you don't want to build, or you're on a host without Go, the Python script is a drop-in equivalent:
+`python/srv.py` stops at **v0.7.5** and will receive **no further features or bug fixes**. It still works (shares `~/.srv/{config,sessions,jobs}.json`, behavior matches Go 2.0.1) and is useful when:
+
+- You're on a host without a Go toolchain
+- You need to compare behavior during a migration
 
 ```sh
 python python/srv.py status
@@ -102,7 +105,7 @@ python python/srv.py cd /opt
 # ...
 ```
 
-Both versions **share `~/.srv/{config,sessions,jobs}.json`**, so you can switch back and forth freely.
+All new work — features, bug fixes, Windows OpenSSH workarounds — happens only on the Go side. The Python implementation may be removed in a future release; git history will preserve it.
 
 ---
 
@@ -500,4 +503,4 @@ The MCP server is loaded at session startup. Open a **new** Claude Code session,
 
 ## Version
 
-Currently **0.7.5**. Version bumps on breaking changes — see `srv version` and the `VERSION` constant near the top of `srv.py`.
+Currently **Go 2.0.1** (what `srv version` prints). Version bumps on breaking changes; the Python implementation is frozen at 0.7.5 and won't receive further updates. Full history in [CHANGELOG.md](./CHANGELOG.md).

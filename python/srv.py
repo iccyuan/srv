@@ -1,6 +1,11 @@
 #!/usr/bin/env python3
 """srv - run commands on a remote SSH server with persistent cwd.
 
+NOTE: This Python implementation is FROZEN at 0.7.5 and no longer
+maintained. The default `srv` is now the Go binary at the repo root
+(see ../go/). Both share ~/.srv/{config,sessions,jobs}.json so you can
+switch freely; new features and fixes only land on the Go side.
+
 Quick start:
   srv init                       configure a profile interactively
   srv config list                show profiles

@@ -2,7 +2,7 @@
 
 [English](./README.en.md) | 中文
 
-> 跨平台 SSH 命令工具:本地配置,远端执行。持久 cwd / 连接复用 / 会话隔离 / 后台作业。Claude Code / Codex 可通过 Bash 或 MCP 调用。零三方依赖,只要 Python 3 + 系统 `ssh` / `scp`。
+> 跨平台 SSH 命令工具:本地配置,远端执行。持久 cwd / 连接复用 / 会话隔离 / 后台作业。Claude Code / Codex 可通过 Bash 或 MCP 调用。**默认 Go 二进制**(零运行时依赖,内置 SSH 协议),Python 实现保留在 [`python/`](./python) 但**不再继续维护**。
 
 ## 速查
 
@@ -92,9 +92,12 @@ ln -s /path/to/srv/srv ~/.local/bin/srv
 srv version
 ```
 
-### Python 版本(可选)
+### Python 版本(已冻结,不再维护)
 
-不想编译、或者要在没装 Go 的机器上跑,Python 版本可直接调用:
+`python/srv.py` 停在 **v0.7.5**,**后续不会有功能更新或 bug 修复**。仍能跑(共享 `~/.srv/{config,sessions,jobs}.json`,功能与 Go 2.0.1 等价),适合:
+
+- 需要在没有 Go 工具链的机器上临时使用
+- 检查迁移过程中的行为差异
 
 ```sh
 python python/srv.py status
@@ -102,7 +105,7 @@ python python/srv.py cd /opt
 # ...
 ```
 
-两个版本**共享 `~/.srv/{config,sessions,jobs}.json`**,可来回切。
+新功能、bug 修复、Windows OpenSSH 类问题的 workaround 一律只在 Go 版本进行。Python 版本未来某个版本可能会从仓库移除,届时 git 历史里仍可找回。
 
 ---
 
@@ -499,4 +502,4 @@ MCP 服务器在 Claude Code 会话启动时加载。**新开 Claude Code 会话
 
 ## 版本
 
-当前 **0.7.5**。版本号在破坏性变更时增加,详见 `srv version` 和源文件顶部 `VERSION` 常量。完整变更记录见 [CHANGELOG.md](./CHANGELOG.md)。
+当前 **Go 2.0.1**(`srv version` 输出)。版本号在破坏性变更时增加;Python 实现停在 0.7.5 后不再更新。完整变更记录见 [CHANGELOG.md](./CHANGELOG.md)。
