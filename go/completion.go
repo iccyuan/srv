@@ -163,6 +163,18 @@ Register-ArgumentCompleter -Native -CommandName srv -ScriptBlock {
         return
     }
 
+    # Remote ls helper: invokes 'srv _ls <prefix>' and emits each matching
+    # full path (dirs get a trailing /). Used for cd / pull / push-remote.
+    $remote_ls = {
+        param($onlyDirs)
+        $rs = & srv _ls $wordToComplete 2>$null
+        foreach ($line in $rs -split "` + "`" + `n") {
+            if (-not $line) { continue }
+            if ($onlyDirs -and -not $line.EndsWith('/')) { continue }
+            & $mk $line
+        }
+    }
+
     switch ($sub) {
         'config' {
             if (-not $sub2) {
@@ -180,10 +192,29 @@ Register-ArgumentCompleter -Native -CommandName srv -ScriptBlock {
         'completion' {
             & $emit @('bash','zsh','powershell')
         }
+        'cd' {
+            # Remote directory completion (only dirs).
+            & $remote_ls $true
+        }
+        'pull' {
+            # First positional = remote path (any entry).
+            if (-not $sub2) {
+                & $remote_ls $false
+            } else {
+                # Second positional = local file.
+                Get-ChildItem -Path "$wordToComplete*" -ErrorAction SilentlyContinue |
+                    ForEach-Object { & $mk $_.Name }
+            }
+        }
         'push' {
-            # Local file completion for the local-side argument.
-            Get-ChildItem -Path "$wordToComplete*" -ErrorAction SilentlyContinue |
-                ForEach-Object { & $mk $_.Name }
+            if (-not $sub2) {
+                # First positional = local file/dir.
+                Get-ChildItem -Path "$wordToComplete*" -ErrorAction SilentlyContinue |
+                    ForEach-Object { & $mk $_.Name }
+            } else {
+                # Second positional = remote path (any entry).
+                & $remote_ls $false
+            }
         }
     }
 }
@@ -210,7 +241,10 @@ func cmdCompletion(args []string) int {
 			self = "srv"
 		}
 		quoted := "'" + strings.ReplaceAll(self, "'", "''") + "'"
-		fmt.Print(strings.ReplaceAll(powershellCompletion, "& srv _profiles", "& "+quoted+" _profiles"))
+		out := powershellCompletion
+		out = strings.ReplaceAll(out, "& srv _profiles", "& "+quoted+" _profiles")
+		out = strings.ReplaceAll(out, "& srv _ls", "& "+quoted+" _ls")
+		fmt.Print(out)
 	default:
 		fmt.Fprintf(os.Stderr, "error: unknown shell %q (expected bash/zsh/powershell)\n", args[0])
 		return 1

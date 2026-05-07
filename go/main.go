@@ -10,7 +10,7 @@ import (
 	"os"
 )
 
-const Version = "2.0.2"
+const Version = "2.0.3"
 
 const helpText = `srv - run commands on a remote SSH server with persistent cwd.
 
@@ -75,7 +75,7 @@ var reservedSubcommands = map[string]bool{
 	"init": true, "config": true, "use": true, "cd": true, "pwd": true,
 	"status": true, "check": true, "run": true, "exec": true,
 	"push": true, "pull": true, "sync": true,
-	"completion": true, "mcp": true, "_profiles": true,
+	"completion": true, "mcp": true, "_profiles": true, "_ls": true,
 	"jobs": true, "logs": true, "kill": true, "sessions": true,
 	"help": true, "--help": true, "-h": true,
 	"version": true, "--version": true,
@@ -205,6 +205,8 @@ func run(args []string) int {
 			fmt.Println(n)
 		}
 		return 0
+	case "_ls":
+		return cmdInternalLs(rest[1:], cfg, opts.profile)
 	case "run", "exec":
 		if opts.detach {
 			return cmdDetach(rest[1:], cfg, opts.profile)

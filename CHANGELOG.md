@@ -23,6 +23,25 @@ Python 版本最后一次有意义的迭代是 0.7.5(MCP 加固 + ControlMaster 
 
 ---
 
+## [Go 2.0.3] — 2026-05-07
+
+### Added
+**Tab 远端补全**——`srv cd /opt/<TAB>`、`srv pull /etc/host<TAB>`、`srv push README.md /mnt/<TAB>` 现在直接列远端的目录和文件:
+
+- 新增内部子命令 `srv _ls <prefix>`:在远端跑 `ls -1Ap <dir>`,按 base 过滤,目录加 `/` 后缀,把完整路径(`<dir>+<entry>`)输出到 stdout 供 shell 替换
+- 5 秒 TTL 缓存到 `~/.srv/cache/ls-<sha1>.txt`,key 是 `host+user+target` 的散列。冷调用 ~2.7s(SSH 完整握手),缓存命中 ~65ms(40× 加速)
+- PowerShell completer 三个分支用上:
+  - `srv cd <TAB>` —— 只列 dirs(`-EndsWith '/'`)
+  - `srv pull <TAB>` —— 第一位远端 any,第二位本地文件
+  - `srv push <TAB>` —— 第一位本地,第二位远端 any
+- 跟随当前 session 的 cwd 和 pinned profile —— `srv use prod` 切完,远端补全立刻基于 prod 列目录
+- 失败安静(profile 未配 / 远端不通 / 路径不存在 → 空补全,不打扰用户)
+- 跟 `_profiles` 一样,`srv completion powershell` 会把 srv.exe 的绝对路径烧进脚本,确保 ArgumentCompleter 作用域能找到二进制
+
+bash / zsh 模板暂未接远端补全(按模式 grep 文档可见),想用先在 PowerShell 上验证。
+
+---
+
 ## [Go 2.0.2] — 2026-05-07
 
 ### Fixed

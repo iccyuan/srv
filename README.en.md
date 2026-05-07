@@ -320,8 +320,13 @@ echo 'source <(srv completion zsh)' >> ~/.zshrc
 | `srv sessions <TAB>` | list/show/clear/prune |
 | `srv completion <TAB>` | bash/zsh/powershell |
 | `srv push <TAB>` | local files |
+| `srv push <local> <TAB>` | **remote** dirs / files |
+| `srv cd <TAB>` / `srv cd /opt/<TAB>` | **remote dirs only** |
+| `srv pull <TAB>` / `srv pull /etc/<TAB>` | **remote** dirs / files |
 
-The PowerShell script bakes in `srv.exe`'s absolute path (since the ArgumentCompleter scope doesn't always inherit PATH), so profile-name lookup works from any directory.
+**Remote completion** uses an internal `srv _ls <prefix>` that runs `ls -1Ap` on the remote and caches results in `~/.srv/cache/` (5-second TTL). The first tab on a fresh prefix pays one full SSH handshake (~2-3 s); subsequent tabs hit the cache (~60 ms). Each invocation respects the current `cwd` and pinned profile, so remote completion follows `srv use` automatically.
+
+The PowerShell script bakes in `srv.exe`'s absolute path (since the ArgumentCompleter scope doesn't always inherit PATH), so profile-name and remote lookups work from any directory.
 
 ---
 

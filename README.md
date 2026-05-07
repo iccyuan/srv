@@ -321,8 +321,13 @@ echo 'source <(srv completion zsh)' >> ~/.zshrc
 | `srv sessions <TAB>` | list/show/clear/prune |
 | `srv completion <TAB>` | bash/zsh/powershell |
 | `srv push <TAB>` | 本地文件 |
+| `srv push <local> <TAB>` | **远端**目录 / 文件 |
+| `srv cd <TAB>` / `srv cd /opt/<TAB>` | **远端目录**(只 dirs) |
+| `srv pull <TAB>` / `srv pull /etc/<TAB>` | **远端**目录 / 文件 |
 
-PowerShell 的脚本会**烧入 srv.exe 的绝对路径**(因为 ArgumentCompleter 作用域里 PATH 不一定可见),所以从任何目录跑都能查 profile 名。
+**远端补全**机制:`srv _ls <prefix>` 内部命令在远端跑 `ls -1Ap`,把结果缓存到 `~/.srv/cache/`(5 秒 TTL)。第一次 tab 走完整 SSH 握手(典型 2-3 秒),之后命中缓存秒回(~60ms)。每次 tab 都会用最新 cwd / pinned profile,所以 `srv use` 切换后远端补全自动跟着切。
+
+PowerShell 的脚本会**烧入 srv.exe 的绝对路径**(因为 ArgumentCompleter 作用域里 PATH 不一定可见),所以从任何目录跑都能查 profile 名和远端目录。
 
 ---
 
