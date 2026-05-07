@@ -32,24 +32,27 @@ func cmdInternalLs(args []string, cfg *Config, profileOverride string) int {
 		return 0
 	}
 	cwd := GetCwd(name, profile)
-
 	dirPart, basePart := splitRemotePrefix(prefix)
 	target := remoteListTarget(dirPart, cwd)
 
-	// Try cache first.
+	// 1) File cache (instant, ~60ms even for misses-then-hits sequences).
 	key := cacheKey(profile.Host, profile.User, target)
 	if cached, ok := readLsCache(key, lsCacheTTL); ok {
 		emitLsMatches(cached, dirPart, basePart)
 		return 0
 	}
 
-	// Live ls. Generous 10s deadline so first-connect handshake fits even
-	// on slow links. Subsequent calls within 5s hit the cache.
+	// 2) Daemon (pooled SSH, ~500ms even when "cold" because no handshake).
+	if entries, ok := tryDaemonLs(name, prefix); ok {
+		for _, e := range entries {
+			fmt.Println(e)
+		}
+		return 0
+	}
+
+	// 3) Direct dial fallback (~2.7s cold, full handshake).
 	listing, err := remoteList(profile, target, 10*time.Second)
 	if err != nil {
-		// Surface the reason on stderr (visible to the shell when the user
-		// runs `srv _ls foo` directly; argument completers swallow stderr,
-		// so this doesn't pollute tab UX).
 		fmt.Fprintln(os.Stderr, "srv _ls:", err)
 		return 0
 	}

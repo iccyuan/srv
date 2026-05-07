@@ -1,0 +1,43 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    name: ${{ matrix.os }} / go ${{ matrix.go }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+        go: ["1.22.x"]
+    defaults:
+      run:
+        working-directory: go
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ matrix.go }}
+          cache-dependency-path: go/go.sum
+
+      - name: go vet
+        run: go vet ./...
+
+      - name: gofmt
+        if: runner.os != 'Windows'
+        run: |
+          diff=$(gofmt -l . | tee /dev/stderr)
+          if [ -n "$diff" ]; then
+            echo "::error::Files need gofmt"
+            exit 1
+          fi
+
+      - name: go test
+        run: go test -race ./...
+
+      - name: go build
+        run: go build -o ../srv${{ runner.os == 'Windows' && '.exe' || '' }} .

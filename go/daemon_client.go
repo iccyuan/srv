@@ -1,0 +1,118 @@
+package main
+
+import (
+	"bufio"
+	"encoding/json"
+	"fmt"
+	"net"
+	"os"
+	"time"
+)
+
+// daemonDial connects to the daemon socket with a short timeout. Returns
+// nil + nil error if no daemon is reachable (the caller falls back to
+// direct dial). Returns an error for unexpected failures.
+func daemonDial(timeout time.Duration) net.Conn {
+	conn, err := net.DialTimeout("unix", daemonSocketPath(), timeout)
+	if err != nil {
+		return nil
+	}
+	return conn
+}
+
+// daemonPing returns true if a daemon is alive at the socket path.
+func daemonPing() bool {
+	conn := daemonDial(500 * time.Millisecond)
+	if conn == nil {
+		return false
+	}
+	defer conn.Close()
+	resp, err := daemonCall(conn, daemonRequest{Op: "ping"}, time.Second)
+	return err == nil && resp.OK
+}
+
+// daemonCall writes a request and reads one response. Caller owns the conn.
+func daemonCall(conn net.Conn, req daemonRequest, deadline time.Duration) (*daemonResponse, error) {
+	if deadline > 0 {
+		_ = conn.SetDeadline(time.Now().Add(deadline))
+		defer conn.SetDeadline(time.Time{})
+	}
+	if req.ID == 0 {
+		req.ID = int(time.Now().UnixNano() & 0x7fffffff)
+	}
+	b, err := json.Marshal(req)
+	if err != nil {
+		return nil, err
+	}
+	if _, err := conn.Write(append(b, '\n')); err != nil {
+		return nil, err
+	}
+	rd := bufio.NewReader(conn)
+	line, err := rd.ReadString('\n')
+	if err != nil {
+		return nil, err
+	}
+	var resp daemonResponse
+	if jerr := json.Unmarshal([]byte(line), &resp); jerr != nil {
+		return nil, jerr
+	}
+	return &resp, nil
+}
+
+// tryDaemonLs short-circuits the cold SSH handshake when a daemon is
+// running and has the profile already pooled. Returns (entries, true) on
+// success; (nil, false) when the caller should fall back to direct ssh.
+func tryDaemonLs(profileName, prefix string) ([]string, bool) {
+	conn := daemonDial(200 * time.Millisecond)
+	if conn == nil {
+		return nil, false
+	}
+	defer conn.Close()
+	resp, err := daemonCall(conn, daemonRequest{
+		Op: "ls", Profile: profileName, Prefix: prefix,
+	}, 5*time.Second)
+	if err != nil || resp == nil || !resp.OK {
+		return nil, false
+	}
+	return resp.Entries, true
+}
+
+func daemonClientStatus() int {
+	conn := daemonDial(time.Second)
+	if conn == nil {
+		fmt.Println("daemon: not running")
+		return 1
+	}
+	defer conn.Close()
+	resp, err := daemonCall(conn, daemonRequest{Op: "status"}, 2*time.Second)
+	if err != nil || resp == nil {
+		fmt.Fprintln(os.Stderr, "daemon: status failed:", err)
+		return 1
+	}
+	fmt.Printf("running, uptime %ds\n", resp.Uptime)
+	if len(resp.Profiles) == 0 {
+		fmt.Println("pooled connections: (none)")
+	} else {
+		fmt.Println("pooled connections:")
+		for _, p := range resp.Profiles {
+			fmt.Println(" -", p)
+		}
+	}
+	return 0
+}
+
+func daemonClientStop() int {
+	conn := daemonDial(time.Second)
+	if conn == nil {
+		fmt.Println("daemon: not running")
+		return 0
+	}
+	defer conn.Close()
+	resp, _ := daemonCall(conn, daemonRequest{Op: "shutdown"}, 2*time.Second)
+	if resp != nil && resp.OK {
+		fmt.Println("daemon: stopped")
+		return 0
+	}
+	fmt.Fprintln(os.Stderr, "daemon: shutdown returned without ok")
+	return 1
+}

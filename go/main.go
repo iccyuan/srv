@@ -10,7 +10,7 @@ import (
 	"os"
 )
 
-const Version = "2.1.0"
+const Version = "2.2.0"
 
 const helpText = `srv - run commands on a remote SSH server with persistent cwd.
 
@@ -59,6 +59,9 @@ Sessions (per-shell isolation):
 Integrations:
   srv completion <bash|zsh|powershell>   emit shell completion script
   srv mcp                                run as a stdio MCP server
+  srv daemon                             keep ssh sessions warm (foreground)
+  srv daemon status                      show running daemon's pool
+  srv daemon stop                        stop the running daemon
 
 Profile resolution (highest first):
   -P/--profile flag  >  session pin (` + "`" + `srv use` + "`" + `)  >  $SRV_PROFILE  >  default
@@ -77,7 +80,8 @@ var reservedSubcommands = map[string]bool{
 	"init": true, "config": true, "use": true, "cd": true, "pwd": true,
 	"status": true, "check": true, "shell": true, "run": true, "exec": true,
 	"push": true, "pull": true, "sync": true,
-	"completion": true, "mcp": true, "_profiles": true, "_ls": true,
+	"completion": true, "mcp": true, "daemon": true,
+	"_profiles": true, "_ls": true,
 	"jobs": true, "logs": true, "kill": true, "sessions": true,
 	"help": true, "--help": true, "-h": true,
 	"version": true, "--version": true,
@@ -204,6 +208,8 @@ func run(args []string) int {
 		return cmdSessions(rest[1:])
 	case "mcp":
 		return cmdMcp(cfg)
+	case "daemon":
+		return cmdDaemon(rest[1:])
 	case "_profiles":
 		for n := range cfg.Profiles {
 			fmt.Println(n)

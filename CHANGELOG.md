@@ -23,6 +23,32 @@ Python 版本最后一次有意义的迭代是 0.7.5(MCP 加固 + ControlMaster 
 
 ---
 
+## [Go 2.2.0] — 2026-05-07
+
+### Added
+**Phase 2 + Phase 3:连接守护进程 + 测试 + CI**
+
+- **`srv daemon`** —— 常驻守护进程,本地 AF_UNIX socket(`~/.srv/daemon.sock`,Win10+ 也支持)。持有 per-profile SSH `*Client` 池;每条连接独立 10 分钟空闲 TTL,整个 daemon 30 分钟全空闲自动退。`srv daemon status` / `srv daemon stop` 客户端管理。Ctrl-C 优雅关闭并清理 socket 文件。
+- **协议**:每行一条 JSON-RPC——`{op, profile, ...}` → `{ok, ...payload}`。当前实现的 op:`ls` / `cd` / `pwd` / `run` / `status` / `shutdown` / `ping`。
+- **`srv _ls` 三级回退**:文件 cache(60ms)→ daemon(~70ms,内存 cache 命中)→ 直连(~2700ms,完整握手)。daemon 跑起来后,**冷 tab 从 2700ms 降到 70ms**(38× 加速)。
+- **后台 prefetch**:daemon 处理 `ls /opt/` 后,异步 fire-and-forget 预取所有子目录。下一级 tab 从 daemon-cold ~500ms 降到 daemon-cache-hit ~80ms。
+- **单元测试**:`parseHostSpec` / `shQuote` / `shQuotePath` / `parseDuration` / `globToRegex` / `matchesAnyExclude` / `splitRemotePrefix` / `resolveRemotePath` / `parseSyncOpts` 等 9 个纯函数,共 ~150 行,`go test ./...` 35ms 全过。
+- **GitHub Actions CI**:linux / macos / windows × go 1.22,跑 `go vet` + `gofmt -l` + `go test -race` + `go build`,PR 自动触发。
+
+### Skipped
+**rsync-style delta sync** —— 分析后认为不值得做。当前 git/mtime 模式已经在文件层面只传变更文件;byte-level 滚动哈希 delta 的真实增益场景是"单文件 GB 级,只改少量字节"(增量数据库 dump 之类),不是 srv 的主力使用场景(推代码到远端开发机,KB 级文件)。这种场景应该直接用 `rsync`。任务从 backlog 删除,避免过度工程。
+
+### Performance numbers (本机实测)
+
+| 路径 | v2.0.4 | v2.2.0 | 加速比 |
+|---|---|---|---|
+| `_ls` 冷调用 | 2.7s | 2.7s(daemon 没起)/ 3.1s(daemon 起冷) | 1× |
+| `_ls` 同前缀 5s 内重复 | 60ms(文件 cache) | 60ms(文件 cache) / 70ms(daemon 内存 cache) | 1× |
+| `_ls` 不同前缀,**首次** | 2.7s | **80ms**(daemon prefetch 命中) | **34×** |
+| `_ls` 跨 5s 后再调 | 2.7s | 70ms(daemon 内存 cache 5s TTL 已过 → 直接走 daemon SSH 不握手) | 38× |
+
+---
+
 ## [Go 2.1.0] — 2026-05-07
 
 ### Added
