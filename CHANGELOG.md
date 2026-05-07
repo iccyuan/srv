@@ -23,6 +23,15 @@ Python 版本最后一次有意义的迭代是 0.7.5(MCP 加固 + ControlMaster 
 
 ---
 
+## [Go 2.4.2] — 2026-05-07
+
+### Fixed
+v2.4.1 tag 触发的 release workflow 在 linux / macos runner 上撞 `gofmt -l .` 失败 —— 7 个文件本地写时未走 gofmt(Windows 上 IDE 没自动跑)。`go fmt ./...` 一遍后 vet + test 全清。同时把 release 流程在本地更严的 lint 门校一遍,杜绝下次重发。
+
+无功能改动,纯 CI 修复 + 重发 release。
+
+---
+
 ## [Go 2.4.1] — 2026-05-07
 
 ### Added

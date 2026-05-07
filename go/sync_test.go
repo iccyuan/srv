@@ -68,12 +68,12 @@ func TestMatchesAnyExclude(t *testing.T) {
 		want bool
 	}{
 		{"src/main.py", false},
-		{"node_modules/foo", true},     // top-level dir match
-		{"a/node_modules/b", true},     // component match deep in tree
+		{"node_modules/foo", true}, // top-level dir match
+		{"a/node_modules/b", true}, // component match deep in tree
 		{".git/config", true},
-		{"src/main.pyc", true},         // glob match
+		{"src/main.pyc", true}, // glob match
 		{"dist/index.html", true},
-		{"distinct/x.html", false},     // dist/ shouldn't match distinct/
+		{"distinct/x.html", false}, // dist/ shouldn't match distinct/
 	}
 	for _, tc := range cases {
 		got := matchesAnyExclude(tc.path, excludes)
@@ -85,7 +85,7 @@ func TestMatchesAnyExclude(t *testing.T) {
 
 func TestSplitRemotePrefix(t *testing.T) {
 	cases := []struct {
-		in            string
+		in                string
 		wantDir, wantBase string
 	}{
 		{"", "", ""},
@@ -110,10 +110,10 @@ func TestResolveRemotePath(t *testing.T) {
 		remote, cwd, want string
 	}{
 		{"", "/opt", "/opt"},
-		{"/abs", "/opt", "/abs"},          // absolute pass-through
-		{"~/foo", "/opt", "~/foo"},        // ~ pass-through
+		{"/abs", "/opt", "/abs"},   // absolute pass-through
+		{"~/foo", "/opt", "~/foo"}, // ~ pass-through
 		{"file.txt", "/opt", "/opt/file.txt"},
-		{"dir", "/opt/", "/opt/dir"},      // trailing slash on cwd handled
+		{"dir", "/opt/", "/opt/dir"}, // trailing slash on cwd handled
 	}
 	for _, tc := range cases {
 		got := resolveRemotePath(tc.remote, tc.cwd)

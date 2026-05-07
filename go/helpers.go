@@ -6,7 +6,7 @@ import (
 	"strconv"
 )
 
-func intToStr(i int) string  { return strconv.Itoa(i) }
+func intToStr(i int) string     { return strconv.Itoa(i) }
 func uintToStr(i uint32) string { return strconv.FormatUint(uint64(i), 10) }
 
 // randHex4 returns 4 random hex chars (2 bytes). Falls back to a plain

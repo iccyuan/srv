@@ -50,7 +50,7 @@ func promptPassphrase(keyPath string) ([]byte, error) {
 }
 
 // shQuote single-quotes a string for safe inclusion in a /bin/sh command.
-// Replaces internal single quotes with the standard '\'' dance.
+// Replaces internal single quotes with the standard '\” dance.
 func shQuote(s string) string {
 	if s == "" {
 		return "''"

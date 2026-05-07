@@ -19,10 +19,10 @@ type jsonRPCRequest struct {
 }
 
 type jsonRPCResponse struct {
-	JSONRPC string         `json:"jsonrpc"`
-	ID      any            `json:"id"`
-	Result  any            `json:"result,omitempty"`
-	Error   *jsonRPCError  `json:"error,omitempty"`
+	JSONRPC string        `json:"jsonrpc"`
+	ID      any           `json:"id"`
+	Result  any           `json:"result,omitempty"`
+	Error   *jsonRPCError `json:"error,omitempty"`
 }
 
 type jsonRPCError struct {
@@ -53,7 +53,7 @@ func mcpToolDefs() []toolDef {
 	}
 	return []toolDef{
 		{
-			Name: "run",
+			Name:        "run",
 			Description: "Run a shell command on the configured remote SSH server in the persisted cwd. Returns stdout, stderr, and exit code.",
 			InputSchema: map[string]any{
 				"type": "object",
@@ -65,7 +65,7 @@ func mcpToolDefs() []toolDef {
 			},
 		},
 		{
-			Name: "cd",
+			Name:        "cd",
 			Description: "Change the persisted remote working directory for THIS MCP session. Validated by `cd <path> && pwd` on the remote.",
 			InputSchema: map[string]any{
 				"type": "object",

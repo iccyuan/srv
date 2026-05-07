@@ -47,7 +47,7 @@ type Profile struct {
 	// Jump (ProxyJump) -- one or more bastion hops dialed in order before
 	// the final target. Each entry: "[user@]host[:port]". Auth uses the
 	// same agent + identity_file + default key chain as the profile.
-	Jump              []string `json:"jump,omitempty"`
+	Jump []string `json:"jump,omitempty"`
 	// CompressSync controls whether `srv sync` gzips the tar stream over
 	// the wire. nil = default true. ~70% size reduction for code, single-
 	// digit ms CPU on the hot path.
