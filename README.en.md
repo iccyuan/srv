@@ -537,4 +537,30 @@ The MCP server is loaded at session startup. Open a **new** Claude Code session,
 
 ## Version
 
-Currently **Go 2.0.1** (what `srv version` prints). Version bumps on breaking changes; the Python implementation is frozen at 0.7.5 and won't receive further updates. Full history in [CHANGELOG.md](./CHANGELOG.md).
+Currently **Go 2.4.x** (what `srv version` prints). Version bumps on breaking changes; the Python implementation is frozen at 0.7.5 and won't receive further updates. Full history in [CHANGELOG.md](./CHANGELOG.md).
+
+## Releasing (maintainers)
+
+Releases are driven by GitHub Actions + goreleaser. Push a `vX.Y.Z` tag and binaries for 5 OS/arch combos plus checksums get published as a GitHub Release.
+
+```sh
+# 1) Update CHANGELOG.md (new entry at top), commit
+# 2) Tag and push
+git tag v2.4.2
+git push origin v2.4.2
+```
+
+The release workflow:
+- Cross-compiles linux/darwin/windows × amd64/arm64 (5 binaries -- windows-arm64 skipped)
+- Embeds the tag into `srv version` via `-ldflags -X main.Version=`
+- Packages each binary as `srv_<ver>_<os>_<arch>.tar.gz` (or `.zip` on Windows) alongside LICENSE, READMEs, CHANGELOG
+- Emits `checksums.txt` (SHA256)
+- Publishes to https://github.com/iccyuan/srv/releases
+
+Local dry-run (no upload):
+
+```sh
+# Install goreleaser first: https://goreleaser.com/install/
+goreleaser release --snapshot --clean --skip=publish
+# Artifacts land in ./dist/
+```

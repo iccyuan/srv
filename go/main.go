@@ -10,7 +10,9 @@ import (
 	"os"
 )
 
-const Version = "2.4.1"
+// Version is overridable at build time via -ldflags "-X main.Version=...".
+// goreleaser sets it from the git tag on release builds.
+var Version = "2.4.1"
 
 const helpText = `srv - run commands on a remote SSH server with persistent cwd.
 

@@ -538,4 +538,30 @@ MCP 服务器在 Claude Code 会话启动时加载。**新开 Claude Code 会话
 
 ## 版本
 
-当前 **Go 2.0.1**(`srv version` 输出)。版本号在破坏性变更时增加;Python 实现停在 0.7.5 后不再更新。完整变更记录见 [CHANGELOG.md](./CHANGELOG.md)。
+当前 **Go 2.4.x**(`srv version` 输出)。版本号在破坏性变更时增加;Python 实现停在 0.7.5 后不再更新。完整变更记录见 [CHANGELOG.md](./CHANGELOG.md)。
+
+## 发版(给维护者)
+
+发布走 GitHub Actions + goreleaser:推一个 `vX.Y.Z` tag 就自动产 5 平台二进制 + 校验和 + GitHub Release。
+
+```sh
+# 1) 改 CHANGELOG.md(顶部加新版本块),提交
+# 2) 打 tag 并推
+git tag v2.4.2
+git push origin v2.4.2
+```
+
+GitHub Actions 会:
+- 跨平台编译 linux/darwin/windows × amd64/arm64(共 5 个二进制——win-arm64 跳过)
+- 用 `-ldflags -X main.Version={{.Version}}` 把 srv version 输出嵌成 tag 号
+- 打成 `srv_<ver>_<os>_<arch>.tar.gz`(Windows 是 .zip),附带 `LICENSE` / `README*.md` / `CHANGELOG.md`
+- 生成 `checksums.txt`(SHA256)
+- 在 https://github.com/iccyuan/srv/releases 创建 release
+
+本地 dry-run(不推到 GitHub):
+
+```sh
+# 需要先装 goreleaser:https://goreleaser.com/install/
+goreleaser release --snapshot --clean --skip=publish
+# 产物落到 ./dist/
+```

@@ -1,0 +1,75 @@
+# goreleaser config -- triggered by `git push origin vX.Y.Z`.
+# Local dry-run: `goreleaser release --snapshot --clean --skip=publish`
+version: 2
+
+project_name: srv
+
+before:
+  hooks:
+    - go -C go mod tidy
+
+builds:
+  - id: srv
+    main: .
+    dir: go
+    binary: srv
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - linux
+      - darwin
+      - windows
+    goarch:
+      - amd64
+      - arm64
+    ignore:
+      # Windows arm64 cross-compile from linux/amd64 occasionally trips on
+      # x/sys; skip until someone needs it.
+      - goos: windows
+        goarch: arm64
+    ldflags:
+      - -s -w -X main.Version={{ .Version }}
+
+archives:
+  - id: srv
+    name_template: >-
+      srv_{{ .Version }}_
+      {{- if eq .Os "darwin" }}macos{{ else }}{{ .Os }}{{ end }}_
+      {{- if eq .Arch "amd64" }}x86_64{{ else }}{{ .Arch }}{{ end }}
+    format_overrides:
+      - goos: windows
+        formats: ['zip']
+    files:
+      - LICENSE
+      - README.md
+      - README.en.md
+      - CHANGELOG.md
+
+checksum:
+  name_template: 'checksums.txt'
+
+snapshot:
+  version_template: '{{ incpatch .Version }}-snapshot'
+
+changelog:
+  # Don't auto-generate from commits; CHANGELOG.md is curated.
+  disable: true
+
+release:
+  github:
+    owner: iccyuan
+    name: srv
+  draft: false
+  prerelease: auto
+  header: |
+    Pre-built binaries for the Go implementation. Pick the archive
+    matching your OS / arch, extract, drop `srv` (or `srv.exe`) on PATH.
+
+    See [CHANGELOG.md](https://github.com/iccyuan/srv/blob/main/CHANGELOG.md)
+    for what changed in this version.
+
+    Verify with `srv version`. Set up a profile with `srv init` and a
+    SSH connectivity probe with `srv check`.
+  footer: |
+    Built from commit `{{ .ShortCommit }}`. Source / Python implementation
+    in the same repo.

@@ -35,3 +35,6 @@ go/srv
 go/srv.exe
 *.test
 *.out
+
+# goreleaser local-snapshot output
+/dist/
