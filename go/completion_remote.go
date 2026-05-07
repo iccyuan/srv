@@ -44,15 +44,17 @@ func cmdInternalLs(args []string, cfg *Config, profileOverride string) int {
 
 	// 2) Daemon (pooled SSH, ~500ms even when "cold" because no handshake).
 	//    Auto-spawn one in the background if none is running -- next time
-	//    the user tabs, it'll be warm.
-	if entries, ok := tryDaemonLs(name, prefix); ok {
+	//    the user tabs, it'll be warm. Send the CLI's cwd so relative
+	//    prefixes resolve against the right directory (the daemon never
+	//    reads its own session).
+	if entries, ok := tryDaemonLs(name, cwd, prefix); ok {
 		for _, e := range entries {
 			fmt.Println(e)
 		}
 		return 0
 	}
 	if ensureDaemon() {
-		if entries, ok := tryDaemonLs(name, prefix); ok {
+		if entries, ok := tryDaemonLs(name, cwd, prefix); ok {
 			for _, e := range entries {
 				fmt.Println(e)
 			}

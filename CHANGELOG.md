@@ -23,6 +23,49 @@ Python 版本最后一次有意义的迭代是 0.7.5(MCP 加固 + ControlMaster 
 
 ---
 
+## [Go 2.3.0] — 2026-05-07
+
+### Added
+**所有 CLI 命令(非 TTY)走 daemon** —— 之前 daemon 只服务 tab 补全,日常 `srv ls / srv "git status" / srv cd /opt` 仍每次握手 2-3s。现在 daemon 跑起来后,这些都瞬间复用同一条 SSH 连接。
+
+具体路由:
+
+| 调用 | v2.2.1 | v2.3.0 |
+|---|---|---|
+| `srv _ls <prefix>` (tab) | daemon | daemon(已经是) |
+| `srv ls /opt` / `srv "..."`(非 TTY) | 直连 | **daemon**(`tryDaemonRun`) |
+| `srv cd /opt` | 直连 | **daemon**(`tryDaemonCd`) |
+| `srv pwd` | 本地 | 本地(daemon 不参与,纯读 sessions.json) |
+| `srv -t <cmd>`(交互) | 直连 | 直连(TTY 必须 PTY) |
+| `srv shell` | 直连 | 直连(PTY) |
+| `srv push / pull / sync` | 直连 | 直连(SFTP / tar 流) |
+| `srv -d <cmd>`(后台) | 直连 | 直连(spawn,一次性) |
+| `srv logs <id> -f` | 直连 | 直连(stream) |
+
+### Changed
+- `daemonRequest` 加 `Cwd` 字段。**daemon 永远不读自己的 sessions.json**——daemon 的 session id 跟调用 shell 的 session id 不同,daemon 用自己的 session 里的 cwd 是错的。CLI 把自己的 cwd 跟每个请求一起发过去。
+- `handleCd` / `handleLs` / `handleRun` 全都用 `req.Cwd`。`handlePwd` 改成纯 echo(协议完整性,实际 CLI 直接读本地 session)。
+- `changeRemoteCwd` 拆出 `validateRemoteCwd` —— 无副作用的 cd-and-pwd 探测。CLI 走 daemon 失败时回落到这个直连版本;daemon 内部不再调原 `changeRemoteCwd`(那个会写 sessions.json,wrong session)。
+- `tryDaemonCd` 三态返回 `(newCwd, used, err)`:`used=false` 没 daemon → 直连;`used=true err=nil` 成功;`used=true err!=nil` daemon 给了明确错误(比如目录不存在)→ 不重试直连,直接报错。
+
+### Performance(预期,网络通时)
+
+| 路径 | v2.2.1(daemon 跑着) | v2.3.0(daemon 跑着) |
+|---|---|---|
+| `srv _ls /opt/<TAB>` | 70ms(已经走 daemon) | 70ms |
+| `srv ls /opt`(非 tab) | **2700ms**(直连握手) | **~100ms**(daemon 池) |
+| `srv "git status"` | 2700ms | ~100ms |
+| `srv cd /opt` | 2700ms | ~100ms |
+| `srv -t htop` | 直连 | 直连(不变,正确) |
+
+简单说:**日常工作流的所有连环命令,从第二条开始都是毫秒级**。
+
+### Notes
+- 流式命令(`srv "tail -f /var/log/x"` `srv "find / -name foo"`)走 daemon 后输出会**buffer 到命令结束**才出现,因为 daemon 协议是一次响应一条 JSON。要实时输出请用 `srv -t <cmd>`,会自动绕过 daemon 走 PTY 直连。
+- daemon 仍可用 `srv daemon stop` 关掉;关了之后所有命令自动回到 v2.2.1 之前的直连行为。
+
+---
+
 ## [Go 2.2.1] — 2026-05-07
 
 ### Added

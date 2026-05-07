@@ -62,19 +62,98 @@ func daemonCall(conn net.Conn, req daemonRequest, deadline time.Duration) (*daem
 // tryDaemonLs short-circuits the cold SSH handshake when a daemon is
 // running and has the profile already pooled. Returns (entries, true) on
 // success; (nil, false) when the caller should fall back to direct ssh.
-func tryDaemonLs(profileName, prefix string) ([]string, bool) {
+func tryDaemonLs(profileName, cwd, prefix string) ([]string, bool) {
 	conn := daemonDial(200 * time.Millisecond)
 	if conn == nil {
 		return nil, false
 	}
 	defer conn.Close()
 	resp, err := daemonCall(conn, daemonRequest{
-		Op: "ls", Profile: profileName, Prefix: prefix,
+		Op: "ls", Profile: profileName, Cwd: cwd, Prefix: prefix,
 	}, 5*time.Second)
 	if err != nil || resp == nil || !resp.OK {
 		return nil, false
 	}
 	return resp.Entries, true
+}
+
+// tryDaemonRun executes `command` via the daemon's pooled SSH connection
+// and writes the captured stdout/stderr to the local terminal. Returns
+// (exitCode, true) on success; (0, false) when the caller should fall
+// back to direct ssh (no daemon, daemon error, etc.).
+//
+// Capture-mode only -- output is buffered until the command finishes.
+// For long-running / streaming commands (`tail -f`, `find /`), call with
+// `srv -t` to bypass the daemon and get real-time output.
+func tryDaemonRun(profileName, cwd, command string) (int, bool) {
+	conn := daemonDial(200 * time.Millisecond)
+	if conn == nil {
+		if !ensureDaemon() {
+			return 0, false
+		}
+		conn = daemonDial(200 * time.Millisecond)
+		if conn == nil {
+			return 0, false
+		}
+	}
+	defer conn.Close()
+	// Long deadline -- the user might run a multi-minute command. The
+	// daemon side has no per-request timeout currently.
+	resp, err := daemonCall(conn, daemonRequest{
+		Op: "run", Profile: profileName, Cwd: cwd, Command: command,
+	}, 30*time.Minute)
+	if err != nil || resp == nil {
+		return 0, false
+	}
+	if !resp.OK {
+		// Daemon couldn't run it (e.g., dial failed). Don't print here --
+		// the direct-dial fallback will surface a real diagnosis.
+		return 0, false
+	}
+	if resp.Stdout != "" {
+		os.Stdout.WriteString(resp.Stdout)
+	}
+	if resp.Stderr != "" {
+		os.Stderr.WriteString(resp.Stderr)
+	}
+	return resp.ExitCode, true
+}
+
+// tryDaemonCd validates the target cwd via the daemon.
+//
+// Returns:
+//   - used=false: no daemon reachable; caller should fall back to direct dial.
+//   - used=true, err=nil:   success; newCwd is the validated absolute path.
+//   - used=true, err!=nil:  daemon answered with a definitive failure
+//     (e.g. "no such directory"). Caller should propagate this error
+//     instead of retrying direct, since direct would just re-fail.
+//
+// Caller is responsible for persisting newCwd to its session store -- the
+// daemon doesn't touch sessions.json.
+func tryDaemonCd(profileName, currentCwd, target string) (newCwd string, used bool, err error) {
+	conn := daemonDial(200 * time.Millisecond)
+	if conn == nil {
+		if !ensureDaemon() {
+			return "", false, nil
+		}
+		conn = daemonDial(200 * time.Millisecond)
+		if conn == nil {
+			return "", false, nil
+		}
+	}
+	defer conn.Close()
+	resp, callErr := daemonCall(conn, daemonRequest{
+		Op: "cd", Profile: profileName, Cwd: currentCwd, Path: target,
+	}, 30*time.Second)
+	if callErr != nil || resp == nil {
+		// Network/protocol issue, treat as no-daemon -- direct dial may work.
+		return "", false, nil
+	}
+	if !resp.OK {
+		// Daemon definitively said no. Don't retry direct.
+		return "", true, fmt.Errorf("%s", resp.Err)
+	}
+	return resp.Cwd, true, nil
 }
 
 func daemonClientStatus() int {

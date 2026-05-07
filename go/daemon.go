@@ -37,6 +37,11 @@ type daemonRequest struct {
 	Prefix  string `json:"prefix,omitempty"`
 	Path    string `json:"path,omitempty"`
 	Command string `json:"command,omitempty"`
+	// Cwd is the *caller's* current working directory. The daemon never
+	// reads from its own sessions.json -- the daemon's session id differs
+	// from the calling shell's, so persisted cwd would be wrong. Instead
+	// the CLI sends its cwd along with each request.
+	Cwd string `json:"cwd,omitempty"`
 }
 
 type daemonResponse struct {
@@ -66,10 +71,12 @@ type daemonState struct {
 	mu        sync.Mutex
 	pool      map[string]*pooledClient
 	lsCache   map[string]*lsCacheEntry // key: profile + "\x00" + target
+	listener  net.Listener
 	startedAt time.Time
 	// lastReq updated on every request; idle-shutdown checks this.
-	lastReq time.Time
-	stopCh  chan struct{}
+	lastReq  time.Time
+	stopCh   chan struct{}
+	stopOnce sync.Once
 }
 
 const (
@@ -122,13 +129,14 @@ func cmdDaemon(args []string) int {
 	state := &daemonState{
 		pool:      map[string]*pooledClient{},
 		lsCache:   map[string]*lsCacheEntry{},
+		listener:  listener,
 		startedAt: time.Now(),
 		lastReq:   time.Now(),
 		stopCh:    make(chan struct{}),
 	}
 
 	// Background gc: close idle connections, exit if whole daemon idle.
-	go state.runGC(listener)
+	go state.runGC()
 
 	// Signal handling.
 	sigCh := make(chan os.Signal, 1)
@@ -136,8 +144,7 @@ func cmdDaemon(args []string) int {
 	go func() {
 		<-sigCh
 		fmt.Fprintln(os.Stderr, "\nsrv daemon: stopping.")
-		close(state.stopCh)
-		_ = listener.Close()
+		state.requestStop()
 	}()
 
 	// Accept loop.
@@ -183,10 +190,19 @@ func (s *daemonState) handleConn(conn net.Conn) {
 		resp.ID = req.ID
 		s.write(wr, resp)
 		if req.Op == "shutdown" {
-			close(s.stopCh)
+			s.requestStop()
 			return
 		}
 	}
+}
+
+func (s *daemonState) requestStop() {
+	s.stopOnce.Do(func() {
+		close(s.stopCh)
+		if s.listener != nil {
+			_ = s.listener.Close()
+		}
+	})
 }
 
 func (s *daemonState) write(wr *bufio.Writer, resp daemonResponse) {
@@ -196,11 +212,10 @@ func (s *daemonState) write(wr *bufio.Writer, resp daemonResponse) {
 	wr.Flush()
 }
 
-func (s *daemonState) dispatch(req daemonRequest) daemonResponse {
+func (s *daemonState) dispatch(req daemonRequest) (resp daemonResponse) {
 	defer func() {
 		if r := recover(); r != nil {
-			// Final fallback; shouldn't be hit normally.
-			fmt.Fprintln(os.Stderr, "daemon panic:", r)
+			resp = daemonResponse{OK: false, Err: fmt.Sprintf("daemon panic: %v", r)}
 		}
 	}()
 	switch req.Op {
@@ -272,9 +287,9 @@ func (s *daemonState) getClient(profileName string) (*Client, *Profile, error) {
 	// could have raced us to dial; in that case discard our duplicate.
 	s.mu.Lock()
 	if existing, ok := s.pool[profileName]; ok && existing.client != nil && existing.client.Conn != nil {
+		existing.lastUsed = time.Now()
 		s.mu.Unlock()
 		_ = c.Close()
-		existing.lastUsed = time.Now()
 		return existing.client, profile, nil
 	}
 	s.pool[profileName] = &pooledClient{client: c, lastUsed: time.Now()}
@@ -287,7 +302,12 @@ func (s *daemonState) handleLs(req daemonRequest) daemonResponse {
 	if err != nil {
 		return daemonResponse{OK: false, Err: err.Error()}
 	}
-	cwd := GetCwd(profile.Name, profile)
+	// Use the caller's cwd (sent in the request); fall back to default for
+	// safety only.
+	cwd := req.Cwd
+	if cwd == "" {
+		cwd = profile.GetDefaultCwd()
+	}
 	dirPart, basePart := splitRemotePrefix(req.Prefix)
 	target := remoteListTarget(dirPart, cwd)
 
@@ -397,31 +417,56 @@ func (s *daemonState) prefetchSubdirs(profileName, parent string, entries []stri
 // cache; reuse it for the daemon's in-memory cache too. (Defined there.)
 
 func (s *daemonState) handleCd(req daemonRequest) daemonResponse {
-	_, profile, err := s.getClient(req.Profile)
+	c, _, err := s.getClient(req.Profile)
 	if err != nil {
 		return daemonResponse{OK: false, Err: err.Error()}
 	}
-	newCwd, err := changeRemoteCwd(profile.Name, profile, req.Path)
+	current := req.Cwd
+	if current == "" {
+		current = "~"
+	}
+	target := req.Path
+	if target == "" {
+		target = "~"
+	}
+	cmd := fmt.Sprintf(
+		"cd %s 2>/dev/null || cd ~; cd %s && pwd",
+		shQuotePath(current), shQuotePath(target),
+	)
+	res, err := c.RunCapture(cmd, "")
 	if err != nil {
 		return daemonResponse{OK: false, Err: err.Error()}
 	}
-	return daemonResponse{OK: true, Cwd: newCwd}
+	if res.ExitCode != 0 {
+		stderr := strings.TrimSpace(res.Stderr)
+		if stderr == "" {
+			stderr = fmt.Sprintf("cd failed (exit %d)", res.ExitCode)
+		}
+		return daemonResponse{OK: false, Err: stderr}
+	}
+	lines := strings.Split(strings.TrimSpace(res.Stdout), "\n")
+	if len(lines) == 0 || strings.TrimSpace(lines[len(lines)-1]) == "" {
+		return daemonResponse{OK: false, Err: "remote did not return a path"}
+	}
+	return daemonResponse{OK: true, Cwd: strings.TrimSpace(lines[len(lines)-1])}
 }
 
 func (s *daemonState) handlePwd(req daemonRequest) daemonResponse {
-	_, profile, err := s.getClient(req.Profile)
-	if err != nil {
-		return daemonResponse{OK: false, Err: err.Error()}
+	// pwd is purely local in the new model -- the CLI reads its session
+	// directly. Kept for protocol completeness; returns the request's cwd.
+	cwd := req.Cwd
+	if cwd == "" {
+		cwd = "~"
 	}
-	return daemonResponse{OK: true, Cwd: GetCwd(profile.Name, profile)}
+	return daemonResponse{OK: true, Cwd: cwd}
 }
 
 func (s *daemonState) handleRun(req daemonRequest) daemonResponse {
-	c, profile, err := s.getClient(req.Profile)
+	c, _, err := s.getClient(req.Profile)
 	if err != nil {
 		return daemonResponse{OK: false, Err: err.Error()}
 	}
-	cwd := GetCwd(profile.Name, profile)
+	cwd := req.Cwd
 	res, err := c.RunCapture(req.Command, cwd)
 	if err != nil {
 		return daemonResponse{OK: false, Err: err.Error()}
@@ -435,7 +480,7 @@ func (s *daemonState) handleRun(req daemonRequest) daemonResponse {
 	}
 }
 
-func (s *daemonState) runGC(listener net.Listener) {
+func (s *daemonState) runGC() {
 	t := time.NewTicker(gcInterval)
 	defer t.Stop()
 	for {
@@ -443,25 +488,26 @@ func (s *daemonState) runGC(listener net.Listener) {
 		case <-s.stopCh:
 			return
 		case <-t.C:
-			s.gc(listener)
+			s.gc()
 		}
 	}
 }
 
-func (s *daemonState) gc(listener net.Listener) {
+func (s *daemonState) gc() {
 	now := time.Now()
 	s.mu.Lock()
-	defer s.mu.Unlock()
 	for name, pc := range s.pool {
 		if now.Sub(pc.lastUsed) > connIdleTTL {
 			_ = pc.client.Close()
 			delete(s.pool, name)
 		}
 	}
-	if now.Sub(s.lastReq) > daemonIdleTTL {
+	idle := now.Sub(s.lastReq) > daemonIdleTTL
+	s.mu.Unlock()
+	if idle {
 		fmt.Fprintln(os.Stderr, "srv daemon: idle for",
 			daemonIdleTTL, "-- shutting down.")
-		_ = listener.Close()
+		s.requestStop()
 	}
 }
 

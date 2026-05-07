@@ -14,7 +14,17 @@ import (
 
 // runRemoteStream opens a connection, runs `cmd` interactively (streaming
 // stdio), and closes. Returns remote exit code.
+//
+// Non-TTY runs go through the daemon when one is available -- the daemon's
+// pooled SSH connection saves the ~2.7s handshake. The daemon returns
+// stdout/stderr as one captured payload; for streaming output (long
+// `find`, `tail -f`) use `srv -t <cmd>` which forces a direct PTY session.
 func runRemoteStream(profile *Profile, cwd, cmd string, tty bool) int {
+	if !tty {
+		if rc, ok := tryDaemonRun(profile.Name, cwd, cmd); ok {
+			return rc
+		}
+	}
 	c, err := Dial(profile)
 	if err != nil {
 		printDiagError(err, profile)
@@ -45,14 +55,48 @@ func runRemoteCapture(profile *Profile, cwd, cmd string) (*RunCaptureResult, err
 	return c.RunCapture(cmd, cwd)
 }
 
-// changeRemoteCwd validates a target path on the remote (cd <current> ... ;
-// cd <target> && pwd) and persists the absolute result for the current
-// session+profile. Returns (newCwd, error). On failure, returns ("", err).
+// changeRemoteCwd validates a target path on the remote and persists the
+// absolute result for the current session+profile. Tries the daemon first
+// (warm pooled SSH); falls back to a direct dial if no daemon. Returns
+// (newCwd, error). On failure, returns ("", err).
 func changeRemoteCwd(profileName string, profile *Profile, target string) (string, error) {
 	if target == "" {
 		target = "~"
 	}
 	current := GetCwd(profileName, profile)
+
+	// Fast path via daemon.
+	if newCwd, used, err := tryDaemonCd(profileName, current, target); used {
+		if err != nil {
+			return "", err
+		}
+		if perr := SetCwd(profileName, newCwd); perr != nil {
+			return "", perr
+		}
+		return newCwd, nil
+	}
+
+	// Direct dial fallback.
+	newCwd, err := validateRemoteCwd(profile, current, target)
+	if err != nil {
+		return "", err
+	}
+	if err := SetCwd(profileName, newCwd); err != nil {
+		return "", err
+	}
+	return newCwd, nil
+}
+
+// validateRemoteCwd is the side-effect-free "cd ... && pwd" probe that
+// returns the resolved absolute path. Used both by direct-dial cwd
+// changes and by the daemon's cd handler.
+func validateRemoteCwd(profile *Profile, current, target string) (string, error) {
+	if current == "" {
+		current = "~"
+	}
+	if target == "" {
+		target = "~"
+	}
 	cmd := fmt.Sprintf(
 		"cd %s 2>/dev/null || cd ~; cd %s && pwd",
 		shQuotePath(current), shQuotePath(target),
@@ -72,11 +116,7 @@ func changeRemoteCwd(profileName string, profile *Profile, target string) (strin
 	if len(lines) == 0 || strings.TrimSpace(lines[len(lines)-1]) == "" {
 		return "", errors.New("remote did not return a path")
 	}
-	newCwd := strings.TrimSpace(lines[len(lines)-1])
-	if err := SetCwd(profileName, newCwd); err != nil {
-		return "", err
-	}
-	return newCwd, nil
+	return strings.TrimSpace(lines[len(lines)-1]), nil
 }
 
 // resolveRemotePath anchors a remote path: absolute or ~-prefixed stays
