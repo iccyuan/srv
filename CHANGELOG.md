@@ -23,6 +23,30 @@ Python 版本最后一次有意义的迭代是 0.7.5(MCP 加固 + ControlMaster 
 
 ---
 
+## [Go 2.2.1] — 2026-05-07
+
+### Added
+**Daemon 自动启动**(填 v2.2.0 留下的"得手动跑 `srv daemon`"坑):
+
+- `ensureDaemon()`:`srv _ls` 找不到 daemon 时,后台启 `srv daemon`,1.5 秒内轮询 socket 出现就重试。
+- `spawnDaemonDetached()` 跨平台 detach:
+  - Unix:`SysProcAttr{Setsid: true}` —— 子进程是新 session leader,父 shell 退出不带走它
+  - Windows:`DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP | CREATE_BREAKAWAY_FROM_JOB` —— 摆脱 Windows Terminal 的 Job 对象,关终端不杀 daemon
+- 竞态:两个 srv 同时尝试启动 → 第一个 listen 成功,第二个看到 socket 已绑定就退出(`cmdDaemon` 已有此分支)
+- Release 子 process handle,避免父进程攒僵尸句柄
+
+### Fixed
+**`getClient` 持锁拨号导致 daemon 整体被堵**:
+
+- 远端不通时 `ssh.Dial` 阻塞 50+ 秒。原 `getClient` 在拨号期间持有 `daemonState.mu`,所以 `daemon status` / `daemon stop` 等只读请求也跟着挂。
+- 改成"快路径持锁查池 → 快路径未命中先释锁 → 慢路径无锁拨号 → 重新加锁安装(同时检测竞态重复拨号)"。
+- 实测:_ls 拨号挂 56s 期间,`daemon status` 仍 47ms 回包。
+
+### Notes
+本会话末尾测试时远端服务器(23.166.40.67)不通,`srv check` 自己也 15s 超时退出,与 srv 代码无关——daemon 无法实际服务 ls 请求,但 auto-spawn 行为本身已验证。
+
+---
+
 ## [Go 2.2.0] — 2026-05-07
 
 ### Added

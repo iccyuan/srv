@@ -235,6 +235,10 @@ func (s *daemonState) dispatch(req daemonRequest) daemonResponse {
 // getClient returns a pooled (or freshly dialed) Client for the named
 // profile. Errors propagate to the caller; the dialed client stays in the
 // pool until idle-collected.
+//
+// The Dial step happens OUTSIDE the daemon mutex -- a slow handshake (or
+// a hanging dial when the remote is unreachable) must NOT block other
+// requests like `status` or `shutdown` that just want to read map state.
 func (s *daemonState) getClient(profileName string) (*Client, *Profile, error) {
 	cfg, err := LoadConfig()
 	if err != nil || cfg == nil {
@@ -249,17 +253,32 @@ func (s *daemonState) getClient(profileName string) (*Client, *Profile, error) {
 	}
 	profile.Name = profileName
 
+	// Fast path: already pooled.
 	s.mu.Lock()
-	defer s.mu.Unlock()
 	if pc, ok := s.pool[profileName]; ok && pc.client != nil && pc.client.Conn != nil {
 		pc.lastUsed = time.Now()
+		s.mu.Unlock()
 		return pc.client, profile, nil
 	}
+	s.mu.Unlock()
+
+	// Slow path: dial without holding s.mu. Other requests stay responsive.
 	c, err := Dial(profile)
 	if err != nil {
 		return nil, profile, err
 	}
+
+	// Reacquire and install. Race: another request for the same profile
+	// could have raced us to dial; in that case discard our duplicate.
+	s.mu.Lock()
+	if existing, ok := s.pool[profileName]; ok && existing.client != nil && existing.client.Conn != nil {
+		s.mu.Unlock()
+		_ = c.Close()
+		existing.lastUsed = time.Now()
+		return existing.client, profile, nil
+	}
 	s.pool[profileName] = &pooledClient{client: c, lastUsed: time.Now()}
+	s.mu.Unlock()
 	return c, profile, nil
 }
 

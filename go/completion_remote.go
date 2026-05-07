@@ -43,11 +43,21 @@ func cmdInternalLs(args []string, cfg *Config, profileOverride string) int {
 	}
 
 	// 2) Daemon (pooled SSH, ~500ms even when "cold" because no handshake).
+	//    Auto-spawn one in the background if none is running -- next time
+	//    the user tabs, it'll be warm.
 	if entries, ok := tryDaemonLs(name, prefix); ok {
 		for _, e := range entries {
 			fmt.Println(e)
 		}
 		return 0
+	}
+	if ensureDaemon() {
+		if entries, ok := tryDaemonLs(name, prefix); ok {
+			for _, e := range entries {
+				fmt.Println(e)
+			}
+			return 0
+		}
 	}
 
 	// 3) Direct dial fallback (~2.7s cold, full handshake).
