@@ -14,8 +14,11 @@
 | Switch profile (this shell) | `srv use <profile>` |
 | Push changed files | `srv sync` |
 | Push a single file | `srv push ./a.py` |
+| Diagnose local setup | `srv doctor` |
+| Compare local/remote file | `srv diff ./a.py` |
 | Forward a port (see remote dev server) | `srv tunnel 8080` |
 | Edit a remote file in $EDITOR | `srv edit /etc/foo.conf` |
+| Open a remote file locally | `srv open logs/app.log` |
 | Long-running background task | `srv -d ./build.sh` |
 | Inspect background jobs | `srv jobs` / `srv logs <id> -f` |
 | Diagnose connection issues | `srv check` |
@@ -151,6 +154,13 @@ srv config show [name]              # full JSON for one profile
 srv config use <name>               # set the global default
 srv config remove <name>            # delete a profile
 srv config set <prof> <key> <val>   # set one key (true/false/int/null are auto-typed)
+srv config edit [name]              # edit one profile as JSON in $EDITOR
+srv profiles                        # short alias for config list
+srv profiles use <name>             # short alias for srv use <name>
+srv profiles edit <name>            # short alias for config edit <name>
+srv env list                        # list profile-level remote env vars
+srv env set KEY value               # inject KEY=value before remote commands
+srv env unset KEY                   # remove one profile env var
 ```
 
 ### Quick profile switching
@@ -246,15 +256,20 @@ srv sync --since 2h                   # mtime-based (2h / 30m / 1d / 90s)
 srv sync --include "src/**/*.py"      # glob mode, repeatable
 srv sync --files a.py --files b/c.py  # explicit list; also `srv sync -- a.py b.py`
 srv sync --dry-run                    # preview, don't transfer
+srv sync --delete --dry-run           # preview deletes for tracked files removed locally
+srv sync --delete                     # also remove those tracked files on the remote
 srv sync --exclude "*.log"            # extra exclude, repeatable
 srv sync /opt/app                     # explicit remote root (default = sync_root or cwd)
 srv sync --root ./subproject          # explicit local root (default = git toplevel / cwd)
 srv sync --no-git                     # disable git auto-mode in a repo
+srv sync --watch                      # keep watching and syncing changes
 ```
 
 Default excludes: `.git`, `node_modules`, `__pycache__`, `.venv`, `venv`, `.idea`, `.vscode`, `.DS_Store`, `*.pyc`, `*.pyo`, `*.swp`. `list` mode (`--files`) skips default excludes — explicit user files are unconditionally sent.
 
 Files are anchored at the git toplevel (git mode) or current dir (other modes); the remote receives them at `remote_root/<relative_path>`.
+
+`--delete` currently works in git mode only. Use `--delete --dry-run` first: it prints `delete <path>` entries and does not touch the remote.
 
 ### Port forwarding (`srv tunnel`)
 
@@ -279,6 +294,17 @@ srv edit /etc/nginx/conf.d/api.conf      # pull -> $EDITOR -> push back if chang
 Flow: SFTP-pull into an `os.MkdirTemp` directory (basename preserved so editor syntax detection works) → spawn `$VISUAL` / `$EDITOR` (split on whitespace, so `EDITOR='code --wait'` works) → after editor exit, compare mtime+size: changed → upload back; unchanged → "no changes; not uploading".
 
 Editor resolution: `$VISUAL` → `$EDITOR` → Windows: `notepad.exe` → otherwise: `vim` / `vi` / `nano`.
+
+### Local helpers (`srv open`, `srv code`, `srv diff`, `srv doctor`)
+
+```
+srv doctor                         # local config / daemon / active-profile report
+srv open logs/app.log              # pull a remote file to a temp dir and open it
+srv code /opt/app                  # open VS Code Remote SSH for a remote folder
+srv diff ./app.py app.py           # compare local file with remote file
+```
+
+`srv open` is read-only; use `srv edit` when you want to save changes back. `srv code` runs `code --folder-uri ...` when the VS Code CLI is available, otherwise it prints the command to run.
 
 **Known caveats**:
 
@@ -382,6 +408,7 @@ Set with `srv config set <profile> <key> <value>`. Bool strings (`true`/`false`)
 | `control_persist` | `10m` | How long ControlMaster sockets linger idle |
 | `sync_root` | null | Default remote root for `srv sync` (used when no positional arg given) |
 | `sync_exclude` | `[]` | Profile-level extra excludes for `srv sync`, merged with defaults |
+| `env` | `{}` | Profile-level environment variables prepended to remote commands |
 | `ssh_options` | `[]` | Raw `-o` strings, appended **last** (overrides everything above) |
 
 ---
@@ -570,7 +597,7 @@ The MCP server is loaded at session startup. Open a **new** Claude Code session,
 
 ## Version
 
-Currently **Go 2.4.x** (what `srv version` prints). Version bumps on breaking changes; the Python implementation is frozen at 0.7.5 and won't receive further updates. Full history in [CHANGELOG.md](./CHANGELOG.md).
+Currently **Go 2.6.x** (what `srv version` prints). Version bumps on breaking changes; the Python implementation is frozen at 0.7.5 and won't receive further updates. Full history in [CHANGELOG.md](./CHANGELOG.md).
 
 ## Development (contributors)
 

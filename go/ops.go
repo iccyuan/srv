@@ -43,6 +43,7 @@ func runRemoteStream(profile *Profile, cwd, cmd string, tty bool) int {
 
 // runRemoteCapture opens a connection, runs `cmd` capturing output, closes.
 func runRemoteCapture(profile *Profile, cwd, cmd string) (*RunCaptureResult, error) {
+	cmd = applyRemoteEnv(profile, cmd)
 	c, err := Dial(profile)
 	if err != nil {
 		return &RunCaptureResult{

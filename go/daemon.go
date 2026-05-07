@@ -62,6 +62,8 @@ type daemonResponse struct {
 	ID       int      `json:"id"`
 	OK       bool     `json:"ok"`
 	Err      string   `json:"err,omitempty"`
+	Data     any      `json:"data,omitempty"`
+	Error    *wireErr `json:"error,omitempty"`
 	Entries  []string `json:"entries,omitempty"`
 	Cwd      string   `json:"cwd,omitempty"`
 	Stdout   string   `json:"stdout,omitempty"`
@@ -69,6 +71,11 @@ type daemonResponse struct {
 	ExitCode int      `json:"exit_code,omitempty"`
 	Profiles []string `json:"profiles_pooled,omitempty"`
 	Uptime   int64    `json:"uptime_sec,omitempty"`
+}
+
+type wireErr struct {
+	Code    string `json:"code"`
+	Message string `json:"message"`
 }
 
 // streamChunk is one frame of the stream_run multi-line response.
@@ -129,9 +136,24 @@ func cmdDaemon(args []string) int {
 	if len(args) > 0 {
 		switch args[0] {
 		case "status":
-			return daemonClientStatus()
+			return daemonClientStatus(args[1:])
 		case "stop":
 			return daemonClientStop()
+		case "restart":
+			rc := daemonClientStop()
+			if rc != 0 {
+				return rc
+			}
+			if ensureDaemon() {
+				fmt.Println("daemon: restarted")
+				return 0
+			}
+			fmt.Fprintln(os.Stderr, "daemon: restart failed")
+			return 1
+		case "logs":
+			return daemonClientLogs()
+		case "prune-cache":
+			return daemonClientPruneCache()
 		}
 	}
 	sockPath := daemonSocketPath()
@@ -247,10 +269,45 @@ func (s *daemonState) requestStop() {
 
 func (s *daemonState) write(wr *bufio.Writer, resp daemonResponse) {
 	resp.V = DaemonProtoVersion
+	if resp.OK && resp.Data == nil {
+		resp.Data = daemonData(resp)
+	}
+	if !resp.OK && resp.Error == nil && resp.Err != "" {
+		resp.Error = &wireErr{Code: "daemon_error", Message: resp.Err}
+	}
 	b, _ := json.Marshal(resp)
 	wr.Write(b)
 	wr.WriteByte('\n')
 	wr.Flush()
+}
+
+func daemonData(resp daemonResponse) any {
+	data := map[string]any{}
+	if len(resp.Entries) > 0 {
+		data["entries"] = resp.Entries
+	}
+	if resp.Cwd != "" {
+		data["cwd"] = resp.Cwd
+	}
+	if resp.Stdout != "" {
+		data["stdout"] = resp.Stdout
+	}
+	if resp.Stderr != "" {
+		data["stderr"] = resp.Stderr
+	}
+	if resp.ExitCode != 0 {
+		data["exit_code"] = resp.ExitCode
+	}
+	if len(resp.Profiles) > 0 {
+		data["profiles_pooled"] = resp.Profiles
+	}
+	if resp.Uptime != 0 {
+		data["uptime_sec"] = resp.Uptime
+	}
+	if len(data) == 0 {
+		return nil
+	}
+	return data
 }
 
 func (s *daemonState) dispatch(req daemonRequest) (resp daemonResponse) {

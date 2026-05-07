@@ -1,5 +1,23 @@
 # Changelog
 
+## [Go 2.6.0] - 2026-05-07
+
+### Added
+
+- Added local workflow helpers: `srv doctor`, `srv open`, `srv code`, and `srv diff`.
+- Added profile convenience commands: `srv profiles ...`, `srv config edit [profile]`, and `srv env list|set|unset|clear`.
+- Added `srv sync --delete` for git-mode removal of remote files deleted locally. `--delete --dry-run` previews deletions first.
+- Added daemon management helpers: `srv daemon restart`, `srv daemon logs`, `srv daemon prune-cache`, and `srv daemon status --json`.
+- Added profile-level `env` values, injected before remote commands and detached jobs.
+- Added daemon response `data` / `error` fields while keeping the old flat fields for compatibility.
+- `srv sync --watch` now prints the active profile, target, and sync mode when it starts.
+
+### Changed
+
+- Completion cache writes now use the same atomic write helper as JSON state files.
+- MCP `tools/call` now returns JSON-RPC `-32602` for invalid params instead of continuing with empty arguments.
+- Auto-spawned daemon stdout/stderr is captured in `~/.srv/daemon.log`.
+
 格式参考 [Keep a Changelog](https://keepachangelog.com)。版本号在破坏性变更时增加。
 
 **维护状态(2026-05-07 起)**:

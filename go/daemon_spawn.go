@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"time"
 )
 
@@ -46,8 +47,14 @@ func spawnDaemonDetached() error {
 	}
 	cmd := exec.Command(self, "daemon")
 	cmd.Stdin = nil
-	cmd.Stdout = nil
-	cmd.Stderr = nil
+	_ = os.MkdirAll(ConfigDir(), 0o755)
+	if f, err := os.OpenFile(daemonLogPath(), os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600); err == nil {
+		cmd.Stdout = f
+		cmd.Stderr = f
+	} else {
+		cmd.Stdout = nil
+		cmd.Stderr = nil
+	}
 	applyDetachAttrs(cmd)
 	if err := cmd.Start(); err != nil {
 		return err
@@ -57,4 +64,8 @@ func spawnDaemonDetached() error {
 	// + breakaway-from-job achieves the same.
 	go func() { _ = cmd.Process.Release() }()
 	return nil
+}
+
+func daemonLogPath() string {
+	return filepath.Join(ConfigDir(), "daemon.log")
 }

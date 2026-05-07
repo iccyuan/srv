@@ -77,7 +77,7 @@ func spawnDetached(profileName string, profile *Profile, userCmd string) (*JobRe
 	defer c.Close()
 
 	jobID := genJobID()
-	pid, err := c.RunDetached(userCmd, cwd, jobID)
+	pid, err := c.RunDetached(applyRemoteEnv(profile, userCmd), cwd, jobID)
 	if err != nil {
 		return nil, err
 	}

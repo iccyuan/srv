@@ -12,7 +12,7 @@ import (
 
 // Version is overridable at build time via -ldflags "-X main.Version=...".
 // goreleaser sets it from the git tag on release builds.
-var Version = "2.5.0"
+var Version = "2.6.0"
 
 const helpText = `srv - run commands on a remote SSH server with persistent cwd.
 
@@ -28,10 +28,15 @@ Quick start:
   srv -t htop                    interactive (TTY) command
   srv -P dev rsync ...           override profile for a single call
   srv check                      probe connectivity; diagnose key/host/port issues
+  srv doctor                     local config / daemon / SSH readiness report
   srv shell                      interactive remote shell (cwd-positioned)
   srv tunnel 8080                forward localhost:8080 -> remote 127.0.0.1:8080
   srv tunnel 8080:db:5432        forward localhost:8080 -> db:5432 from remote
   srv edit /etc/foo.conf         pull, open in $EDITOR, push back if changed
+  srv open logs/app.log          pull remote file to temp and open locally
+  srv code /opt/app              open VS Code Remote SSH for a remote folder
+  srv diff local.py remote.py    compare local file with remote file
+  srv env set NODE_ENV prod      set profile-level remote env var
 
 File transfer (uses SFTP via the same SSH session):
   srv push ./local.py            upload to current cwd
@@ -46,6 +51,7 @@ Bulk sync of changed files (tar | ssh tar; preserves relative paths):
   srv sync --include "src/**/*.go"   glob mode (repeatable)
   srv sync --files a.go b/c.go   explicit list
   srv sync --dry-run             show what would push, don't transfer
+  srv sync --delete --dry-run    show tracked remote deletes before applying
   srv sync /opt/app              override remote root (else cwd or sync_root)
   srv sync --watch               keep syncing on every local file change
 
@@ -66,7 +72,10 @@ Integrations:
   srv mcp                                run as a stdio MCP server
   srv daemon                             keep ssh sessions warm (foreground)
   srv daemon status                      show running daemon's pool
+  srv daemon status --json               machine-readable daemon status
   srv daemon stop                        stop the running daemon
+  srv daemon restart                     restart background daemon
+  srv daemon logs                        print auto-spawn daemon log
 
 Profile resolution (highest first):
   -P/--profile flag  >  session pin (` + "`" + `srv use` + "`" + `)  >  $SRV_PROFILE  >  default
@@ -85,7 +94,8 @@ var reservedSubcommands = map[string]bool{
 	"init": true, "config": true, "use": true, "cd": true, "pwd": true,
 	"status": true, "check": true, "shell": true, "run": true, "exec": true,
 	"push": true, "pull": true, "sync": true, "tunnel": true, "edit": true,
-	"completion": true, "mcp": true, "daemon": true,
+	"open": true, "code": true, "diff": true, "doctor": true, "profiles": true,
+	"env": true, "completion": true, "mcp": true, "daemon": true,
 	"_profiles": true, "_ls": true,
 	"jobs": true, "logs": true, "kill": true, "sessions": true,
 	"help": true, "--help": true, "-h": true,
@@ -195,6 +205,10 @@ func run(args []string) int {
 		return cmdStatus(cfg, opts.profile)
 	case "check":
 		return cmdCheck(cfg, opts.profile)
+	case "doctor":
+		return cmdDoctor(cfg, opts.profile)
+	case "profiles":
+		return cmdProfiles(rest[1:], cfg)
 	case "shell":
 		return cmdShell(cfg, opts.profile)
 	case "push":
@@ -207,6 +221,14 @@ func run(args []string) int {
 		return cmdTunnel(rest[1:], cfg, opts.profile)
 	case "edit":
 		return cmdEdit(rest[1:], cfg, opts.profile)
+	case "open":
+		return cmdOpen(rest[1:], cfg, opts.profile)
+	case "code":
+		return cmdCode(rest[1:], cfg, opts.profile)
+	case "diff":
+		return cmdDiff(rest[1:], cfg, opts.profile)
+	case "env":
+		return cmdEnv(rest[1:], cfg, opts.profile)
 	case "jobs":
 		return cmdJobs(cfg, opts.profile)
 	case "logs":

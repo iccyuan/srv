@@ -7,6 +7,8 @@ import (
 	"fmt"
 	"net"
 	"os"
+	"path/filepath"
+	"strings"
 	"time"
 )
 
@@ -197,9 +199,14 @@ func tryDaemonCd(profileName, currentCwd, target string) (newCwd string, used bo
 	return resp.Cwd, true, nil
 }
 
-func daemonClientStatus() int {
+func daemonClientStatus(args []string) int {
+	asJSON := len(args) > 0 && args[0] == "--json"
 	conn := daemonDial(time.Second)
 	if conn == nil {
+		if asJSON {
+			fmt.Println(`{"running":false}`)
+			return 1
+		}
 		fmt.Println("daemon: not running")
 		return 1
 	}
@@ -208,6 +215,16 @@ func daemonClientStatus() int {
 	if err != nil || resp == nil {
 		fmt.Fprintln(os.Stderr, "daemon: status failed:", err)
 		return 1
+	}
+	if asJSON {
+		b, _ := json.MarshalIndent(map[string]any{
+			"running":         true,
+			"uptime_sec":      resp.Uptime,
+			"profiles_pooled": resp.Profiles,
+			"protocol":        resp.V,
+		}, "", "  ")
+		fmt.Println(string(b))
+		return 0
 	}
 	fmt.Printf("running, uptime %ds\n", resp.Uptime)
 	if len(resp.Profiles) == 0 {
@@ -218,6 +235,31 @@ func daemonClientStatus() int {
 			fmt.Println(" -", p)
 		}
 	}
+	return 0
+}
+
+func daemonClientLogs() int {
+	data, err := os.ReadFile(daemonLogPath())
+	if err != nil {
+		if os.IsNotExist(err) {
+			fmt.Println("(no daemon log)")
+			return 0
+		}
+		fmt.Fprintln(os.Stderr, "daemon logs:", err)
+		return 1
+	}
+	fmt.Print(string(data))
+	return 0
+}
+
+func daemonClientPruneCache() int {
+	dir := filepath.Join(ConfigDir(), "cache")
+	if err := os.RemoveAll(dir); err != nil {
+		fmt.Fprintln(os.Stderr, "daemon prune-cache:", err)
+		return 1
+	}
+	_ = os.MkdirAll(dir, 0o755)
+	fmt.Println("cache pruned:", strings.TrimSpace(dir))
 	return 0
 }
 

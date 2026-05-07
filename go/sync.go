@@ -32,6 +32,7 @@ type syncOpts struct {
 	root       string
 	dryRun     bool
 	watch      bool
+	delete     bool
 }
 
 func parseSyncOpts(args []string) *syncOpts {
@@ -123,6 +124,10 @@ func parseSyncOpts(args []string) *syncOpts {
 			o.watch = true
 			i++
 			continue
+		case a == "--delete":
+			o.delete = true
+			i++
+			continue
 		case strings.HasPrefix(a, "-"):
 			fatal("error: unknown sync option %q", a)
 		}
@@ -136,6 +141,26 @@ func parseSyncOpts(args []string) *syncOpts {
 		o.remoteRoot = positional[0]
 	}
 	return o
+}
+
+func gitDeletedFiles(repoRoot string) ([]string, error) {
+	cmd := exec.Command("git", "-C", repoRoot, "ls-files", "--deleted", "-z")
+	b, err := cmd.CombinedOutput()
+	if err != nil {
+		detail := strings.TrimSpace(string(b))
+		if detail == "" {
+			detail = err.Error()
+		}
+		return nil, fmt.Errorf("git command failed: %s", detail)
+	}
+	var out []string
+	for _, p := range strings.Split(string(b), "\x00") {
+		if p != "" {
+			out = append(out, filepath.ToSlash(p))
+		}
+	}
+	sort.Strings(out)
+	return out, nil
 }
 
 // findGitRoot walks upward from start until it finds a directory containing
@@ -557,6 +582,37 @@ func tarUploadStream(profile *Profile, localRoot string, files []string, remoteR
 	return rc, runErr
 }
 
+func deleteRemoteFiles(profile *Profile, remoteRoot string, files []string) (int, error) {
+	c, err := Dial(profile)
+	if err != nil {
+		return 255, err
+	}
+	defer c.Close()
+	expanded, err := c.expandRemoteHome(remoteRoot)
+	if err != nil {
+		return 1, err
+	}
+	parts := make([]string, 0, len(files))
+	for _, f := range files {
+		if f == "" || strings.HasPrefix(f, "../") || filepath.IsAbs(f) {
+			continue
+		}
+		parts = append(parts, shQuotePath(f))
+	}
+	if len(parts) == 0 {
+		return 0, nil
+	}
+	cmd := fmt.Sprintf("cd %s && rm -f -- %s", shQuotePath(expanded), strings.Join(parts, " "))
+	res, err := c.RunCapture(cmd, "")
+	if err != nil {
+		return 1, err
+	}
+	if res.ExitCode != 0 {
+		return res.ExitCode, fmt.Errorf("%s", strings.TrimSpace(res.Stderr))
+	}
+	return 0, nil
+}
+
 func cmdSync(args []string, cfg *Config, profileOverride string) int {
 	o := parseSyncOpts(args)
 	name, profile, err := ResolveProfile(cfg, profileOverride)
@@ -613,6 +669,25 @@ func cmdSync(args []string, cfg *Config, profileOverride string) int {
 	if err != nil {
 		fatal("error: %v", err)
 	}
+	var deletes []string
+	if o.delete {
+		if o.mode != "git" {
+			fatal("error: --delete currently requires git mode")
+		}
+		deletes, err = gitDeletedFiles(localRoot)
+		if err != nil {
+			fatal("error: %v", err)
+		}
+		if len(allExcludes) > 0 {
+			filtered := deletes[:0]
+			for _, f := range deletes {
+				if !matchesAnyExclude(f, allExcludes) {
+					filtered = append(filtered, f)
+				}
+			}
+			deletes = filtered
+		}
+	}
 
 	target := profile.Host
 	if profile.User != "" {
@@ -628,7 +703,10 @@ func cmdSync(args []string, cfg *Config, profileOverride string) int {
 	fmt.Fprintf(os.Stderr, "local   : %s\n", localRoot)
 	fmt.Fprintf(os.Stderr, "remote  : %s:%s\n", target, remoteRoot)
 	fmt.Fprintf(os.Stderr, "files   : %d\n", len(files))
-	if len(files) == 0 {
+	if len(deletes) > 0 {
+		fmt.Fprintf(os.Stderr, "delete  : %d\n", len(deletes))
+	}
+	if len(files) == 0 && len(deletes) == 0 {
 		fmt.Fprintln(os.Stderr, "(nothing to sync)")
 		return 0
 	}
@@ -642,6 +720,9 @@ func cmdSync(args []string, cfg *Config, profileOverride string) int {
 	if len(files) > 200 {
 		fmt.Fprintf(os.Stderr, "  ... (%d more)\n", len(files)-200)
 	}
+	for _, f := range deletes {
+		fmt.Fprintf(os.Stderr, "  delete %s\n", f)
+	}
 	if o.dryRun {
 		fmt.Fprintln(os.Stderr, "(dry-run, not transferred)")
 		return 0
@@ -649,6 +730,14 @@ func cmdSync(args []string, cfg *Config, profileOverride string) int {
 	rc, err := tarUploadStream(profile, localRoot, files, remoteRoot)
 	if err != nil {
 		printDiagError(err, profile)
+	}
+	if rc == 0 && len(deletes) > 0 {
+		if drc, derr := deleteRemoteFiles(profile, remoteRoot, deletes); derr != nil {
+			printDiagError(derr, profile)
+			return 1
+		} else if drc != 0 {
+			return drc
+		}
 	}
 	if o.watch {
 		fmt.Fprintln(os.Stderr)

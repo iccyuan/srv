@@ -30,20 +30,21 @@ func JobsFile() string     { return filepath.Join(ConfigDir(), "jobs.json") }
 //     accessor methods)
 //   - Most ints/strings have sensible zero defaults applied at use time
 type Profile struct {
-	Host              string   `json:"host"`
-	User              string   `json:"user,omitempty"`
-	Port              int      `json:"port,omitempty"`
-	IdentityFile      string   `json:"identity_file,omitempty"`
-	DefaultCwd        string   `json:"default_cwd,omitempty"`
-	Multiplex         *bool    `json:"multiplex,omitempty"`
-	Compression       *bool    `json:"compression,omitempty"`
-	ConnectTimeout    int      `json:"connect_timeout,omitempty"`
-	KeepaliveInterval int      `json:"keepalive_interval,omitempty"`
-	KeepaliveCount    int      `json:"keepalive_count,omitempty"`
-	ControlPersist    string   `json:"control_persist,omitempty"`
-	SyncRoot          string   `json:"sync_root,omitempty"`
-	SyncExclude       []string `json:"sync_exclude,omitempty"`
-	SshOptions        []string `json:"ssh_options,omitempty"`
+	Host              string            `json:"host"`
+	User              string            `json:"user,omitempty"`
+	Port              int               `json:"port,omitempty"`
+	IdentityFile      string            `json:"identity_file,omitempty"`
+	DefaultCwd        string            `json:"default_cwd,omitempty"`
+	Multiplex         *bool             `json:"multiplex,omitempty"`
+	Compression       *bool             `json:"compression,omitempty"`
+	ConnectTimeout    int               `json:"connect_timeout,omitempty"`
+	KeepaliveInterval int               `json:"keepalive_interval,omitempty"`
+	KeepaliveCount    int               `json:"keepalive_count,omitempty"`
+	ControlPersist    string            `json:"control_persist,omitempty"`
+	SyncRoot          string            `json:"sync_root,omitempty"`
+	SyncExclude       []string          `json:"sync_exclude,omitempty"`
+	SshOptions        []string          `json:"ssh_options,omitempty"`
+	Env               map[string]string `json:"env,omitempty"`
 	// Jump (ProxyJump) -- one or more bastion hops dialed in order before
 	// the final target. Each entry: "[user@]host[:port]". Auth uses the
 	// same agent + identity_file + default key chain as the profile.

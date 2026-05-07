@@ -50,8 +50,11 @@ srv use <profile> | --clear
 srv cd <path>          srv pwd          srv status        srv check
 srv <args...>          srv -t <cmd>     srv -d <cmd>      srv -P <prof> <cmd>
 srv push <l> [<r>]     srv pull <r> [<l>]    srv sync [...]
+srv doctor             srv profiles [...]     srv env [...]
+srv open <remote>      srv code [remote_dir]  srv diff <local> [remote]
 srv jobs               srv logs <id> [-f]    srv kill <id> [-9]
 srv sessions [list|show|clear|prune]
+srv daemon [status|restart|logs|prune-cache|stop]
 srv completion <bash|zsh|powershell>     srv mcp
 srv help               srv version
 ```

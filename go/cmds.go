@@ -181,6 +181,32 @@ func cmdConfig(args []string, cfg *Config) int {
 		}
 		fmt.Printf("%s.%s = %s\n", prof, key, value)
 		return 0
+	case "edit":
+		target := cfg.DefaultProfile
+		if len(rest) > 0 {
+			target = rest[0]
+		}
+		if target == "" {
+			fatal("usage: srv config edit <profile>")
+		}
+		p, ok := cfg.Profiles[target]
+		if !ok {
+			fatal("error: profile %q not found.", target)
+		}
+		edited, err := editJSONValue(p, "srv-profile-*.json")
+		if err != nil {
+			fatal("error: %v", err)
+		}
+		var next Profile
+		if err := json.Unmarshal(edited, &next); err != nil {
+			fatal("error: edited profile is not valid JSON: %v", err)
+		}
+		cfg.Profiles[target] = &next
+		if err := SaveConfig(cfg); err != nil {
+			fatal("error: %v", err)
+		}
+		fmt.Printf("updated profile %s\n", target)
+		return 0
 	}
 	fatal("error: unknown config action %q", action)
 	return 1
@@ -245,6 +271,16 @@ func applyProfileSet(p *Profile, key, value string) {
 				}
 			}
 			p.Jump = out
+		}
+	case "env":
+		if p.Env == nil {
+			p.Env = map[string]string{}
+		}
+		for _, part := range strings.Split(value, ",") {
+			k, val, ok := strings.Cut(strings.TrimSpace(part), "=")
+			if ok && strings.TrimSpace(k) != "" {
+				p.Env[strings.TrimSpace(k)] = val
+			}
 		}
 	default:
 		// unknown key -> store stringly
@@ -397,6 +433,7 @@ func cmdRun(args []string, cfg *Config, profileOverride string, tty bool) int {
 		fatal("%v", err)
 	}
 	cmd := strings.Join(args, " ")
+	cmd = applyRemoteEnv(profile, cmd)
 	cwd := GetCwd(name, profile)
 	return runRemoteStream(profile, cwd, cmd, tty)
 }

@@ -31,6 +31,12 @@ func runSyncWatch(o *syncOpts, profile *Profile, localRoot, remoteRoot string, a
 	added := watchAddDirs(w, localRoot, allExcludes)
 	fmt.Fprintf(os.Stderr, "watching %d directories under %s; Ctrl+C to stop.\n",
 		added, localRoot)
+	target := profile.Host
+	if profile.User != "" {
+		target = profile.User + "@" + profile.Host
+	}
+	fmt.Fprintf(os.Stderr, "profile=%s  target=%s:%s  mode=%s\n",
+		profile.Name, target, remoteRoot, o.mode)
 
 	// Trigger / dedup. The timer is reset on every event so we sync once
 	// after a quiet period instead of on every tap.
