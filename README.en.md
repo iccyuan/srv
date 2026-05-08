@@ -626,6 +626,23 @@ The MCP server is loaded at session startup. Open a **new** Claude Code session,
 ### MCP hangs / returns EOF on the first call after a long idle
 **Mitigated in 2.6.2**: the daemon now health-checks pooled SSH connections idle longer than 30 s with one keepalive ping; on failure it evicts and re-dials. Calls succeed on the second attempt before this fix.
 
+### MCP `run` chain like `token=$(login) && curl ...` reports exit 0 even when login failed
+**Bash semantics**, not a srv bug. `$(...)` failures don't propagate, and `curl -s` returns 0 on HTTP errors too — so the final exit code is curl's 0. Three fixes:
+
+1. **Split into two `srv run` calls** — a login failure surfaces as its own non-zero exit, the chain breaks at step 1
+2. **Use strict mode**: `srv "set -euo pipefail; token=\$(login) && curl ..."` — any sub-command failing aborts the chain
+3. **Use `curl -fsS`** instead of `-s` — `-f` makes curl exit non-zero on HTTP errors
+
+### MCP `run` inline backgrounding (`& disown` / `nohup &`) doesn't actually start the process
+**Use `srv -d` instead.** `srv -d <cmd>` is the dedicated path for backgrounded jobs: it does `nohup`, redirects stdout/stderr to `~/.srv-jobs/<id>.log`, and records the PID. Inline `&` over a non-TTY SSH session has races (channel close → SIGHUP / stdout blocking) — that's SSH + shell behavior, not a srv bug.
+
+```
+srv -d ./svc                   # start in background, returns a job id
+srv jobs                       # list running jobs
+srv logs <id> -f               # tail the remote log
+srv kill <id>                  # SIGTERM
+```
+
 ### MCP `psql -c 'SELECT a; SELECT b;'` only returns the last result
 **psql behavior, not srv**. `-c` only returns the last statement's result set. Workarounds:
 

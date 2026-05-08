@@ -625,6 +625,23 @@ MCP 服务器在 Claude Code 会话启动时加载。**新开 Claude Code 会话
 ### MCP 长闲置后下一次调用挂住 / 报 EOF
 **已缓解(2.6.2)**:daemon `getClient` 对池里 `lastUsed > 30s` 的连接先 ping,失败则 evict + redial。第二次调用稳。2.6.1 及之前需要手动重试一次。
 
+### MCP `run` 链式命令里 `token=$(login)` 失败但 srv 报 exit 0
+**Bash 语义**,不是 srv 报错丢失。`$(...)` 失败默认不让脚本退出,`curl -s ...` HTTP 错误也返回 0,最终 srv 看到的就是最后一条 curl 的 0。三种解法:
+
+1. **拆成两个 `srv run`**,login 失败立刻冒成非 0 exit,链断在第一步
+2. **加 `set -euo pipefail`**:`srv "set -euo pipefail; token=\$(login) && curl ..."` 让任何子命令非 0 直接挂
+3. **curl 用 `-fsS`** 而不是 `-s`,HTTP 错误也会非 0 退出
+
+### MCP `run` inline 后台启动(`& disown` / `nohup &`)进程没起来
+**用 `srv -d` 代替** —— `srv -d <cmd>` 是为后台跑设计的,内置 `nohup` + 输出落 `~/.srv-jobs/<id>.log` + 记录 PID,稳定。Inline `&` 在 non-TTY SSH 上有 race 窗口(channel 关闭→SIGHUP / stdout 阻塞),不是 srv bug 是 SSH+shell 的固有行为。
+
+```
+srv -d ./svc                   # 起,立刻返回 job id
+srv jobs                       # 看在跑的
+srv logs <id> -f               # tail 远端日志
+srv kill <id>                  # SIGTERM
+```
+
 ### MCP `psql -c 'SELECT a; SELECT b;'` 只返回最后一条
 psql 的固有行为(`-c` 模式只保留最后语句的结果集),不是 srv 的事。Workaround:
 
