@@ -72,31 +72,33 @@ go build -o ../srv.exe .          # Windows
 go build -o ../srv     .          # macOS / Linux
 ```
 
-### Windows — add to PATH
+### Install (add srv to PATH)
+
+The repo root ships one-shot install scripts. They **auto-detect their own directory** (no hardcoded paths), are **idempotent** (re-run safely), and have a matching `--uninstall` mode.
+
+**Windows (PowerShell)**:
 
 ```powershell
-[Environment]::SetEnvironmentVariable(
-    "Path",
-    "$([Environment]::GetEnvironmentVariable('Path','User'));D:\WorkSpace\server\srv",
-    "User"
-)
+.\install.ps1                    # add to the User PATH
+.\install.ps1 -Uninstall         # remove
 ```
 
-Open a new PowerShell; `srv version` should print `srv 2.x.x`.
+Open a new PowerShell; `srv version` should print `srv 2.x.x`. Already-open windows keep the old PATH until restarted.
 
-### macOS / Linux — add to PATH
+**macOS / Linux**:
 
 ```sh
-echo 'export PATH="$PATH:/path/to/srv"' >> ~/.bashrc   # or ~/.zshrc
-exec $SHELL && srv version
+./install.sh                     # install (symlinks into ~/.local/bin if it's on PATH; else edits rc file)
+./install.sh --uninstall         # remove
 ```
 
-Or symlink to a directory already on PATH:
+Strategy:
+- If `~/.local/bin` is already on `$PATH`, drops a symlink there — cleanest, no rc-file edits, picks up `go build` rebuilds automatically.
+- Otherwise appends `export PATH=...` to the right rc file (zsh / bash / fallback `~/.profile`), guarded by a marker comment so re-runs don't duplicate it and `--uninstall` can remove it.
 
-```sh
-ln -s /path/to/srv/srv ~/.local/bin/srv
-srv version
-```
+After install, run `exec $SHELL -l` or open a new terminal, then `srv version` to verify.
+
+**Manual install** (if you'd rather not run a script): just put the repo root absolute path on your PATH. Any mechanism works.
 
 ### Python version (frozen, unmaintained)
 

@@ -72,31 +72,33 @@ go build -o ../srv.exe .          # Windows
 go build -o ../srv     .          # macOS / Linux
 ```
 
-### Windows — 加 PATH
+### 安装(把 srv 加到 PATH)
+
+仓库根有一键脚本,**自动识别脚本所在目录**(不依赖 D:\WorkSpace 这种硬编码路径),克隆到哪儿都能直接跑;**幂等**,跑两次不会重复加。
+
+**Windows(PowerShell)**:
 
 ```powershell
-[Environment]::SetEnvironmentVariable(
-    "Path",
-    "$([Environment]::GetEnvironmentVariable('Path','User'));D:\WorkSpace\server\srv",
-    "User"
-)
+.\install.ps1                    # 加到 User PATH
+.\install.ps1 -Uninstall         # 卸载
 ```
 
-新开 PowerShell,`srv version` 应当显示 `srv 2.x.x`。
+新开 PowerShell,`srv version` 应当显示 `srv 2.x.x`。**已开的窗口需要重开**才能看到 PATH 变化。
 
-### macOS / Linux — 加 PATH
+**macOS / Linux**:
 
 ```sh
-echo 'export PATH="$PATH:/path/to/srv"' >> ~/.bashrc   # 或 ~/.zshrc
-exec $SHELL && srv version
+./install.sh                     # 装(优先 ~/.local/bin 符号链接,否则改 rc 文件)
+./install.sh --uninstall         # 卸
 ```
 
-或软链到现有 PATH 目录:
+策略:
+- `~/.local/bin` 已经在 PATH 里 → 在那建 `srv` 符号链接(最干净,后续 `go build` 自动生效)
+- 否则 → 在合适的 rc 文件(zsh/bash/fallback `~/.profile`)追加一行 `export PATH=...`,带 marker 注释,卸载时干净移除
 
-```sh
-ln -s /path/to/srv/srv ~/.local/bin/srv
-srv version
-```
+装完按提示 `exec $SHELL -l` 或新开终端,`srv version` 验证。
+
+**手动加(不想跑脚本时)**:把仓库根的绝对路径加到 PATH 即可,任何方式都行。
 
 ### Python 版本(已冻结,不再维护)
 
