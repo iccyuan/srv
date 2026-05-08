@@ -57,48 +57,72 @@
 
 ## 安装
 
-`srv` 是仓库根目录下的单二进制,由 [`go/`](./go) 源码编译。
+三种路径,任选一种,**都不需要 Python 或系统 ssh 客户端**(Go 自实现 SSH 协议)。
 
-### 前置
+### 方案 A:一行命令(推荐 —— 不用编译)
 
-- Go 1.25+(只构建时需要——https://go.dev/dl/)
-- 远端服务器跑了 OpenSSH(本地不需要 ssh 客户端,Go 二进制自实现 SSH 协议)
-
-### 编译
-
-```sh
-cd go
-go build -o ../srv.exe .          # Windows
-go build -o ../srv     .          # macOS / Linux
-```
-
-### 安装(把 srv 加到 PATH)
-
-仓库根有一键脚本,**自动识别脚本所在目录**(不依赖 D:\WorkSpace 这种硬编码路径),克隆到哪儿都能直接跑;**幂等**,跑两次不会重复加。
-
-**Windows(PowerShell)**:
-
-```powershell
-.\install.ps1                    # 加到 User PATH
-.\install.ps1 -Uninstall         # 卸载
-```
-
-新开 PowerShell,`srv version` 应当显示 `srv 2.x.x`。**已开的窗口需要重开**才能看到 PATH 变化。
+下最新 release 二进制 + 加 PATH + 给出后续指引,**全自动**。
 
 **macOS / Linux**:
 
 ```sh
-./install.sh                     # 装(优先 ~/.local/bin 符号链接,否则改 rc 文件)
-./install.sh --uninstall         # 卸
+curl -fsSL https://raw.githubusercontent.com/iccyuan/srv/main/get.sh | sh
 ```
 
-策略:
-- `~/.local/bin` 已经在 PATH 里 → 在那建 `srv` 符号链接(最干净,后续 `go build` 自动生效)
-- 否则 → 在合适的 rc 文件(zsh/bash/fallback `~/.profile`)追加一行 `export PATH=...`,带 marker 注释,卸载时干净移除
+**Windows(PowerShell)**:
 
-装完按提示 `exec $SHELL -l` 或新开终端,`srv version` 验证。
+```powershell
+iwr -useb https://raw.githubusercontent.com/iccyuan/srv/main/get.ps1 | iex
+```
 
-**手动加(不想跑脚本时)**:把仓库根的绝对路径加到 PATH 即可,任何方式都行。
+可选环境变量:
+- `SRV_VERSION=2.6.5`(钉版本,默认拿最新)
+- `SRV_INSTALL_DIR=~/bin`(改安装目录,默认 `~/.srv/bin` / `%USERPROFILE%\.srv\bin`)
+
+装完按脚本提示新开一个终端,然后 `srv install` 起浏览器图形化向导,搞定 Claude Code MCP 注册和首个 profile。
+
+### 方案 B:从 release archive 解压
+
+[Releases 页](https://github.com/iccyuan/srv/releases/latest)挑对应平台的包:
+
+| OS / Arch | 包名 |
+|---|---|
+| Linux x86_64 | `srv_<ver>_linux_x86_64.tar.gz` |
+| Linux arm64 | `srv_<ver>_linux_arm64.tar.gz` |
+| macOS Intel | `srv_<ver>_macos_x86_64.tar.gz` |
+| macOS Apple Silicon | `srv_<ver>_macos_arm64.tar.gz` |
+| Windows x86_64 | `srv_<ver>_windows_x86_64.zip` |
+
+解压后:
+
+```sh
+# Linux / macOS
+tar -xzf srv_<ver>_linux_x86_64.tar.gz
+./srv install       # 启动浏览器图形化向导:加 PATH + Claude MCP + 首个 profile
+```
+
+```powershell
+# Windows
+Expand-Archive srv_<ver>_windows_x86_64.zip
+.\srv\srv.exe install
+```
+
+### 方案 C:从源码编译(开发者)
+
+需要 Go 1.25+。
+
+```sh
+git clone https://github.com/iccyuan/srv && cd srv
+cd go && go build -o ../srv.exe .          # Windows
+cd go && go build -o ../srv     .          # macOS / Linux
+cd ..
+.\install.ps1 -Gui                          # Windows 图形化装
+./install.sh --gui                          # macOS / Linux 图形化装
+```
+
+`install.ps1` / `install.sh` 是从源码编译流程的便利脚本(脚本所在目录的 `srv` 可执行文件 → 加 PATH);有 `-Uninstall` / `--uninstall` 干净移除。
+
+装完都用 `srv version` 验证,然后 `srv install` 进图形向导。
 
 ---
 

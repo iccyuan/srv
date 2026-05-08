@@ -57,48 +57,72 @@ Developing locally but needing a real server to actually run things means a lot 
 
 ## Install
 
-`srv` is a single binary at the repo root, built from [`go/`](./go).
+Three paths. **No Python, no system ssh client required** — the Go binary speaks SSH directly.
 
-### Prerequisites
+### Path A: One-liner (recommended — no build)
 
-- Go 1.25+ (only to build — https://go.dev/dl/)
-- OpenSSH server on the remote (the Go binary speaks SSH itself; no local ssh client needed)
-
-### Build
-
-```sh
-cd go
-go build -o ../srv.exe .          # Windows
-go build -o ../srv     .          # macOS / Linux
-```
-
-### Install (add srv to PATH)
-
-The repo root ships one-shot install scripts. They **auto-detect their own directory** (no hardcoded paths), are **idempotent** (re-run safely), and have a matching `--uninstall` mode.
-
-**Windows (PowerShell)**:
-
-```powershell
-.\install.ps1                    # add to the User PATH
-.\install.ps1 -Uninstall         # remove
-```
-
-Open a new PowerShell; `srv version` should print `srv 2.x.x`. Already-open windows keep the old PATH until restarted.
+Downloads the latest release binary, puts it on PATH, prints next steps. End-to-end automated.
 
 **macOS / Linux**:
 
 ```sh
-./install.sh                     # install (symlinks into ~/.local/bin if it's on PATH; else edits rc file)
-./install.sh --uninstall         # remove
+curl -fsSL https://raw.githubusercontent.com/iccyuan/srv/main/get.sh | sh
 ```
 
-Strategy:
-- If `~/.local/bin` is already on `$PATH`, drops a symlink there — cleanest, no rc-file edits, picks up `go build` rebuilds automatically.
-- Otherwise appends `export PATH=...` to the right rc file (zsh / bash / fallback `~/.profile`), guarded by a marker comment so re-runs don't duplicate it and `--uninstall` can remove it.
+**Windows (PowerShell)**:
 
-After install, run `exec $SHELL -l` or open a new terminal, then `srv version` to verify.
+```powershell
+iwr -useb https://raw.githubusercontent.com/iccyuan/srv/main/get.ps1 | iex
+```
 
-**Manual install** (if you'd rather not run a script): just put the repo root absolute path on your PATH. Any mechanism works.
+Optional environment overrides:
+- `SRV_VERSION=2.6.5` (pin a version; default is latest)
+- `SRV_INSTALL_DIR=~/bin` (override location; default `~/.srv/bin` / `%USERPROFILE%\.srv\bin`)
+
+After install, open a new terminal and run `srv install` to launch the browser-based wizard for Claude Code MCP registration and your first profile.
+
+### Path B: Download a release archive
+
+Pick the right one from the [Releases page](https://github.com/iccyuan/srv/releases/latest):
+
+| OS / Arch | Archive |
+|---|---|
+| Linux x86_64 | `srv_<ver>_linux_x86_64.tar.gz` |
+| Linux arm64 | `srv_<ver>_linux_arm64.tar.gz` |
+| macOS Intel | `srv_<ver>_macos_x86_64.tar.gz` |
+| macOS Apple Silicon | `srv_<ver>_macos_arm64.tar.gz` |
+| Windows x86_64 | `srv_<ver>_windows_x86_64.zip` |
+
+After extracting:
+
+```sh
+# Linux / macOS
+tar -xzf srv_<ver>_linux_x86_64.tar.gz
+./srv install       # opens browser wizard: PATH + Claude MCP + first profile
+```
+
+```powershell
+# Windows
+Expand-Archive srv_<ver>_windows_x86_64.zip
+.\srv\srv.exe install
+```
+
+### Path C: Build from source (developers)
+
+Requires Go 1.25+.
+
+```sh
+git clone https://github.com/iccyuan/srv && cd srv
+cd go && go build -o ../srv.exe .          # Windows
+cd go && go build -o ../srv     .          # macOS / Linux
+cd ..
+.\install.ps1 -Gui                          # Windows GUI install
+./install.sh --gui                          # macOS / Linux GUI install
+```
+
+`install.ps1` / `install.sh` are the source-build helpers (auto-detect the script's directory → add to PATH); both support `-Uninstall` / `--uninstall` for clean removal.
+
+Verify with `srv version`, then run `srv install` to enter the GUI wizard.
 
 ---
 
