@@ -442,11 +442,17 @@ func (c *Client) RunStreamStdin(command string, stdin io.Reader) (int, error) {
 }
 
 // wrapWithCwd wraps `command` with `cd <cwd> && (...)` when cwd is non-empty.
+//
+// The leading and trailing newlines inside the subshell are deliberate:
+// they keep heredoc terminators (e.g. `EOF`) on their own line even when
+// the user's command doesn't end with a newline. Without them, a command
+// like `bash <<EOF\n...EOF` would get wrapped as `(bash <<EOF\n...EOF)`,
+// putting `EOF)` on one line and breaking heredoc termination.
 func wrapWithCwd(command, cwd string) string {
 	if cwd == "" {
 		return command
 	}
-	return fmt.Sprintf("cd %s && (%s)", shQuotePath(cwd), command)
+	return fmt.Sprintf("cd %s && (\n%s\n)", shQuotePath(cwd), command)
 }
 
 func cwdOrTilde(cwd string) string {

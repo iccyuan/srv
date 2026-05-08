@@ -1,5 +1,19 @@
 # Changelog
 
+## [Go 2.6.2] - 2026-05-08
+
+### Fixed
+- **Heredoc through `srv` no longer breaks parse**:`wrapWithCwd` 现在在 `(<cmd>)` 闭合 `)` 之前显式插一个 `\n`,这样 `bash <<'EOF' ... EOF` 类命令的终止符 `EOF` 不再和 `)` 同行而被识别为 `EOF)`(导致 `parse error near '\n'`)。普通命令完全不受影响。
+- **池化 SSH 连接长闲置后被无声重用**:`daemon.getClient` 对 `lastUsed > 30s` 的池条目先发一次 `keepalive@openssh.com`,失败则 evict + re-dial。不再把已经被 NAT / 服务端 idle-kill 的死连接交给调用方。
+
+### Added
+- **`$SRV_CWD` 环境变量**:`GetCwd` 的回退顺序从`session cwd → profile.default_cwd` 改为 `session cwd → $SRV_CWD → profile.default_cwd`。给 MCP 注册用 —— 在 `.mcp.json` / Claude Code 的 per-project mcpServers 段里写 `"env": {"SRV_CWD": "/mnt/project/foo"}`,每次新 MCP 会话直接落到该项目目录,不用再每次先 `srv cd`。
+
+### Notes
+- 这一版纯解决"已知 MCP 翻车"那张表上能落到 srv 这边修的项;`-32700 parse error`(客户端 JSON 编码问题)和 `psql -c` 多 SELECT(psql 行为)不在 srv 责任域,只在 troubleshooting 文档里写了 workaround。
+
+---
+
 ## [Go 2.6.1] - 2026-05-08
 
 ### Removed

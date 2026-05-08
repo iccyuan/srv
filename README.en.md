@@ -571,6 +571,7 @@ Remote `~/.srv-jobs/<id>.log` holds detached-job logs (auto-created).
 | `SRV_HOME` | Override config directory (default `~/.srv`) |
 | `SRV_PROFILE` | Default profile for this shell (lower priority than `srv use`) |
 | `SRV_SESSION` | Explicit session id; useful for scripts / CI sharing state across calls |
+| `SRV_CWD` | Fallback cwd when no session cwd is set (2.6.2). In MCP registrations, set `"env": {"SRV_CWD": "/mnt/project/foo"}` so each new MCP session lands directly in the project directory instead of `~`. Priority: session pin > `$SRV_CWD` > `profile.default_cwd`. |
 
 ---
 
@@ -599,6 +600,41 @@ Install OpenSSH client.
 
 ### Claude Code doesn't see new MCP tools
 The MCP server is loaded at session startup. Open a **new** Claude Code session, or `/mcp` to reconnect.
+
+### MCP `run` returns `-32700 parse error` on a complex command
+**Client-side JSON encoding issue** — the combination of deeply nested shell substitution + non-ASCII (e.g. CJK) + multi-layer quoting makes Claude Code's tool-call JSON malformed. Not a srv bug. Workarounds:
+
+1. Split the command into multiple steps, one quoting layer each
+2. `export VAR=...` first, then reference `$VAR` to flatten the inner literal
+3. Push a script and run it: `srv push script.sh /tmp/ && srv "bash /tmp/script.sh"`
+
+### MCP `run` with a heredoc fails with `parse error near '\n'`
+**Fixed in 2.6.2**. `wrapWithCwd` now puts a newline before the closing `)` of the subshell, so the heredoc terminator stays on its own line instead of getting fused with `)` into `EOF)`. Upgrade to 2.6.2.
+
+### MCP always starts at `~`; need to `srv cd` every session
+**Fixed in 2.6.2** via `$SRV_CWD`, which takes priority over `profile.default_cwd`. In the per-project mcpServers block:
+
+```json
+"srv": {
+  "type": "stdio",
+  "command": "D:\\WorkSpace\\server\\srv\\srv.exe",
+  "args": ["mcp"],
+  "env": { "SRV_CWD": "/mnt/project/alpha-bot" }
+}
+```
+
+### MCP hangs / returns EOF on the first call after a long idle
+**Mitigated in 2.6.2**: the daemon now health-checks pooled SSH connections idle longer than 30 s with one keepalive ping; on failure it evicts and re-dials. Calls succeed on the second attempt before this fix.
+
+### MCP `psql -c 'SELECT a; SELECT b;'` only returns the last result
+**psql behavior, not srv**. `-c` only returns the last statement's result set. Workarounds:
+
+- `DO` block with `RAISE NOTICE` to surface intermediate values
+- Write the SQL to a file and run with `psql -f /tmp/multi.sql` (after `srv push`)
+- Issue separate `psql -c` calls
+
+### MCP occasionally drops characters in long output (CJK / commit hashes)
+**No clean root cause** — sporadic, hard to repro. Workaround: `srv "cmd > /tmp/out.txt"` then `srv pull /tmp/out.txt` or `srv "head -n 100 /tmp/out.txt"`.
 
 ### `srv config set` change doesn't seem to apply
 - Inspect `~/.srv/config.json` to confirm the value landed on the right profile

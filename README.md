@@ -570,6 +570,7 @@ cm/                  ControlMaster socket,每个 host+user+port 一个 .sock
 | `SRV_HOME` | 配置目录的覆盖路径(默认 `~/.srv`) |
 | `SRV_PROFILE` | 当前 shell 的默认 profile(优先级低于 `srv use`) |
 | `SRV_SESSION` | 显式 session id;脚本/CI 跨多个 srv 调用共享状态时用 |
+| `SRV_CWD` | 没有 session cwd 时的回退目录(2.6.2)。MCP 注册里 `"env": {"SRV_CWD": "/mnt/project/foo"}` 让每次新 MCP 会话直接落到该项目目录,不用每次先 `srv cd`。优先级低于 session pin,高于 `profile.default_cwd` |
 
 ---
 
@@ -598,6 +599,41 @@ cm/                  ControlMaster socket,每个 host+user+port 一个 .sock
 
 ### Claude Code 看不到新加的 MCP 工具
 MCP 服务器在 Claude Code 会话启动时加载。**新开 Claude Code 会话**或 `/mcp` 重连后才会生效。
+
+### MCP `run` 调用复杂命令时返回 `-32700 parse error`
+**客户端 JSON 编码问题**(深嵌 shell substitution + 中文 + 多层引号的组合让 Claude Code 自己生成的 tool-call JSON 失效),不是 srv 的 bug。Workaround:
+
+1. 把命令拆多步,每步只一层引号
+2. `export VAR=...` 提前到第一次调用,后续 `$VAR` 引用,降低单次复杂度
+3. 复杂脚本走 `srv push script.sh /tmp/ && srv "bash /tmp/script.sh"`
+
+### MCP `run` 跑 heredoc 报 `parse error near '\n'`
+**已修(2.6.2)**。`wrapWithCwd` 现在在子 shell 闭合 `)` 之前加了换行,heredoc 终止符不再被挤到 `EOF)` 同行。升 2.6.2 即可。
+
+### MCP 每次开始都在 `~`,要每次先 `srv cd`
+**已修(2.6.2)**:`$SRV_CWD` 优先级高于 `profile.default_cwd`。Claude Code 注册时,在该项目的 mcpServers 段加:
+
+```json
+"srv": {
+  "type": "stdio",
+  "command": "D:\\WorkSpace\\server\\srv\\srv.exe",
+  "args": ["mcp"],
+  "env": { "SRV_CWD": "/mnt/project/alpha-bot" }
+}
+```
+
+### MCP 长闲置后下一次调用挂住 / 报 EOF
+**已缓解(2.6.2)**:daemon `getClient` 对池里 `lastUsed > 30s` 的连接先 ping,失败则 evict + redial。第二次调用稳。2.6.1 及之前需要手动重试一次。
+
+### MCP `psql -c 'SELECT a; SELECT b;'` 只返回最后一条
+psql 的固有行为(`-c` 模式只保留最后语句的结果集),不是 srv 的事。Workaround:
+
+- DO block + `RAISE NOTICE` 输出中间步骤
+- 写到文件后 `psql -f /tmp/multi.sql`(配合 `srv push`)
+- 多次 `psql -c` 单独跑
+
+### MCP 长输出 / 含特殊字符时偶发吞字符(中文、commit hash)
+**没有干净的根因**(零星出现,难复现)。Workaround:`srv "cmd > /tmp/out.txt"` 后 `srv pull /tmp/out.txt` 或 `srv "head -n 100 /tmp/out.txt"`。
 
 ### `srv config set` 之后命令行为没变
 - 检查 `~/.srv/config.json`,修改是否落到了正确的 profile

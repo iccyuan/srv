@@ -221,11 +221,21 @@ func ResolveProfile(cfg *Config, override string) (string, *Profile, error) {
 }
 
 // GetCwd returns the persisted cwd for (current session, profile), falling
-// back to profile.default_cwd.
+// back to $SRV_CWD if set, then profile.default_cwd.
+//
+// $SRV_CWD exists for MCP / per-project setups where each Claude Code
+// (or similar) launch creates a fresh session id and thus has no
+// persisted cwd. Setting "env": {"SRV_CWD": "/mnt/project/foo"} in the
+// project's MCP registration makes srv land in that directory by
+// default, instead of always starting at ~ and forcing the caller to
+// `srv cd` every time.
 func GetCwd(profileName string, profile *Profile) string {
 	_, rec := TouchSession()
 	if cwd, ok := rec.Cwds[profileName]; ok && cwd != "" {
 		return cwd
+	}
+	if env := os.Getenv("SRV_CWD"); env != "" {
+		return env
 	}
 	return profile.GetDefaultCwd()
 }

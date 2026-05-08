@@ -119,6 +119,9 @@ const (
 	// How long an unused per-profile SSH connection stays open. Closed
 	// connections are re-dialed on next use.
 	connIdleTTL = 10 * time.Minute
+	// Pooled connections idle longer than this get a keepalive ping
+	// before reuse, so we don't hand callers a silently-dead conn.
+	poolHealthThreshold = 30 * time.Second
 	// Whole-daemon idle shutdown threshold.
 	daemonIdleTTL = 30 * time.Minute
 	// Cleanup tick.
@@ -366,14 +369,36 @@ func (s *daemonState) getClient(profileName string) (*Client, *Profile, error) {
 	}
 	profile.Name = profileName
 
-	// Fast path: already pooled.
+	// Fast path: already pooled. Health-check connections that have been
+	// idle longer than `poolHealthThreshold` -- the per-Client keepalive
+	// goroutine handles drops on actively-used connections, but a long-
+	// idle pooled conn can be silently dead (NAT timeout, server-side
+	// idle kill) and we'd hand the caller a zombie. One round-trip ping
+	// is cheap insurance.
 	s.mu.Lock()
-	if pc, ok := s.pool[profileName]; ok && pc.client != nil && pc.client.Conn != nil {
-		pc.lastUsed = time.Now()
-		s.mu.Unlock()
-		return pc.client, profile, nil
-	}
+	pc, ok := s.pool[profileName]
 	s.mu.Unlock()
+	if ok && pc.client != nil && pc.client.Conn != nil {
+		alive := true
+		if time.Since(pc.lastUsed) > poolHealthThreshold {
+			if _, _, err := pc.client.Conn.SendRequest("keepalive@openssh.com", true, nil); err != nil {
+				alive = false
+			}
+		}
+		if alive {
+			s.mu.Lock()
+			pc.lastUsed = time.Now()
+			s.mu.Unlock()
+			return pc.client, profile, nil
+		}
+		// Stale -- evict and re-dial below.
+		s.mu.Lock()
+		if cur, ok := s.pool[profileName]; ok && cur == pc {
+			delete(s.pool, profileName)
+		}
+		s.mu.Unlock()
+		_ = pc.client.Close()
+	}
 
 	// Slow path: dial without holding s.mu. Other requests stay responsive.
 	c, err := Dial(profile)
