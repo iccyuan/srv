@@ -12,9 +12,9 @@ import (
 
 // Version is overridable at build time via -ldflags "-X main.Version=...".
 // goreleaser sets it from the git tag on release builds.
-var Version = "2.6.4"
+var Version = "2.6.5"
 
-const helpText = `srv - run commands on a remote SSH server with persistent cwd.
+const helpEN = `srv - run commands on a remote SSH server with persistent cwd.
 
 Quick start:
   srv init                       configure a profile interactively
@@ -99,6 +99,90 @@ Config: ~/.srv/config.json   Sessions: ~/.srv/sessions.json
 Jobs: ~/.srv/jobs.json
 `
 
+const helpZH = `srv - 跨平台 SSH 远端命令工具,持久 cwd / 连接复用 / 会话隔离 / 后台作业。
+
+快速开始:
+  srv init                       交互向导:配置一个 profile
+  srv config list                列出已配置的 profile
+  srv use                        TTY 下:↑↓ 选择器(/ 过滤,Enter 选,q 取消)
+  srv use <profile>              把 profile pin 到当前 shell
+  srv use --clear                取消 pin,回落到全局默认
+  srv config default             TTY 下:↑↓ 选择器,设全局默认
+  srv config default <profile>   设全局默认(写 ~/.srv/config.json,所有 shell 共用)
+  srv cd /opt                    设持久远端 cwd(per session+profile)
+  srv pwd                        显示当前远端 cwd
+  srv ls -la                     在远端当前 cwd 跑 ls -la
+  srv "ps aux | grep redis"      含管道:本地引号,远端 shell 解析
+  srv -t htop                    分配 TTY(vim / htop / sudo 输密码)
+  srv -P dev rsync ...           单次命令切 profile
+  srv check                      连通性诊断,9 类失败模式 + 修复建议
+  srv check --rtt [--count N]    SSH 级 RTT + 丢包率
+  srv doctor                     本地配置 / daemon / SSH 准备状态
+  srv doctor --json              机器可读诊断
+  srv install                    打开浏览器图形化安装器(PATH / Claude MCP / 第一个 profile)
+  srv shell                      原生 PTY 远端 shell,自动 cd 到 cwd
+  srv tunnel 8080                本地 8080 -> 远端 127.0.0.1:8080
+  srv tunnel 8080:db:5432        本地 8080 -> db:5432(远端解析)
+  srv tunnel -R 9000:3000        反向:远端 9000 -> 本地 127.0.0.1:3000
+  srv edit /etc/foo.conf         拉到本地 -> $EDITOR -> 改了再推回
+  srv open logs/app.log          拉远端文件到临时目录,本地默认 app 打开
+  srv code /opt/app              用 VS Code Remote SSH 打开远端目录
+  srv diff local.py remote.py    对比本地 / 远端文件
+  srv diff --changed             对比所有 git 改动文件 vs 远端
+  srv env set NODE_ENV prod      设 profile 级远端环境变量
+
+文件传输(SFTP,复用同一条 SSH 会话):
+  srv push ./local.py            上传到当前 cwd
+  srv push ./dist /opt/app       上传(目录自动 -r)
+  srv pull logs/app.log          下载到当前目录
+  srv pull /etc/hosts ./hosts    显式本地目标
+
+批量同步已变更文件(tar | ssh tar 流,保留相对路径):
+  srv sync                       git 仓库:modified+staged+untracked
+  srv sync --staged              只 ` + "`" + `git add` + "`" + ` 过的
+  srv sync --since 2h            mtime 在 2 小时内
+  srv sync --include "src/**/*.go"   glob 模式(可重复)
+  srv sync --files a.go b/c.go   显式列表
+  srv sync --dry-run             预览要传的文件,不真传
+  srv sync --delete --dry-run    预览要删的远端文件
+  srv sync --delete --yes        超过删除保护阈值时仍执行
+  srv sync --delete-limit 50     调整删除保护阈值(默认 20)
+  srv sync /opt/app              覆盖远端根(默认 = sync_root 或当前 cwd)
+  srv sync --watch               文件变化时持续同步
+
+后台作业(远端 nohup,日志落 ~/.srv-jobs/<id>.log):
+  srv -d ./long-build.sh         起后台,立刻返回 job id
+  srv jobs                       列本地 job 记录
+  srv logs <id> [-f]             cat(或 tail -f)远端日志
+  srv kill <id>                  SIGTERM 远端进程并丢弃记录
+
+会话(per-shell 隔离):
+  srv sessions                   列所有 session 记录
+  srv sessions show              当前 shell 的 session 记录
+  srv sessions clear             删当前 session 记录
+  srv sessions prune             清掉 PID 已死的 session
+
+集成 / 工具:
+  srv completion <bash|zsh|powershell>   输出 shell 补全脚本
+  srv mcp                                以 stdio MCP server 跑
+  srv daemon                             连接池前台运行(主要给调试)
+  srv daemon status [--json]             看池里的 profile / uptime
+  srv daemon stop                        停 daemon
+  srv daemon restart                     重启后台 daemon
+  srv daemon logs                        cat 自动 spawn 的 daemon 日志
+  srv daemon prune-cache                 清远端补全 (_ls) 缓存
+
+Profile 解析优先级(高 → 低):
+  -P/--profile flag  >  session pin (` + "`" + `srv use` + "`" + `)  >  $SRV_PROFILE  >  全局默认
+
+Session 检测:
+  每个 shell 一个独立 session id(父 shell 的 PID,Windows 自动跳 shim)。
+  $SRV_SESSION=<任意字符串> 可显式覆盖。
+
+配置文件:~/.srv/config.json   会话:~/.srv/sessions.json
+后台作业:~/.srv/jobs.json
+`
+
 // reservedSubcommands are names that won't be interpreted as remote commands.
 // Any first-arg outside this set is run on the remote.
 var reservedSubcommands = map[string]bool{
@@ -117,6 +201,7 @@ type globalOpts struct {
 	profile string
 	tty     bool
 	detach  bool
+	noHints bool
 }
 
 func parseGlobalFlags(args []string) (globalOpts, []string) {
@@ -127,7 +212,7 @@ func parseGlobalFlags(args []string) (globalOpts, []string) {
 		switch {
 		case a == "-P" || a == "--profile":
 			if i+1 >= len(args) {
-				fatal("error: %s requires a value.", a)
+				fatal(t("err.flag_requires_value", a))
 			}
 			opts.profile = args[i+1]
 			i += 2
@@ -142,6 +227,10 @@ func parseGlobalFlags(args []string) (globalOpts, []string) {
 			continue
 		case a == "-d" || a == "--detach":
 			opts.detach = true
+			i++
+			continue
+		case a == "--no-hints":
+			opts.noHints = true
 			i++
 			continue
 		}
@@ -161,12 +250,12 @@ func main() {
 
 func run(args []string) int {
 	if len(args) == 0 {
-		fmt.Print(helpText)
+		fmt.Print(t("help.full"))
 		return 0
 	}
 	opts, rest := parseGlobalFlags(args)
 	if len(rest) == 0 {
-		fmt.Print(helpText)
+		fmt.Print(t("help.full"))
 		return 0
 	}
 
@@ -175,7 +264,7 @@ func run(args []string) int {
 	// Help / version are pure local, no config needed.
 	switch sub {
 	case "help", "--help", "-h":
-		fmt.Print(helpText)
+		fmt.Print(t("help.full"))
 		return 0
 	case "version", "--version":
 		fmt.Printf("srv %s\n", Version)
@@ -265,12 +354,15 @@ func run(args []string) int {
 		if opts.detach {
 			return cmdDetach(rest[1:], cfg, opts.profile)
 		}
-		return cmdRun(rest[1:], cfg, opts.profile, opts.tty)
+		return cmdRunWithHints(rest[1:], cfg, opts)
 	}
 
-	// Default: treat as remote command.
+	// Default: treat as remote command. First, nudge the user if the
+	// first token is suspiciously close to a known local subcommand --
+	// the run still proceeds (their command might be the right one).
+	emitTypoHintPre(cfg, opts, sub)
 	if opts.detach {
 		return cmdDetach(rest, cfg, opts.profile)
 	}
-	return cmdRun(rest, cfg, opts.profile, opts.tty)
+	return cmdRunWithHints(rest, cfg, opts)
 }

@@ -1,5 +1,23 @@
 # Changelog
 
+## [Go 2.6.5] - 2026-05-09
+
+### Added
+- **命令拼写提示(默认开)**:输错本地子命令时,`srv` 单行 stderr 提示一下(`'staus' 像是 'status'`),命令照常在远端跑。两个触发点:dispatch 前(token 不是 reserved 但接近某个内置)、远端退出 127("command not found")。Levenshtein 距离 ≤1(短 token)或 ≤2(长 token),首字母必须一致,过滤内部子命令。MCP 路径不触发。**关闭三种**:`SRV_HINTS=0` env(优先级最高)/ `--no-hints` flag / `srv config global hints false`。
+- **UI 语言:中英双语 + 系统 locale 自动检测**。`srv help` 整段、高频 fatal / usage / hint 字符串都翻译;技术输出(`srv check`/`srv doctor`/daemon proto/MCP tool 响应)**保留英文**,术语不漂移、grep 友好。检测顺序:`config.lang` → `SRV_LANG` → `LC_ALL`/`LC_MESSAGES`/`LANG` → 英文 fallback。
+- **`srv config global <key> [<value>|--clear]`** —— 改顶层配置(对应 per-profile 的 `srv config set <prof> <key> <value>`)。当前 keys:`hints`、`lang`、`default_profile`(后两个分别对应新加的 i18n 和原 `srv config default` 的 alias)。无参列出所有顶层 key 当前值。
+- **新全局 flag `--no-hints`**:per-call 关命令拼写提示。
+
+### Changed
+- 高频 fatal/usage 字符串(`error: profile %q not found`、`error: no profile selected`、`usage: srv push ...` 等共 ~20 条)走 i18n 表。新加错误字符串请用 `t("err.xxx")` / `t("usage.xxx")`。
+- `helpText` 常量拆成 `helpEN` 和 `helpZH` 两份。
+
+### Notes
+- 英文用户(默认 fallback)行为完全不变。
+- Config schema 兼容:`Hints *bool` 和 `Lang string` 都是 `omitempty`,旧 config 文件读起来没问题,首次 save 时自动加。
+
+---
+
 ## [Go 2.6.4] - 2026-05-09
 
 ### Added

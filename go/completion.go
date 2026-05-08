@@ -65,7 +65,7 @@ _srv() {
     case "$sub" in
         config)
             if [[ -z $sub2 ]]; then
-                COMPREPLY=( $(compgen -W "list default remove show set edit" -- "$cur") )
+                COMPREPLY=( $(compgen -W "list default global remove show set edit" -- "$cur") )
             elif [[ "$sub2" == "default" || "$sub2" == "remove" || "$sub2" == "show" || "$sub2" == "edit" ]]; then
                 local profs
                 profs=$(srv _profiles 2>/dev/null)
@@ -180,7 +180,7 @@ _srv() {
     case "$sub" in
         config)
             if [[ -z $sub2 ]]; then
-                _values 'action' list default remove show set edit
+                _values 'action' list default global remove show set edit
             elif [[ $sub2 == (default|remove|show|edit) ]]; then
                 local profs
                 profs=("${(@f)$(srv _profiles 2>/dev/null)}")
@@ -270,7 +270,7 @@ Register-ArgumentCompleter -Native -CommandName srv -ScriptBlock {
     switch ($sub) {
         'config' {
             if (-not $sub2) {
-                & $emit @('list','default','remove','show','set','edit')
+                & $emit @('list','default','global','remove','show','set','edit')
             } elseif ($sub2 -in 'default','remove','show','edit') {
                 & $emit (& $profiles)
             }

@@ -579,6 +579,51 @@ cm/                  ControlMaster socket,每个 host+user+port 一个 .sock
 | `SRV_PROFILE` | 当前 shell 的默认 profile(优先级低于 `srv use`) |
 | `SRV_SESSION` | 显式 session id;脚本/CI 跨多个 srv 调用共享状态时用 |
 | `SRV_CWD` | 没有 session cwd 时的回退目录(2.6.2)。MCP 注册里 `"env": {"SRV_CWD": "/mnt/project/foo"}` 让每次新 MCP 会话直接落到该项目目录,不用每次先 `srv cd`。优先级低于 session pin,高于 `profile.default_cwd` |
+| `SRV_LANG` | UI 语言(`en` / `zh` / `auto`),覆盖系统 locale 检测;低于 config 里的 `lang`。默认 auto |
+| `SRV_HINTS` | `0` / `false` / `off` 关闭命令拼写提示;比 config / `--no-hints` 优先级都高 |
+
+---
+
+## 命令拼写提示(2.6.5+)
+
+输错本地子命令时,`srv` 会**单行 stderr 提示一下**,然后该命令照常在远端跑(可能你确实想在远端跑同名命令)。两个触发点:
+
+```
+$ srv staus -la
+srv: hint: 'staus' 像是本地子命令 'status' 写错了。这次还是在远端跑。
+ls: cannot access 'staus': ...
+
+$ srv pwd2
+bash: pwd2: command not found
+srv: hint: 远端没有 'pwd2',看着像本地子命令 'pwd'。试试:srv pwd
+exit 127
+```
+
+**关闭方式**(三种,任一即可,优先级 env > flag > config):
+
+```sh
+SRV_HINTS=0 srv staus           # 当前 shell 临时关
+srv --no-hints staus            # 单次调用关
+srv config global hints false   # 永久关(写到 ~/.srv/config.json)
+srv config global hints --clear # 恢复默认(开)
+```
+
+MCP 路径不触发(避免污染 Claude Code 的 stderr 流)。
+
+## UI 语言
+
+`srv help` 和高频错误提示支持中英双语,**默认按系统 locale 自动选**(`zh*` → 中文,其它 → 英文)。
+
+**强制语言**:
+
+```sh
+srv config global lang zh        # 永久切中文
+srv config global lang en        # 永久切英文
+srv config global lang auto      # 回到自动检测
+SRV_LANG=zh srv help             # 临时
+```
+
+技术性输出(`srv check` 9 类诊断、`srv doctor`、daemon 协议字段、MCP tool 响应)**保留英文**,术语不翻译,grep 友好。
 
 ---
 

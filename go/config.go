@@ -147,10 +147,35 @@ func (p *Profile) GetDialBackoff() time.Duration {
 const SchemaVersion = 1
 
 // Config maps to ~/.srv/config.json.
+//
+// Top-level fields beyond DefaultProfile are user-tunable globals that
+// don't belong on a single profile -- they affect srv's local behavior
+// regardless of which server you're talking to. Set via
+// `srv config global <key> <value>`. nil pointer fields distinguish
+// "user hasn't said" from "user said false".
 type Config struct {
-	Version        int                 `json:"_version,omitempty"`
-	DefaultProfile string              `json:"default_profile"`
-	Profiles       map[string]*Profile `json:"profiles"`
+	Version        int    `json:"_version,omitempty"`
+	DefaultProfile string `json:"default_profile"`
+	// Hints toggles the "did you mean / typo" command hint emitter.
+	// nil means default-on; *bool false means explicitly disabled.
+	// Env var SRV_HINTS=0 or the --no-hints flag also disables.
+	Hints *bool `json:"hints,omitempty"`
+	// Lang controls UI language for help text + high-traffic error
+	// strings. "" or "auto" = environment detection (SRV_LANG,
+	// LC_ALL, LC_MESSAGES, LANG; falls back to English). "en" / "zh"
+	// pin explicitly. Unknown values fall back to English.
+	Lang     string              `json:"lang,omitempty"`
+	Profiles map[string]*Profile `json:"profiles"`
+}
+
+// HintsEnabled reports whether typo / post-failure hints should fire.
+// Config wins over env-default (true), and the --no-hints flag plus
+// SRV_HINTS=0 are checked separately by the caller.
+func (c *Config) HintsEnabled() bool {
+	if c == nil || c.Hints == nil {
+		return true
+	}
+	return *c.Hints
 }
 
 func newConfig() *Config {
@@ -239,11 +264,11 @@ func ResolveProfile(cfg *Config, override string) (string, *Profile, error) {
 		name = cfg.DefaultProfile
 	}
 	if name == "" {
-		return "", nil, fmt.Errorf("error: no profile selected. Run `srv init`, then `srv use <profile>` to pin one for this shell.")
+		return "", nil, fmt.Errorf("%s", t("err.no_profile"))
 	}
 	p, ok := cfg.Profiles[name]
 	if !ok {
-		return "", nil, fmt.Errorf("error: profile %q not found. Run `srv config list`.", name)
+		return "", nil, fmt.Errorf("%s", t("err.profile_not_found", name))
 	}
 	p.Name = name
 	return name, p, nil

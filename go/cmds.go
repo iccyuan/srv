@@ -77,14 +77,16 @@ func prompt(rd *bufio.Reader, q, def string) string {
 
 func cmdConfig(args []string, cfg *Config) int {
 	if len(args) == 0 {
-		fatal("usage: srv config <list|default|remove|show|set|edit> [args]")
+		fatal(t("usage.config"))
 	}
 	action := args[0]
 	rest := args[1:]
 	switch action {
+	case "global":
+		return cmdConfigGlobal(rest, cfg)
 	case "list":
 		if len(cfg.Profiles) == 0 {
-			fmt.Println("(no profiles configured -- run `srv init`)")
+			fmt.Println(t("misc.no_profiles_run_init"))
 			return 0
 		}
 		_, rec := TouchSession()
@@ -145,7 +147,7 @@ func cmdConfig(args []string, cfg *Config) int {
 			return 0
 		}
 		if _, ok := cfg.Profiles[rest[0]]; !ok {
-			fatal("error: profile %q not found.", rest[0])
+			fatal(t("err.profile_not_found", rest[0]))
 		}
 		cfg.DefaultProfile = rest[0]
 		if err := SaveConfig(cfg); err != nil {
@@ -155,10 +157,10 @@ func cmdConfig(args []string, cfg *Config) int {
 		return 0
 	case "remove":
 		if len(rest) == 0 {
-			fatal("usage: srv config remove <name>")
+			fatal(t("usage.config_rm"))
 		}
 		if _, ok := cfg.Profiles[rest[0]]; !ok {
-			fatal("error: profile %q not found.", rest[0])
+			fatal(t("err.profile_not_found", rest[0]))
 		}
 		delete(cfg.Profiles, rest[0])
 		if cfg.DefaultProfile == rest[0] {
@@ -180,7 +182,7 @@ func cmdConfig(args []string, cfg *Config) int {
 		}
 		p, ok := cfg.Profiles[target]
 		if !ok {
-			fatal("error: profile %q not found.", target)
+			fatal(t("err.profile_not_found", target))
 		}
 		out := map[string]*Profile{target: p}
 		b, _ := json.MarshalIndent(out, "", "  ")
@@ -188,14 +190,14 @@ func cmdConfig(args []string, cfg *Config) int {
 		return 0
 	case "set":
 		if len(rest) < 3 {
-			fatal("usage: srv config set <profile> <key> <value>")
+			fatal(t("usage.config_set"))
 		}
 		prof := rest[0]
 		key := rest[1]
 		value := strings.Join(rest[2:], " ")
 		p, ok := cfg.Profiles[prof]
 		if !ok {
-			fatal("error: profile %q not found.", prof)
+			fatal(t("err.profile_not_found", prof))
 		}
 		applyProfileSet(p, key, value)
 		if err := SaveConfig(cfg); err != nil {
@@ -209,11 +211,11 @@ func cmdConfig(args []string, cfg *Config) int {
 			target = rest[0]
 		}
 		if target == "" {
-			fatal("usage: srv config edit <profile>")
+			fatal(t("usage.config_edit"))
 		}
 		p, ok := cfg.Profiles[target]
 		if !ok {
-			fatal("error: profile %q not found.", target)
+			fatal(t("err.profile_not_found", target))
 		}
 		edited, err := editJSONValue(p, "srv-profile-*.json")
 		if err != nil {
@@ -230,8 +232,108 @@ func cmdConfig(args []string, cfg *Config) int {
 		fmt.Printf("updated profile %s\n", target)
 		return 0
 	}
-	fatal("error: unknown config action %q", action)
+	fatal(t("err.config_action", action))
 	return 1
+}
+
+// cmdConfigGlobal manages top-level (non-per-profile) config keys.
+//
+//	srv config global                    # list all globals + current values
+//	srv config global <key>              # show one
+//	srv config global <key> <value>      # set one
+//	srv config global <key> --clear      # reset to default
+func cmdConfigGlobal(args []string, cfg *Config) int {
+	if len(args) == 0 {
+		printGlobalConfig(cfg)
+		return 0
+	}
+	key := args[0]
+	if len(args) == 1 {
+		printOneGlobal(cfg, key)
+		return 0
+	}
+	value := args[1]
+	clear := value == "--clear" || value == "-"
+
+	switch key {
+	case "hints":
+		if clear {
+			cfg.Hints = nil
+		} else {
+			b := strings.ToLower(value) == "true"
+			cfg.Hints = &b
+		}
+	case "lang":
+		if clear || strings.ToLower(value) == "auto" {
+			cfg.Lang = ""
+		} else {
+			v := strings.ToLower(value)
+			if v != "en" && v != "zh" {
+				fatal(t("err.global_lang_value", value))
+			}
+			cfg.Lang = v
+		}
+	case "default_profile", "default":
+		if clear {
+			cfg.DefaultProfile = ""
+		} else {
+			if _, ok := cfg.Profiles[value]; !ok {
+				fatal(t("err.profile_not_found", value))
+			}
+			cfg.DefaultProfile = value
+		}
+	default:
+		fatal(t("err.global_unknown_key", key))
+	}
+	if err := SaveConfig(cfg); err != nil {
+		fatal("error: %v", err)
+	}
+	printOneGlobal(cfg, key)
+	return 0
+}
+
+func printGlobalConfig(cfg *Config) {
+	fmt.Printf("hints           = %s\n", boolDisplay(cfg.Hints, true))
+	langDisplay := cfg.Lang
+	if langDisplay == "" {
+		langDisplay = "auto " + t("misc.global_lang_auto")
+	}
+	fmt.Printf("lang            = %s\n", langDisplay)
+	def := cfg.DefaultProfile
+	if def == "" {
+		def = "(none)"
+	}
+	fmt.Printf("default_profile = %s\n", def)
+}
+
+func printOneGlobal(cfg *Config, key string) {
+	switch key {
+	case "hints":
+		fmt.Printf("hints = %s\n", boolDisplay(cfg.Hints, true))
+	case "lang":
+		v := cfg.Lang
+		if v == "" {
+			v = "auto"
+		}
+		fmt.Printf("lang = %s\n", v)
+	case "default_profile", "default":
+		v := cfg.DefaultProfile
+		if v == "" {
+			v = "(none)"
+		}
+		fmt.Printf("default_profile = %s\n", v)
+	default:
+		fatal(t("err.global_unknown_key", key))
+	}
+}
+
+// boolDisplay renders a *bool with explicit "(default true)" suffix
+// when nil, so users can tell unset from explicitly-true.
+func boolDisplay(p *bool, defaultVal bool) string {
+	if p == nil {
+		return fmt.Sprintf("%t (default)", defaultVal)
+	}
+	return fmt.Sprintf("%t", *p)
 }
 
 // applyProfileSet writes value into the profile field named by key. Bool
@@ -384,7 +486,7 @@ func cmdUse(args []string, cfg *Config) int {
 		return 0
 	}
 	if _, ok := cfg.Profiles[a]; !ok {
-		fatal("error: profile %q not found. Run `srv config list`.", a)
+		fatal(t("err.profile_not_found", a))
 	}
 	sid, err := SetSessionProfile(a)
 	if err != nil {
@@ -490,11 +592,11 @@ func cmdRun(args []string, cfg *Config, profileOverride string, tty bool) int {
 func cmdPush(args []string, cfg *Config, profileOverride string) int {
 	args, recursive := stripRecursive(args)
 	if len(args) == 0 {
-		fatal("usage: srv push <local> [<remote>] [-r]")
+		fatal(t("usage.push"))
 	}
 	local := args[0]
 	if _, err := os.Stat(local); err != nil {
-		fatal("error: local path does not exist: %s", local)
+		fatal(t("err.local_path_missing", local))
 	}
 	name, profile, err := ResolveProfile(cfg, profileOverride)
 	if err != nil {
@@ -518,7 +620,7 @@ func cmdPush(args []string, cfg *Config, profileOverride string) int {
 func cmdPull(args []string, cfg *Config, profileOverride string) int {
 	args, recursive := stripRecursive(args)
 	if len(args) == 0 {
-		fatal("usage: srv pull <remote> [<local>] [-r]")
+		fatal(t("usage.pull"))
 	}
 	remote := args[0]
 	local := "."

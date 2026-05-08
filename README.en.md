@@ -580,6 +580,51 @@ Remote `~/.srv-jobs/<id>.log` holds detached-job logs (auto-created).
 | `SRV_PROFILE` | Default profile for this shell (lower priority than `srv use`) |
 | `SRV_SESSION` | Explicit session id; useful for scripts / CI sharing state across calls |
 | `SRV_CWD` | Fallback cwd when no session cwd is set (2.6.2). In MCP registrations, set `"env": {"SRV_CWD": "/mnt/project/foo"}` so each new MCP session lands directly in the project directory instead of `~`. Priority: session pin > `$SRV_CWD` > `profile.default_cwd`. |
+| `SRV_LANG` | UI language (`en` / `zh` / `auto`); overrides system-locale detection. Lower priority than `lang` in config. Default: `auto`. |
+| `SRV_HINTS` | `0` / `false` / `off` disables typo hints. Higher priority than config or `--no-hints` flag. |
+
+---
+
+## Command typo hints (2.6.5+)
+
+When you mistype a local subcommand, `srv` prints a single stderr line nudging you toward the right one — and still runs the command on the remote (you might genuinely want a remote command with that name). Two trigger points:
+
+```
+$ srv staus -la
+srv: hint: "staus" looks like the local subcommand "status". Running on remote anyway.
+ls: cannot access 'staus': ...
+
+$ srv pwd2
+bash: pwd2: command not found
+srv: hint: "pwd2" isn't installed on the remote and looks like "pwd" (a local subcommand). Try: srv pwd
+exit 127
+```
+
+**To disable** (any of these — env wins over flag wins over config):
+
+```sh
+SRV_HINTS=0 srv staus            # this shell, ad-hoc
+srv --no-hints staus             # one call
+srv config global hints false    # permanent (writes ~/.srv/config.json)
+srv config global hints --clear  # back to default (on)
+```
+
+The MCP path never fires hints — keeps Claude Code's tool stderr clean.
+
+## UI language
+
+`srv help` and high-traffic error / usage strings come in English and Chinese. The active language is **auto-detected from system locale** (`zh*` → Chinese, anything else → English).
+
+**Force it**:
+
+```sh
+srv config global lang zh        # pin Chinese
+srv config global lang en        # pin English
+srv config global lang auto      # back to auto-detect
+SRV_LANG=zh srv help             # ad-hoc
+```
+
+Technical outputs (`srv check` diagnoses, `srv doctor`, daemon protocol fields, MCP tool responses) stay English on purpose so terminology doesn't drift and grepping stays predictable.
 
 ---
 
