@@ -21,18 +21,20 @@ var defaultSyncExcludes = []string{
 }
 
 type syncOpts struct {
-	remoteRoot string
-	mode       string // git | mtime | glob | list (or empty = auto)
-	gitScope   string
-	noGit      bool
-	since      string
-	include    []string
-	exclude    []string
-	files      []string
-	root       string
-	dryRun     bool
-	watch      bool
-	delete     bool
+	remoteRoot  string
+	mode        string // git | mtime | glob | list (or empty = auto)
+	gitScope    string
+	noGit       bool
+	since       string
+	include     []string
+	exclude     []string
+	files       []string
+	root        string
+	dryRun      bool
+	watch       bool
+	delete      bool
+	yes         bool
+	deleteLimit int
 }
 
 func parseSyncOpts(args []string) *syncOpts {
@@ -126,6 +128,26 @@ func parseSyncOpts(args []string) *syncOpts {
 			continue
 		case a == "--delete":
 			o.delete = true
+			i++
+			continue
+		case a == "--yes" || a == "-y":
+			o.yes = true
+			i++
+			continue
+		case a == "--delete-limit":
+			n, err := strconv.Atoi(requireValue(a, i))
+			if err != nil || n < 0 {
+				fatal("error: --delete-limit requires a non-negative integer")
+			}
+			o.deleteLimit = n
+			i += 2
+			continue
+		case strings.HasPrefix(a, "--delete-limit="):
+			n, err := strconv.Atoi(strings.TrimPrefix(a, "--delete-limit="))
+			if err != nil || n < 0 {
+				fatal("error: --delete-limit requires a non-negative integer")
+			}
+			o.deleteLimit = n
 			i++
 			continue
 		case strings.HasPrefix(a, "-"):
@@ -497,6 +519,29 @@ func collectSyncFiles(o *syncOpts, localRoot string, allExcludes []string) ([]st
 	return out, nil
 }
 
+func collectSyncDeletes(o *syncOpts, localRoot string, allExcludes []string) ([]string, error) {
+	if !o.delete {
+		return nil, nil
+	}
+	if o.mode != "git" {
+		return nil, fmt.Errorf("--delete currently requires git mode")
+	}
+	deletes, err := gitDeletedFiles(localRoot)
+	if err != nil {
+		return nil, err
+	}
+	if len(allExcludes) > 0 {
+		filtered := deletes[:0]
+		for _, f := range deletes {
+			if !matchesAnyExclude(f, allExcludes) {
+				filtered = append(filtered, f)
+			}
+		}
+		deletes = filtered
+	}
+	return deletes, nil
+}
+
 // tarUploadStream builds a tar stream of files (rooted at localRoot) entirely
 // in Go and pipes it into a remote `tar -xf -` running in remoteRoot.
 // Gzips the stream when profile.CompressSync is true (default) -- typical
@@ -671,21 +716,16 @@ func cmdSync(args []string, cfg *Config, profileOverride string) int {
 	}
 	var deletes []string
 	if o.delete {
-		if o.mode != "git" {
-			fatal("error: --delete currently requires git mode")
+		limit := o.deleteLimit
+		if limit == 0 {
+			limit = 20
 		}
-		deletes, err = gitDeletedFiles(localRoot)
+		deletes, err = collectSyncDeletes(o, localRoot, allExcludes)
 		if err != nil {
 			fatal("error: %v", err)
 		}
-		if len(allExcludes) > 0 {
-			filtered := deletes[:0]
-			for _, f := range deletes {
-				if !matchesAnyExclude(f, allExcludes) {
-					filtered = append(filtered, f)
-				}
-			}
-			deletes = filtered
+		if len(deletes) > limit && !o.dryRun && !o.yes {
+			fatal("error: --delete would remove %d files (limit %d). Re-run with --dry-run, --yes, or --delete-limit N.", len(deletes), limit)
 		}
 	}
 

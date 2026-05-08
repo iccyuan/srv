@@ -61,7 +61,7 @@ Developing locally but needing a real server to actually run things means a lot 
 
 ### Prerequisites
 
-- Go 1.22+ (only to build — https://go.dev/dl/)
+- Go 1.25+ (only to build — https://go.dev/dl/)
 - OpenSSH server on the remote (the Go binary speaks SSH itself; no local ssh client needed)
 
 ### Build
@@ -271,6 +271,8 @@ srv sync --files a.py --files b/c.py  # explicit list; also `srv sync -- a.py b.
 srv sync --dry-run                    # preview, don't transfer
 srv sync --delete --dry-run           # preview deletes for tracked files removed locally
 srv sync --delete                     # also remove those tracked files on the remote
+srv sync --delete --yes               # apply deletes above the default safety limit
+srv sync --delete-limit 50            # change delete safety limit (default 20)
 srv sync --exclude "*.log"            # extra exclude, repeatable
 srv sync /opt/app                     # explicit remote root (default = sync_root or cwd)
 srv sync --root ./subproject          # explicit local root (default = git toplevel / cwd)
@@ -282,16 +284,17 @@ Default excludes: `.git`, `node_modules`, `__pycache__`, `.venv`, `venv`, `.idea
 
 Files are anchored at the git toplevel (git mode) or current dir (other modes); the remote receives them at `remote_root/<relative_path>`.
 
-`--delete` currently works in git mode only. Use `--delete --dry-run` first: it prints `delete <path>` entries and does not touch the remote.
+`--delete` currently works in git mode only. Use `--delete --dry-run` first: it prints `delete <path>` entries and does not touch the remote. Non-dry-run deletes are capped at 20 files by default; use `--yes` or `--delete-limit N` when the preview is expected.
 
 ### Port forwarding (`srv tunnel`)
 
-`ssh -L` equivalent, **local-to-remote direction only**. Common case: a dev server / Jupyter / DB on the remote, your local browser or client connects through it.
+`ssh -L` / `ssh -R` equivalent. Common case: a dev server / Jupyter / DB on the remote, your local browser or client connects through it; reverse mode exposes a local service on the remote loopback port.
 
 ```
 srv tunnel 8080            # local 127.0.0.1:8080  ->  remote 127.0.0.1:8080
 srv tunnel 8080:9090       # local 127.0.0.1:8080  ->  remote 127.0.0.1:9090
 srv tunnel 8080:db:5432    # local 127.0.0.1:8080  ->  db:5432 (resolved on the remote)
+srv tunnel -R 9000:3000    # remote 127.0.0.1:9000 -> local 127.0.0.1:3000
 ```
 
 Behavior: `Ctrl-C` stops it; if the SSH connection itself drops, `srv tunnel` notices and stops too. Each incoming connection runs in its own goroutine (bidirectional `io.Copy`). The local side binds `127.0.0.1` only — not exposed to the LAN.
@@ -312,16 +315,18 @@ Editor resolution: `$VISUAL` → `$EDITOR` → Windows: `notepad.exe` → otherw
 
 ```
 srv doctor                         # local config / daemon / active-profile report
+srv doctor --json                  # JSON diagnostics
 srv open logs/app.log              # pull a remote file to a temp dir and open it
 srv code /opt/app                  # open VS Code Remote SSH for a remote folder
 srv diff ./app.py app.py           # compare local file with remote file
+srv diff --changed                 # compare changed git files with remote counterparts
 ```
 
 `srv open` is read-only; use `srv edit` when you want to save changes back. `srv code` runs `code --folder-uri ...` when the VS Code CLI is available, otherwise it prints the command to run.
 
 **Known caveats**:
 
-- **No locking**. If someone else is editing the same file concurrently, save-back silently overwrites them. On shared boxes prefer SSHing in and using vim directly.
+- **No locking**. Before save-back, `srv edit` checks the remote size/mtime and refuses to overwrite when another session changed it while your editor was open. For heavily shared files, SSH in and use vim directly.
 - **VS Code requires `--wait`**. `EDITOR=code` returns immediately, so srv sees "no changes" and exits while the editor is still open. Set `EDITOR='code --wait'` instead.
 - **Notepad converts LF → CRLF** on Windows, which makes the entire file look modified. Set `$EDITOR` to vim, notepad++, or `code --wait` instead.
 
@@ -509,7 +514,7 @@ srv -d "python long.py"
 
 ### Option 2: MCP server (structured tools)
 
-Claude Code gets 14 tools via stdio MCP (`run`, `cd`, `pwd`, `use`, `status`, `check`, `list_profiles`, `push`, `pull`, `sync`, `detach`, `list_jobs`, `tail_log`, `kill_job`). The MCP server's session id = the Claude Code process PID, so each Claude Code instance is independent.
+Claude Code gets 19 tools via stdio MCP (`run`, `cd`, `pwd`, `use`, `status`, `check`, `list_profiles`, `doctor`, `daemon_status`, `env`, `diff`, `push`, `pull`, `sync`, `sync_delete_dry_run`, `detach`, `list_jobs`, `tail_log`, `kill_job`). The MCP server's session id = the Claude Code process PID, so each Claude Code instance is independent.
 
 **Claude Code** — pick one of three scopes depending on how you want it shared:
 
@@ -661,7 +666,6 @@ srv kill <id>                  # SIGTERM
 
 ## Design tradeoffs / known limitations
 
-- **Env vars don't persist across calls**: every `srv` invocation is a fresh ssh process. Use inline: `srv "FOO=1 python x.py"`.
 - **Non-interactive ssh doesn't source `.bashrc`**: aliases / PATH from rc files aren't visible by default. `srv "bash -ic '<cmd>'"` forces an interactive shell.
 - **Mid-transfer disconnects**: scp may leave a half-written file. Re-running overwrites; we accept that rather than implementing resume.
 - **Long ssh commands die on disconnect**: only `srv -d` survives a network interruption.

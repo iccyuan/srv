@@ -1,5 +1,24 @@
 # Changelog
 
+## [Go 2.6.3] - 2026-05-08
+
+### Added
+- **`srv tunnel -R`**: added reverse forwarding (`srv tunnel -R 9000:3000`) so a remote loopback port can reach a local service over the existing SSH connection.
+- **`srv diff --changed`**: compares changed git files against their remote counterparts.
+- **`srv doctor --json`**: emits the local diagnostics as machine-readable JSON.
+- **MCP tool coverage**: exposed `doctor`, `daemon_status`, `env`, `diff`, and `sync_delete_dry_run`; `sync` also supports remote delete previews/deletes through structured arguments.
+
+### Changed
+- **`srv edit` conflict guard**: save-back now re-stats the remote file and refuses to overwrite if size or mtime changed while the local editor was open.
+- **`srv sync --delete` safeguards**: non-dry-run deletes are capped at 20 files by default; use `--yes` or `--delete-limit N` after reviewing a dry run.
+- **Dependency baseline**: Go module dependencies and CI were moved to Go 1.25.x.
+
+### Docs
+- Removed the stale environment-variable limitation because profile-level `srv env` now persists injected remote env values.
+- Documented reverse tunnels, changed-file diffs, JSON diagnostics, delete safeguards, and the expanded MCP tool list.
+
+---
+
 ## [Go 2.6.2] - 2026-05-08
 
 ### Fixed

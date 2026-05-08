@@ -150,4 +150,14 @@ func TestParseSyncOpts(t *testing.T) {
 	if o.mode != "list" || !reflect.DeepEqual(o.files, []string{"a.go", "b.go"}) {
 		t.Errorf("`--` files: %+v", o)
 	}
+
+	o = parseSyncOpts([]string{"--delete", "--yes", "--delete-limit", "50"})
+	if !o.delete || !o.yes || o.deleteLimit != 50 {
+		t.Errorf("--delete safety options: %+v", o)
+	}
+
+	o = parseSyncOpts([]string{"--delete-limit=7"})
+	if o.deleteLimit != 7 {
+		t.Errorf("--delete-limit= capture: %+v", o)
+	}
 }

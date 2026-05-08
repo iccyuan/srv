@@ -13,18 +13,45 @@ import (
 	"strings"
 )
 
-func cmdDoctor(cfg *Config, profileOverride string) int {
-	ok := true
-	check := func(name string, pass bool, detail string) {
+func cmdDoctor(args []string, cfg *Config, profileOverride string) int {
+	asJSON := len(args) > 0 && args[0] == "--json"
+	rows, ok := doctorChecks(cfg, profileOverride)
+	for _, row := range rows {
+		if asJSON {
+			continue
+		}
+		pass, _ := row["ok"].(bool)
+		name, _ := row["name"].(string)
+		detail, _ := row["detail"].(string)
 		mark := "OK"
 		if !pass {
 			mark = "FAIL"
-			ok = false
 		}
 		if detail != "" {
 			fmt.Printf("%-6s %-18s %s\n", mark, name, detail)
 		} else {
 			fmt.Printf("%-6s %s\n", mark, name)
+		}
+	}
+	if asJSON {
+		b, _ := json.MarshalIndent(map[string]any{
+			"ok": ok, "checks": rows,
+		}, "", "  ")
+		fmt.Println(string(b))
+	}
+	if ok {
+		return 0
+	}
+	return 1
+}
+
+func doctorChecks(cfg *Config, profileOverride string) ([]map[string]any, bool) {
+	ok := true
+	rows := []map[string]any{}
+	check := func(name string, pass bool, detail string) {
+		rows = append(rows, map[string]any{"name": name, "ok": pass, "detail": detail})
+		if !pass {
+			ok = false
 		}
 	}
 	check("version", true, Version)
@@ -53,10 +80,7 @@ func cmdDoctor(cfg *Config, profileOverride string) int {
 	if _, _, err := ResolveProfile(cfg, profileOverride); err != nil {
 		check("active profile", false, err.Error())
 	}
-	if ok {
-		return 0
-	}
-	return 1
+	return rows, ok
 }
 
 func editJSONValue(v any, pattern string) ([]byte, error) {
@@ -169,38 +193,100 @@ func cmdDiff(args []string, cfg *Config, profileOverride string) int {
 		fmt.Fprintln(os.Stderr, "usage: srv diff <local_file> [remote_file]")
 		return 2
 	}
+	if args[0] == "--changed" {
+		return cmdDiffChanged(args[1:], cfg, profileOverride)
+	}
 	local := args[0]
 	remoteArg := args[0]
 	if len(args) > 1 {
 		remoteArg = args[1]
 	}
-	if _, err := os.Stat(local); err != nil {
+	text, rc, err := diffLocalRemote(cfg, profileOverride, local, remoteArg)
+	if err != nil {
 		fmt.Fprintln(os.Stderr, "srv diff:", err)
 		return 1
 	}
+	fmt.Print(text)
+	return rc
+}
+
+func diffLocalRemote(cfg *Config, profileOverride, local, remoteArg string) (string, int, error) {
+	if _, err := os.Stat(local); err != nil {
+		return "", 1, err
+	}
 	name, profile, err := ResolveProfile(cfg, profileOverride)
 	if err != nil {
-		fmt.Fprintln(os.Stderr, err)
-		return 1
+		return "", 1, err
+	}
+	if remoteArg == "" {
+		remoteArg = local
 	}
 	remote := resolveRemotePath(remoteArg, GetCwd(name, profile))
 	tmpDir, err := os.MkdirTemp("", "srv-diff-")
 	if err != nil {
-		fmt.Fprintln(os.Stderr, "srv diff:", err)
-		return 1
+		return "", 1, err
 	}
 	defer os.RemoveAll(tmpDir)
 	remoteLocal := filepath.Join(tmpDir, filepath.Base(local)+".remote")
 	if rc, err := pullPath(profile, remote, remoteLocal, false); err != nil || rc != 0 {
 		if err != nil {
-			fmt.Fprintln(os.Stderr, "srv diff:", err)
+			return "", 1, err
 		}
-		return 1
+		return "", rc, fmt.Errorf("pull failed")
 	}
 	if git, err := exec.LookPath("git"); err == nil {
-		return runLocal(git, "diff", "--no-index", "--", local, remoteLocal)
+		cmd := exec.Command(git, "diff", "--no-index", "--", local, remoteLocal)
+		var out bytes.Buffer
+		cmd.Stdout = &out
+		cmd.Stderr = &out
+		err := cmd.Run()
+		rc := 0
+		if err != nil {
+			rc = 1
+			if ee, ok := err.(*exec.ExitError); ok {
+				rc = ee.ExitCode()
+			}
+		}
+		return out.String(), rc, nil
 	}
-	return simpleDiff(local, remoteLocal)
+	rc := simpleDiff(local, remoteLocal)
+	if rc == 0 {
+		return "", 0, nil
+	}
+	return fmt.Sprintf("files differ: %s %s\n", local, remote), rc, nil
+}
+
+func cmdDiffChanged(args []string, cfg *Config, profileOverride string) int {
+	root := findGitRoot(mustCwd())
+	if root == "" {
+		fmt.Fprintln(os.Stderr, "srv diff --changed: not in a git repo")
+		return 2
+	}
+	scope := "all"
+	if len(args) > 0 {
+		scope = strings.TrimPrefix(args[0], "--")
+	}
+	files, err := gitChangedFiles(root, scope)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "srv diff --changed:", err)
+		return 1
+	}
+	if len(files) == 0 {
+		fmt.Fprintln(os.Stderr, "(no changed files)")
+		return 0
+	}
+	rc := 0
+	for _, rel := range files {
+		local := filepath.Join(root, filepath.FromSlash(rel))
+		if st, err := os.Stat(local); err != nil || st.IsDir() {
+			continue
+		}
+		fmt.Fprintf(os.Stderr, "\n--- %s ---\n", rel)
+		if drc := cmdDiff([]string{local, rel}, cfg, profileOverride); drc != 0 {
+			rc = drc
+		}
+	}
+	return rc
 }
 
 func simpleDiff(a, b string) int {
@@ -209,7 +295,6 @@ func simpleDiff(a, b string) int {
 	if bytes.Equal(ab, bb) {
 		return 0
 	}
-	fmt.Printf("files differ: %s %s\n", a, b)
 	return 1
 }
 

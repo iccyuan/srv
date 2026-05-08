@@ -12,7 +12,7 @@ import (
 
 // Version is overridable at build time via -ldflags "-X main.Version=...".
 // goreleaser sets it from the git tag on release builds.
-var Version = "2.6.2"
+var Version = "2.6.3"
 
 const helpText = `srv - run commands on a remote SSH server with persistent cwd.
 
@@ -32,13 +32,16 @@ Quick start:
   srv -P dev rsync ...           override profile for a single call
   srv check                      probe connectivity; diagnose key/host/port issues
   srv doctor                     local config / daemon / SSH readiness report
+  srv doctor --json              machine-readable diagnostics
   srv shell                      interactive remote shell (cwd-positioned)
   srv tunnel 8080                forward localhost:8080 -> remote 127.0.0.1:8080
   srv tunnel 8080:db:5432        forward localhost:8080 -> db:5432 from remote
+  srv tunnel -R 9000:3000        reverse forward remote 9000 -> local 127.0.0.1:3000
   srv edit /etc/foo.conf         pull, open in $EDITOR, push back if changed
   srv open logs/app.log          pull remote file to temp and open locally
   srv code /opt/app              open VS Code Remote SSH for a remote folder
   srv diff local.py remote.py    compare local file with remote file
+  srv diff --changed             diff all changed git files against remote
   srv env set NODE_ENV prod      set profile-level remote env var
 
 File transfer (uses SFTP via the same SSH session):
@@ -55,6 +58,8 @@ Bulk sync of changed files (tar | ssh tar; preserves relative paths):
   srv sync --files a.go b/c.go   explicit list
   srv sync --dry-run             show what would push, don't transfer
   srv sync --delete --dry-run    show tracked remote deletes before applying
+  srv sync --delete --yes        apply deletes above the default safety limit
+  srv sync --delete-limit 50     change delete safety limit (default 20)
   srv sync /opt/app              override remote root (else cwd or sync_root)
   srv sync --watch               keep syncing on every local file change
 
@@ -210,7 +215,7 @@ func run(args []string) int {
 	case "check":
 		return cmdCheck(cfg, opts.profile)
 	case "doctor":
-		return cmdDoctor(cfg, opts.profile)
+		return cmdDoctor(rest[1:], cfg, opts.profile)
 	case "shell":
 		return cmdShell(cfg, opts.profile)
 	case "push":

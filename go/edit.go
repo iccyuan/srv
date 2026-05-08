@@ -14,9 +14,9 @@ import (
 // cmdEdit downloads a remote file to a temp dir, opens it in $EDITOR, and
 // uploads it back if the local copy was modified after the editor exits.
 //
-// Concurrency caveat: srv does not lock the remote file. Concurrent edits
-// from another session will be silently overwritten on save-back. For
-// shared boxes prefer SSH'ing in directly.
+// Conflict caveat: srv does not lock the remote file. Before save-back it
+// re-stats the remote path and refuses to overwrite if size or mtime changed
+// since the initial pull.
 //
 // $EDITOR / $VISUAL is split on whitespace so wrappers like "code --wait"
 // work as-is. Without --wait, VS Code returns immediately and srv will
@@ -64,6 +64,8 @@ func cmdEdit(args []string, cfg *Config, profileOverride string) int {
 		fmt.Fprintln(os.Stderr, "srv edit: target is a directory:", resolved)
 		return 1
 	}
+	remoteSize := st.Size()
+	remoteMod := st.ModTime()
 
 	tmpDir, err := os.MkdirTemp("", "srv-edit-")
 	if err != nil {
@@ -112,6 +114,19 @@ func cmdEdit(args []string, cfg *Config, profileOverride string) int {
 	if after.ModTime().Equal(before.ModTime()) && after.Size() == before.Size() {
 		fmt.Fprintln(os.Stderr, "srv edit: no changes; not uploading.")
 		return 0
+	}
+
+	latest, err := s.Stat(resolved)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "srv edit: restat:", err)
+		return 1
+	}
+	if latest.Size() != remoteSize || !latest.ModTime().Equal(remoteMod) {
+		fmt.Fprintln(os.Stderr, "srv edit: remote file changed while editing; refusing to overwrite.")
+		fmt.Fprintf(os.Stderr, "srv edit: initial size=%d mtime=%s, current size=%d mtime=%s\n",
+			remoteSize, remoteMod.Format("2006-01-02T15:04:05"),
+			latest.Size(), latest.ModTime().Format("2006-01-02T15:04:05"))
+		return 1
 	}
 
 	if err := uploadFile(s, localPath, resolved); err != nil {
