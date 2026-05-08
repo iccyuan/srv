@@ -2,7 +2,7 @@
 
 [中文](./README.md) | English
 
-> Cross-platform SSH command runner. Configure locally, run on the remote. Persistent cwd, connection multiplexing, per-shell session isolation, detached jobs. Callable from Bash or as an MCP server (Claude Code / Codex). **Default is the Go binary** (zero runtime deps, built-in SSH protocol). The Python implementation is preserved in [`python/`](./python) but **no longer maintained**.
+> Cross-platform SSH command runner. Configure locally, run on the remote. Persistent cwd, connection multiplexing, per-shell session isolation, detached jobs. Callable from Bash or as an MCP server (Claude Code / Codex). A single Go binary with zero runtime dependencies; speaks the SSH protocol natively (no system ssh.exe required).
 
 ## Cheat sheet
 
@@ -57,7 +57,7 @@ Developing locally but needing a real server to actually run things means a lot 
 
 ## Install
 
-**The default `srv` is the Go binary** — built from source under [`go/`](./go) into the repo root. The Python implementation is preserved in [`python/`](./python) and can be invoked explicitly via `python python/srv.py`.
+`srv` is a single binary at the repo root, built from [`go/`](./go).
 
 ### Prerequisites
 
@@ -99,21 +99,6 @@ Strategy:
 After install, run `exec $SHELL -l` or open a new terminal, then `srv version` to verify.
 
 **Manual install** (if you'd rather not run a script): just put the repo root absolute path on your PATH. Any mechanism works.
-
-### Python version (frozen, unmaintained)
-
-`python/srv.py` stops at **v0.7.5** and will receive **no further features or bug fixes**. It still works (shares `~/.srv/{config,sessions,jobs}.json`, behavior matches Go 2.0.1) and is useful when:
-
-- You're on a host without a Go toolchain
-- You need to compare behavior during a migration
-
-```sh
-python python/srv.py status
-python python/srv.py cd /opt
-# ...
-```
-
-All new work — features, bug fixes, Windows OpenSSH workarounds — happens only on the Go side. The Python implementation may be removed in a future release; git history will preserve it.
 
 ---
 
@@ -458,7 +443,7 @@ Set with `srv config set <profile> <key> <value>`. Bool strings (`true`/`false`)
 ### Model
 
 - **Profile** = one server (host + user + port + key + default_cwd, etc.)
-- **Session** = one shell instance. Session id = the shell process's PID. On Windows, intermediate `cmd.exe` shim and python launcher layers are skipped automatically to find the real shell
+- **Session** = one shell instance. Session id = the shell process's PID. On Windows, intermediate shim layers (e.g. `cmd.exe`) are skipped automatically to find the real shell
 - cwd is keyed by **(session, profile)**
 
 ### Isolation matrix
@@ -613,8 +598,7 @@ Install OpenSSH client.
 - A conflicting `ControlPath` in `~/.ssh/config` may interfere
 
 ### Windows session id seems unstable / different each call
-- Calls via the `srv` shim (`srv.cmd`) should be stable
-- `python srv.py` direct calls are stable
+- Calling `srv.exe` directly from PATH should be stable
 - For unusual shell nesting, set `$env:SRV_SESSION = $PID` manually
 
 ### `srv -d` process exits immediately
@@ -703,7 +687,7 @@ srv kill <id>                  # SIGTERM
 
 ## Version
 
-Currently **Go 2.6.x** (what `srv version` prints). Version bumps on breaking changes; the Python implementation is frozen at 0.7.5 and won't receive further updates. Full history in [CHANGELOG.md](./CHANGELOG.md).
+Currently **Go 2.6.x** (what `srv version` prints). Version bumps on breaking changes. Full history in [CHANGELOG.md](./CHANGELOG.md).
 
 ## Development (contributors)
 

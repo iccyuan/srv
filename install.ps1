@@ -10,7 +10,8 @@
 
 [CmdletBinding()]
 param(
-    [switch]$Uninstall
+    [switch]$Uninstall,
+    [switch]$Gui
 )
 
 $ErrorActionPreference = 'Stop'
@@ -24,6 +25,14 @@ if (-not (Test-Path $bin)) {
     Write-Host "Build it first:" -ForegroundColor Yellow
     Write-Host "  cd `"$here\go`"; go build -o ..\srv.exe ." -ForegroundColor Yellow
     exit 1
+}
+
+# -Gui hands off to the cross-platform browser-based installer baked into
+# the srv binary. Same UI on Windows / macOS / Linux; covers PATH +
+# Claude Code MCP + first profile in one pass.
+if ($Gui) {
+    & $bin install
+    exit $LASTEXITCODE
 }
 
 # Read current User PATH; split on ';' and normalize trailing slashes.

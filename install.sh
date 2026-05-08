@@ -15,9 +15,11 @@
 set -e
 
 uninstall=0
-if [ "${1:-}" = "--uninstall" ]; then
-    uninstall=1
-fi
+gui=0
+case "${1:-}" in
+    --uninstall) uninstall=1 ;;
+    --gui)       gui=1 ;;
+esac
 
 # Resolve the script's own directory (handles symlinks).
 src="${BASH_SOURCE[0]}"
@@ -37,6 +39,13 @@ if [ ! -x "$bin" ]; then
     echo "Build it first:" >&2
     echo "  cd \"$here/go\" && go build -o ../srv ." >&2
     exit 1
+fi
+
+# --gui hands off to the cross-platform browser-based installer baked
+# into the srv binary. Same UI on Windows / macOS / Linux; covers PATH
+# + Claude Code MCP + first profile in one pass.
+if [ "$gui" = "1" ]; then
+    exec "$bin" install
 fi
 
 # Pick the rc file for the user's shell. Falls back to ~/.profile.

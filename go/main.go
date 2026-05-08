@@ -12,7 +12,7 @@ import (
 
 // Version is overridable at build time via -ldflags "-X main.Version=...".
 // goreleaser sets it from the git tag on release builds.
-var Version = "2.6.3"
+var Version = "2.6.4"
 
 const helpText = `srv - run commands on a remote SSH server with persistent cwd.
 
@@ -33,6 +33,7 @@ Quick start:
   srv check                      probe connectivity; diagnose key/host/port issues
   srv check --rtt [--count N]    measure SSH-level RTT + packet loss
   srv doctor                     local config / daemon / SSH readiness report
+  srv install                    open browser-based installer (PATH, Claude MCP, first profile)
   srv doctor --json              machine-readable diagnostics
   srv shell                      interactive remote shell (cwd-positioned)
   srv tunnel 8080                forward localhost:8080 -> remote 127.0.0.1:8080
@@ -105,7 +106,7 @@ var reservedSubcommands = map[string]bool{
 	"status": true, "check": true, "shell": true, "run": true, "exec": true,
 	"push": true, "pull": true, "sync": true, "tunnel": true, "edit": true,
 	"open": true, "code": true, "diff": true, "doctor": true,
-	"env": true, "completion": true, "mcp": true, "daemon": true,
+	"env": true, "install": true, "completion": true, "mcp": true, "daemon": true,
 	"_profiles": true, "_ls": true,
 	"jobs": true, "logs": true, "kill": true, "sessions": true,
 	"help": true, "--help": true, "-h": true,
@@ -181,6 +182,10 @@ func run(args []string) int {
 		return 0
 	case "completion":
 		return cmdCompletion(rest[1:])
+	case "install":
+		// install opens a localhost web UI to wire srv up: PATH, MCP
+		// registration, and a first-profile prompt. No config needed.
+		return cmdInstall(rest[1:])
 	case "init":
 		// init creates config; load empty if missing.
 		cfg, _ := LoadConfig()

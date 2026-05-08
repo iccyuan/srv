@@ -1,0 +1,245 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>srv installer</title>
+<style>
+  :root {
+    --bg: #1c1c1e;
+    --panel: #2a2a2c;
+    --border: #3a3a3c;
+    --text: #e0e0e0;
+    --muted: #888;
+    --ok: #4ade80;
+    --warn: #fbbf24;
+    --bad: #f87171;
+    --accent: #4ade80;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; padding: 32px 24px;
+    font: 14px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
+    background: var(--bg); color: var(--text);
+  }
+  .wrap { max-width: 720px; margin: 0 auto; }
+  h1 { font-size: 24px; margin: 0 0 4px; font-weight: 600; }
+  .subtitle { color: var(--muted); font-size: 13px; margin-bottom: 24px; }
+  .panel {
+    background: var(--panel); border: 1px solid var(--border);
+    border-radius: 8px; padding: 16px 20px; margin-bottom: 16px;
+  }
+  .panel h2 {
+    font-size: 11px; font-weight: 600; letter-spacing: 0.08em;
+    text-transform: uppercase; color: var(--muted);
+    margin: 0 0 12px;
+  }
+  .row { display: flex; padding: 4px 0; align-items: center; gap: 12px; }
+  .row-key { width: 130px; color: var(--muted); flex-shrink: 0; }
+  .row-val { flex: 1; word-break: break-all; }
+  .ok { color: var(--ok); }
+  .warn { color: var(--warn); }
+  .bad { color: var(--bad); }
+  .actions label {
+    display: flex; align-items: flex-start; gap: 10px;
+    padding: 10px 8px; border-radius: 6px; cursor: pointer;
+    user-select: none;
+  }
+  .actions label:hover:not(.disabled) { background: rgba(255,255,255,0.04); }
+  .actions input[type="checkbox"] {
+    margin: 2px 0 0 0; flex-shrink: 0;
+    accent-color: var(--accent);
+    transform: scale(1.1);
+  }
+  .actions .label-body { flex: 1; }
+  .actions .label-title { font-weight: 500; }
+  .actions .label-desc { color: var(--muted); font-size: 12px; margin-top: 2px; }
+  .actions label.disabled { opacity: 0.5; cursor: not-allowed; }
+  .buttons { display: flex; gap: 10px; margin-top: 8px; }
+  button {
+    background: var(--accent); color: #002;
+    border: 0; padding: 10px 20px; border-radius: 6px;
+    cursor: pointer; font-size: 13px; font-weight: 600;
+    font-family: inherit;
+  }
+  button:hover:not(:disabled) { filter: brightness(1.1); }
+  button.secondary { background: #3a3a3c; color: var(--text); }
+  button.secondary:hover:not(:disabled) { background: #4a4a4c; }
+  button:disabled { opacity: 0.4; cursor: not-allowed; }
+  .log {
+    background: #0a0a0a; color: #ccc;
+    font: 12px/1.5 ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+    padding: 12px 16px; border-radius: 6px;
+    max-height: 200px; overflow-y: auto; white-space: pre-wrap;
+    border: 1px solid var(--border);
+  }
+  .log:empty::before { content: "(no actions applied yet)"; color: #555; }
+  .footer { color: var(--muted); font-size: 12px; margin-top: 12px; text-align: center; }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<h1>srv installer</h1>
+<div class="subtitle" id="subtitle">Loading…</div>
+
+<div class="panel">
+  <h2>Status</h2>
+  <div id="status"></div>
+</div>
+
+<div class="panel actions">
+  <h2>Actions</h2>
+  <div id="actions"></div>
+</div>
+
+<div class="buttons">
+  <button id="apply">Apply selected</button>
+  <button id="quit" class="secondary">Done</button>
+</div>
+
+<div class="panel" style="margin-top: 16px;">
+  <h2>Output</h2>
+  <div class="log" id="log"></div>
+</div>
+
+<div class="footer">srv installer · close this tab when finished</div>
+
+</div>
+
+<script>
+const $ = (sel) => document.querySelector(sel);
+
+function fmtClaude(c) {
+  if (!c.available) return '<span class="warn">claude CLI not on PATH — install Claude Code first</span>';
+  if (c.registered) return `<span class="ok">✓ registered (${c.scope || 'unknown scope'})</span>`;
+  return '<span class="warn">claude available, srv not registered</span>';
+}
+
+function fmtPath(p) {
+  if (p.on_path) return '<span class="ok">✓ on $PATH</span>';
+  return '<span class="warn">not on $PATH</span>';
+}
+
+function fmtProfiles(p) {
+  if (p.count === 0) return '<span class="warn">no profiles configured</span>';
+  return `<span class="ok">${p.count} configured${p.default ? ' · default = ' + p.default : ''}</span>`;
+}
+
+async function loadStatus() {
+  const r = await fetch('/api/status');
+  const s = await r.json();
+
+  $('#subtitle').textContent = `srv ${s.binary.version} · ${s.platform}`;
+
+  $('#status').innerHTML = `
+    <div class="row"><div class="row-key">Binary</div><div class="row-val">${s.binary.path}</div></div>
+    <div class="row"><div class="row-key">PATH</div><div class="row-val">${fmtPath(s.path)}</div></div>
+    <div class="row"><div class="row-key">Claude Code</div><div class="row-val">${fmtClaude(s.claude_mcp)}</div></div>
+    <div class="row"><div class="row-key">Profiles</div><div class="row-val">${fmtProfiles(s.profiles)}</div></div>
+  `;
+
+  const opts = [
+    {
+      key: 'add_to_path',
+      label: 'Add to PATH',
+      desc: pathDesc(s),
+      defaultChecked: !s.path.on_path,
+      disabled: false,
+    },
+    {
+      key: 'remove_from_path',
+      label: 'Remove from PATH',
+      desc: 'Undo a previous install. Only applies if currently installed.',
+      defaultChecked: false,
+      disabled: !s.path.on_path,
+    },
+    {
+      key: 'register_claude_mcp',
+      label: 'Register as Claude Code MCP',
+      desc: s.claude_mcp.available
+        ? 'Adds srv to ~/.claude.json under user scope so MCP tools (mcp__srv__*) are available in every Claude Code session.'
+        : 'Claude CLI not detected on PATH. Install Claude Code, then re-open this installer.',
+      defaultChecked: s.claude_mcp.available && !s.claude_mcp.registered,
+      disabled: !s.claude_mcp.available,
+    },
+    {
+      key: 'unregister_claude_mcp',
+      label: 'Unregister from Claude Code',
+      desc: 'Remove srv from Claude Code\'s MCP servers.',
+      defaultChecked: false,
+      disabled: !s.claude_mcp.available || !s.claude_mcp.registered,
+    },
+    {
+      key: 'init_profile',
+      label: 'Run srv init in a new terminal',
+      desc: 'Walk through configuring your first SSH profile (host, user, key, default cwd).',
+      defaultChecked: s.profiles.count === 0,
+      disabled: false,
+    },
+  ];
+
+  $('#actions').innerHTML = opts.map(o => `
+    <label class="${o.disabled ? 'disabled' : ''}">
+      <input type="checkbox" data-action="${o.key}"
+             ${o.defaultChecked && !o.disabled ? 'checked' : ''}
+             ${o.disabled ? 'disabled' : ''}>
+      <div class="label-body">
+        <div class="label-title">${o.label}</div>
+        <div class="label-desc">${o.desc}</div>
+      </div>
+    </label>
+  `).join('');
+}
+
+function pathDesc(s) {
+  if (s.platform === 'windows') {
+    return 'Adds the binary directory to your User PATH (no admin needed). New terminals see it immediately.';
+  }
+  return 'On macOS/Linux: symlinks into ~/.local/bin if it\'s on PATH; otherwise appends an export line to your shell rc file.';
+}
+
+function logLine(line) {
+  const el = $('#log');
+  const ts = new Date().toLocaleTimeString();
+  el.textContent += `[${ts}] ${line}\n`;
+  el.scrollTop = el.scrollHeight;
+}
+
+$('#apply').addEventListener('click', async () => {
+  const checked = [...document.querySelectorAll('input[data-action]:checked')]
+    .map(el => el.dataset.action);
+  if (checked.length === 0) {
+    logLine('Nothing selected.');
+    return;
+  }
+  $('#apply').disabled = true;
+  logLine(`Applying: ${checked.join(', ')}`);
+  try {
+    const r = await fetch('/api/apply', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ actions: checked }),
+    });
+    const result = await r.json();
+    for (const line of result.log || []) logLine(line);
+    await loadStatus();
+  } catch (e) {
+    logLine(`error: ${e.message || e}`);
+  } finally {
+    $('#apply').disabled = false;
+  }
+});
+
+$('#quit').addEventListener('click', async () => {
+  await fetch('/api/quit', { method: 'POST' });
+  document.body.innerHTML = `
+    <div style="text-align:center;padding:80px 24px;color:var(--muted);font-family:inherit">
+      <p style="font-size:18px;margin:0 0 8px;color:var(--text)">All done.</p>
+      <p>You can close this tab.</p>
+    </div>`;
+});
+
+loadStatus();
+</script>
+</body>
+</html>

@@ -1,5 +1,26 @@
 # Changelog
 
+## [Go 2.6.4] - 2026-05-09
+
+### Added
+- **`srv install`** —— 跨平台浏览器图形化安装器。子命令起本地 HTTP server,自动开浏览器,UI 里勾选:加 PATH / 注册为 Claude Code MCP / 跑 `srv init`。`install.ps1 -Gui` / `install.sh --gui` 引导调用。HTML embed(`go:embed`),无外部资源。
+- **浏览器优先 `--app` 模式**:openBrowser 先找 Edge / Chrome / Chromium(系统位置 + PATH),用 `--app=URL --window-size=...` 起,得到无 tab/无地址栏的"原生窗口"观感;**找不到任何 Chromium 系列时回落系统默认浏览器**(`start` / `open` / `xdg-open`),保证安装器在裸装系统上也能用。
+- **A. 拨号重试**(profile `dial_attempts` / `dial_backoff`,opt-in)。
+- **B. OS-level TCP keepalive**(15s,无配置)。
+- **C. `srv push` / `srv pull` 单文件断点续传**(目标严格小于源时 seek + append)。
+- **G. `srv check --rtt`** —— SSH 级 RTT 探测,出 min/med/avg/max + 丢包率 + verdict。
+- 安装脚本 `install.ps1` / `install.sh`(自适配脚本所在目录,幂等,`--uninstall` 干净移除)。
+
+### Removed
+- **`python/` 整个目录** —— Python 实现(冻结在 0.7.5)清出仓库。仓库最后一次 Python 版本对齐是 Go 2.0.x 时代,之后 Go 单边演进,Python 版本只是"留个能跑的存档"。已经几个版本没人 touch,git 历史里还能找回。两份 README + go/README + memory 全部清掉相关引用。
+
+### Changed
+- 安装文档全部用引导脚本(`install.ps1` / `install.sh`),硬编码 `D:\WorkSpace\server\srv` 路径示例不再出现。
+
+---
+
+
+
 ## [Go 2.6.3] - 2026-05-08
 
 ### Added
