@@ -77,15 +77,50 @@ func DialOpts(profile *Profile, opts dialOpts) (*Client, error) {
 		}
 	}
 
-	// Walk through any ProxyJump hops, building up a chain of ssh.Clients.
+	attempts := profile.GetDialAttempts()
+	backoff := profile.GetDialBackoff()
+
+	var lastErr error
+	for attempt := 1; attempt <= attempts; attempt++ {
+		c, err := dialOnce(profile, defaultUser, mkConfig, timeout)
+		if err == nil {
+			return c, nil
+		}
+		// Auth / host-key errors don't get any better with retries -- fail
+		// fast so the user sees the real cause.
+		if !isRetryableDialErr(err) {
+			return nil, err
+		}
+		lastErr = err
+		if attempt >= attempts {
+			break
+		}
+		wait := backoff << uint(attempt-1) // doubles each round
+		if wait > 30*time.Second {
+			wait = 30 * time.Second
+		}
+		fmt.Fprintf(os.Stderr,
+			"srv: dial attempt %d/%d failed: %v (retrying in %v)\n",
+			attempt, attempts, err, wait)
+		time.Sleep(wait)
+	}
+	return nil, lastErr
+}
+
+// dialOnce performs one full dial: ProxyJump chain (if any) followed by
+// the final hop. Each TCP-level dial gets OS keepalive enabled so a
+// silently-dead conn shows up as an EOF inside seconds rather than
+// blocking forever on a write.
+func dialOnce(profile *Profile, defaultUser string, mkConfig func(string) *ssh.ClientConfig, timeout time.Duration) (*Client, error) {
 	var chain []*ssh.Client
+	var err error
 	for _, spec := range profile.Jump {
 		hopUser, hopHost, hopPort := parseHostSpec(spec, defaultUser, 22)
 		hopAddr := net.JoinHostPort(hopHost, intToStr(hopPort))
 		hopCfg := mkConfig(hopUser)
 		var hop *ssh.Client
 		if len(chain) == 0 {
-			hop, err = ssh.Dial("tcp", hopAddr, hopCfg)
+			hop, err = sshDialTCP(hopAddr, hopCfg, timeout)
 		} else {
 			hop, err = dialThrough(chain[len(chain)-1], hopAddr, hopCfg, timeout)
 		}
@@ -96,12 +131,11 @@ func DialOpts(profile *Profile, opts dialOpts) (*Client, error) {
 		chain = append(chain, hop)
 	}
 
-	// Final dial to the target host (through the last hop, if any).
 	targetAddr := net.JoinHostPort(profile.Host, intToStr(profile.GetPort()))
 	targetCfg := mkConfig(defaultUser)
 	var conn *ssh.Client
 	if len(chain) == 0 {
-		conn, err = ssh.Dial("tcp", targetAddr, targetCfg)
+		conn, err = sshDialTCP(targetAddr, targetCfg, timeout)
 	} else {
 		conn, err = dialThrough(chain[len(chain)-1], targetAddr, targetCfg, timeout)
 	}
@@ -111,12 +145,57 @@ func DialOpts(profile *Profile, opts dialOpts) (*Client, error) {
 	}
 
 	c := &Client{Profile: profile, Conn: conn, chain: chain}
-
-	// Optional: send keepalives so the server doesn't drop us on idle.
 	if interval := profile.GetKeepaliveInterval(); interval > 0 {
 		go c.runKeepalive(interval, profile.GetKeepaliveCount())
 	}
 	return c, nil
+}
+
+// sshDialTCP replaces ssh.Dial("tcp", ...) so we can flip on OS-level
+// TCP keepalive (SO_KEEPALIVE) on the underlying socket. SSH-level
+// keepalive (runKeepalive) covers the application layer; TCP-level
+// catches dead conns at the kernel before bytes get queued forever.
+// 15s is a friendly compromise between "notice fast" and "don't add
+// chatter on healthy idle pools".
+func sshDialTCP(addr string, cfg *ssh.ClientConfig, timeout time.Duration) (*ssh.Client, error) {
+	d := net.Dialer{Timeout: timeout}
+	raw, err := d.Dial("tcp", addr)
+	if err != nil {
+		return nil, err
+	}
+	if tcp, ok := raw.(*net.TCPConn); ok {
+		_ = tcp.SetKeepAlive(true)
+		_ = tcp.SetKeepAlivePeriod(15 * time.Second)
+	}
+	if timeout > 0 {
+		_ = raw.SetDeadline(time.Now().Add(timeout))
+	}
+	cc, chans, reqs, err := ssh.NewClientConn(raw, addr, cfg)
+	if err != nil {
+		_ = raw.Close()
+		return nil, err
+	}
+	_ = raw.SetDeadline(time.Time{})
+	return ssh.NewClient(cc, chans, reqs), nil
+}
+
+// isRetryableDialErr decides which errors are worth a backoff + redial.
+// Auth and host-key errors are deterministic from the client's point of
+// view -- another round trip won't change the answer, so let them fail
+// immediately with the real diagnosis.
+func isRetryableDialErr(err error) bool {
+	if err == nil {
+		return false
+	}
+	s := strings.ToLower(err.Error())
+	if strings.Contains(s, "unable to authenticate") ||
+		strings.Contains(s, "no supported methods remain") ||
+		strings.Contains(s, "host key") ||
+		strings.Contains(s, "knownhosts:") ||
+		strings.Contains(s, "permission denied") {
+		return false
+	}
+	return true
 }
 
 // dialThrough opens a TCP connection from `via` to `addr`, then performs the

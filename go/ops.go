@@ -227,21 +227,59 @@ func pullPath(profile *Profile, remote, local string, recursive bool) (int, erro
 	return 0, downloadFile(s, resolved, finalLocal)
 }
 
+// uploadFile copies local -> remote via SFTP. If a partial remote file
+// exists (size strictly between 0 and the local file's size), seek both
+// sides to the partial offset and append-mode write the remainder. Any
+// other situation (no remote file, equal size, larger remote, error
+// stating) falls back to a fresh full upload.
+//
+// The "remote shorter than local" heuristic is the only one that's safe
+// without extra metadata: a partial write from a previous interrupted
+// transfer is, by construction, smaller than the local source. Same-
+// size means done; larger means we're not pushing what we think we are.
 func uploadFile(s *sftp.Client, local, remote string) error {
 	src, err := os.Open(local)
 	if err != nil {
 		return err
 	}
 	defer src.Close()
+
+	localStat, err := src.Stat()
+	if err != nil {
+		return err
+	}
+	localSize := localStat.Size()
+
 	// Ensure remote parent exists.
 	if dir := path.Dir(remote); dir != "" && dir != "." {
 		_ = s.MkdirAll(dir)
 	}
-	dst, err := s.Create(remote)
-	if err != nil {
-		return err
+
+	var dst *sftp.File
+	var startOffset int64
+	if rstat, statErr := s.Stat(remote); statErr == nil && rstat.Size() > 0 && rstat.Size() < localSize {
+		f, openErr := s.OpenFile(remote, os.O_WRONLY|os.O_APPEND)
+		if openErr == nil {
+			if _, seekErr := src.Seek(rstat.Size(), io.SeekStart); seekErr == nil {
+				dst = f
+				startOffset = rstat.Size()
+			} else {
+				_ = f.Close()
+			}
+		}
+	}
+	if dst == nil {
+		dst, err = s.Create(remote)
+		if err != nil {
+			return err
+		}
+		startOffset = 0
 	}
 	defer dst.Close()
+
+	if startOffset > 0 {
+		fmt.Fprintf(os.Stderr, "srv push: resuming %s from %d/%d bytes\n", remote, startOffset, localSize)
+	}
 	if _, err := io.Copy(dst, src); err != nil {
 		return err
 	}
@@ -272,6 +310,10 @@ func uploadDir(s *sftp.Client, local, remote string) error {
 	})
 }
 
+// downloadFile mirrors uploadFile's resume logic in the other direction.
+// If the local file is a strict prefix of the remote (size 0 < L < R),
+// seek the remote source to L and append the rest locally; otherwise
+// download fresh.
 func downloadFile(s *sftp.Client, remote, local string) error {
 	if dir := filepath.Dir(local); dir != "" && dir != "." {
 		_ = os.MkdirAll(dir, 0o755)
@@ -281,11 +323,38 @@ func downloadFile(s *sftp.Client, remote, local string) error {
 		return err
 	}
 	defer src.Close()
-	dst, err := os.Create(local)
+
+	rstat, err := src.Stat()
 	if err != nil {
 		return err
 	}
+	remoteSize := rstat.Size()
+
+	var dst *os.File
+	var startOffset int64
+	if lstat, statErr := os.Stat(local); statErr == nil && lstat.Size() > 0 && lstat.Size() < remoteSize {
+		f, openErr := os.OpenFile(local, os.O_WRONLY|os.O_APPEND, 0o644)
+		if openErr == nil {
+			if _, seekErr := src.Seek(lstat.Size(), io.SeekStart); seekErr == nil {
+				dst = f
+				startOffset = lstat.Size()
+			} else {
+				_ = f.Close()
+			}
+		}
+	}
+	if dst == nil {
+		dst, err = os.Create(local)
+		if err != nil {
+			return err
+		}
+		startOffset = 0
+	}
 	defer dst.Close()
+
+	if startOffset > 0 {
+		fmt.Fprintf(os.Stderr, "srv pull: resuming %s from %d/%d bytes\n", local, startOffset, remoteSize)
+	}
 	_, err = io.Copy(dst, src)
 	return err
 }

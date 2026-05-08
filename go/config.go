@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"time"
 )
 
 // ConfigDir is the on-disk location of all srv state.
@@ -53,6 +54,16 @@ type Profile struct {
 	// the wire. nil = default true. ~70% size reduction for code, single-
 	// digit ms CPU on the hot path.
 	CompressSync *bool `json:"compress_sync,omitempty"`
+	// DialAttempts: how many times to attempt the initial TCP dial / SSH
+	// handshake before giving up. Default 1 (no retry, current behavior).
+	// Set to 3-5 on flaky networks where the first SYN sometimes drops.
+	// Auth and host-key errors never retry -- another attempt won't change
+	// the answer.
+	DialAttempts int `json:"dial_attempts,omitempty"`
+	// DialBackoff: initial wait between dial retries; doubles each attempt
+	// up to a 30s cap. Default "500ms". Parsed via time.ParseDuration so
+	// "1s" / "200ms" / "2s500ms" all work.
+	DialBackoff string `json:"dial_backoff,omitempty"`
 	// Free-form bag for unknown keys forwarded from older Python configs.
 	Extra map[string]any `json:"-"`
 	// Name is the profile's lookup key in Config.Profiles. Populated by
@@ -108,6 +119,24 @@ func (p *Profile) GetDefaultCwd() string {
 		return "~"
 	}
 	return p.DefaultCwd
+}
+
+func (p *Profile) GetDialAttempts() int {
+	if p.DialAttempts < 1 {
+		return 1
+	}
+	return p.DialAttempts
+}
+
+func (p *Profile) GetDialBackoff() time.Duration {
+	if p.DialBackoff == "" {
+		return 500 * time.Millisecond
+	}
+	d, err := time.ParseDuration(p.DialBackoff)
+	if err != nil || d < 0 {
+		return 500 * time.Millisecond
+	}
+	return d
 }
 
 // SchemaVersion identifies the current on-disk JSON shape. Bumped when a

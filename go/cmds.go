@@ -277,6 +277,11 @@ func applyProfileSet(p *Profile, key, value string) {
 		p.KeepaliveCount = n
 	case "control_persist":
 		p.ControlPersist = value
+	case "dial_attempts":
+		n, _ := strconv.Atoi(value)
+		p.DialAttempts = n
+	case "dial_backoff":
+		p.DialBackoff = value
 	case "sync_root":
 		p.SyncRoot = value
 	case "jump":

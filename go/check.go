@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"net"
 	"os"
+	"sort"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -228,11 +230,49 @@ func printDiagError(err error, profile *Profile) {
 	}
 }
 
-func cmdCheck(cfg *Config, profileOverride string) int {
+func cmdCheck(args []string, cfg *Config, profileOverride string) int {
+	rtt := false
+	count := 10
+	interval := 200 * time.Millisecond
+	for i := 0; i < len(args); i++ {
+		a := args[i]
+		switch {
+		case a == "--rtt":
+			rtt = true
+		case a == "--count" && i+1 < len(args):
+			if n, err := strconv.Atoi(args[i+1]); err == nil && n > 0 {
+				count = n
+			}
+			i++
+		case strings.HasPrefix(a, "--count="):
+			if n, err := strconv.Atoi(strings.TrimPrefix(a, "--count=")); err == nil && n > 0 {
+				count = n
+			}
+		case a == "--interval" && i+1 < len(args):
+			if d, err := time.ParseDuration(args[i+1]); err == nil && d > 0 {
+				interval = d
+			}
+			i++
+		case strings.HasPrefix(a, "--interval="):
+			if d, err := time.ParseDuration(strings.TrimPrefix(a, "--interval=")); err == nil && d > 0 {
+				interval = d
+			}
+		default:
+			if strings.HasPrefix(a, "-") {
+				fatal("error: unknown check flag %q", a)
+			}
+		}
+	}
+
 	name, profile, err := ResolveProfile(cfg, profileOverride)
 	if err != nil {
 		fatal("%v", err)
 	}
+
+	if rtt {
+		return runRTTProbe(profile, name, count, interval)
+	}
+
 	user := profile.User
 	host := profile.Host
 	target := host
@@ -266,4 +306,84 @@ func cmdCheck(cfg *Config, profileOverride string) int {
 		fmt.Println(line)
 	}
 	return 1
+}
+
+// runRTTProbe times `count` SSH-level keepalive round trips against the
+// profile's server and prints a per-probe + summary report. Useful when
+// you want to know whether `srv` is slow because of the server, the link,
+// or your local environment.
+//
+// Returns 1 if more than half the probes were lost (link is unusable),
+// otherwise 0.
+func runRTTProbe(profile *Profile, name string, count int, interval time.Duration) int {
+	user := profile.User
+	host := profile.Host
+	target := host
+	if user != "" {
+		target = user + "@" + host
+	}
+	fmt.Printf("rtt probe %s: %s:%d  (%d samples, %v interval)\n\n", name, target, profile.GetPort(), count, interval)
+
+	c, err := DialOpts(profile, dialOpts{strictHostKey: false})
+	if err != nil {
+		printDiagError(err, profile)
+		return 1
+	}
+	defer c.Close()
+
+	samples := make([]time.Duration, 0, count)
+	lost := 0
+	for i := 0; i < count; i++ {
+		start := time.Now()
+		_, _, err := c.Conn.SendRequest("keepalive@openssh.com", true, nil)
+		elapsed := time.Since(start)
+		if err != nil {
+			lost++
+			fmt.Printf("%3d/%d   lost   (%v)\n", i+1, count, err)
+		} else {
+			samples = append(samples, elapsed)
+			fmt.Printf("%3d/%d   %v\n", i+1, count, elapsed.Truncate(time.Microsecond))
+		}
+		if i < count-1 {
+			time.Sleep(interval)
+		}
+	}
+
+	fmt.Println()
+	if len(samples) == 0 {
+		fmt.Println("all probes lost -- connection up but no replies. Check server keepalive policy.")
+		return 1
+	}
+
+	sort.Slice(samples, func(i, j int) bool { return samples[i] < samples[j] })
+	min := samples[0]
+	max := samples[len(samples)-1]
+	var sum time.Duration
+	for _, s := range samples {
+		sum += s
+	}
+	avg := sum / time.Duration(len(samples))
+	median := samples[len(samples)/2]
+	loss := float64(lost) * 100 / float64(count)
+
+	tr := func(d time.Duration) time.Duration { return d.Truncate(time.Microsecond) }
+	fmt.Printf("samples : %d ok, %d lost  (loss %.1f%%)\n", len(samples), lost, loss)
+	fmt.Printf("rtt     : min %v  med %v  avg %v  max %v\n", tr(min), tr(median), tr(avg), tr(max))
+
+	jitter := tr(max - min)
+	switch {
+	case loss >= 5:
+		fmt.Printf("verdict : packet loss is high (%.1f%%); link is flaky\n", loss)
+	case avg > 200*time.Millisecond:
+		fmt.Printf("verdict : high latency (avg %v); commands will feel slow\n", tr(avg))
+	case jitter > 100*time.Millisecond:
+		fmt.Printf("verdict : noticeable jitter (max-min = %v)\n", jitter)
+	default:
+		fmt.Println("verdict : link looks healthy")
+	}
+
+	if lost*2 > count {
+		return 1
+	}
+	return 0
 }

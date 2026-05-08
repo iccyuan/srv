@@ -436,8 +436,10 @@ PowerShell 的脚本会**烧入 srv.exe 的绝对路径**(因为 ArgumentComplet
 | `multiplex` | true | 启用 ControlMaster 连接复用 |
 | `compression` | true | SSH 传输压缩 |
 | `connect_timeout` | 10 | 握手超时(秒) |
-| `keepalive_interval` | 30 | KeepAlive 探测间隔(秒) |
+| `keepalive_interval` | 30 | SSH 应用层 KeepAlive 探测间隔(秒);弱网调小到 10-15 |
 | `keepalive_count` | 3 | 连续多少次失败后判定断线 |
+| `dial_attempts` | 1 | 初始 TCP 拨号 / SSH 握手失败时的重试次数(2.6.4+);弱网设 3-5。Auth / host-key 错误永远不重试 |
+| `dial_backoff` | `500ms` | 重试之间的等待起点,每次翻倍至 30s 封顶。`time.ParseDuration` 格式 |
 | `control_persist` | `10m` | ControlMaster socket 闲置保留时长 |
 | `sync_root` | null | `srv sync` 的默认远端根(命令行不带位置参数时用) |
 | `sync_exclude` | `[]` | `srv sync` 的 profile 级追加排除(与默认排除合并) |
@@ -479,24 +481,38 @@ $ SRV_SESSION=ci-build-42 srv ./run.sh
 
 ## 网络弹性
 
-每次 ssh / scp 自动带上:
+弱网(高 ping、丢包、NAT idle 杀连接)下 srv 的四层防护,从内核到协议:
+
+| 层 | 默认 | 调参 | 作用 |
+|---|---|---|---|
+| **TCP keepalive(OS 层)** | 始终开,15 秒探测 | 不可配,无副作用 | NAT/防火墙 idle 杀掉的死连接,内核几十秒内察觉,SSH 立刻收到 EOF 而非挂死 |
+| **SSH keepalive(应用层)** | 30 秒一次,连续 3 次失败判断线(=90s 内 down) | profile 的 `keepalive_interval` / `keepalive_count` | 服务端正常但 SSH 通道静默(中间节点丢包),客户端主动 ping;同时阻止远端 idle-kill |
+| **daemon 池化连接** | 自动起,30 分钟全空闲自停 | 无 | 一次握手多次复用,绕过 ~2.7s 冷握手成本 |
+| **拨号重试**(2.6.4+) | 关(`dial_attempts=1`) | profile 的 `dial_attempts` / `dial_backoff` | 第一次 SYN 丢包 / RST 时自动重试,弱网首发失败 90% 自愈 |
+
+**典型弱网调参**(以"高 ping ~250ms,偶尔丢包"为例):
+
+```sh
+srv config set <profile> keepalive_interval 15      # 更激进的 SSH 探测
+srv config set <profile> keepalive_count 4          # 多容忍一次抖动
+srv config set <profile> dial_attempts 4            # 头两次失败也再试两次
+srv config set <profile> dial_backoff 800ms         # 退避起步,后续 1.6s / 3.2s / 6.4s,30s 封顶
+srv config set <profile> connect_timeout 20         # 单次握手 timeout 抬高(默认 10s)
+```
+
+**测链路质量** —— 不知道是 srv 慢还是网慢时:
 
 ```
--o ControlMaster=auto
--o ControlPath=~/.srv/cm/%C.sock
--o ControlPersist=10m
--o ConnectTimeout=10
--o ServerAliveInterval=30
--o ServerAliveCountMax=3
--o TCPKeepAlive=yes
--o Compression=yes
+srv check --rtt                  # 默认跑 10 个 SSH 级 RTT 探测,出 min/med/avg/max + loss%
+srv check --rtt --count 30       # 跑更长的样本
+srv check --rtt --interval 50ms  # 加密采样,看抖动
 ```
 
-**复用**:第一次握手后 socket 留存 10 分钟,后续 `srv` 调用走 socket 直接发送命令,跳过 TCP/SSH 握手。延迟从 100–300ms 降到 <30ms。
+输出末尾的 verdict 会标 `link looks healthy` / `high latency` / `noticeable jitter` / `packet loss is high`,对应该往哪个方向调。
 
-**重试**:握手失败(ssh exit==255 且 5 秒内退出)自动重试,退避 1s / 2s,共 3 次。`-t` 和 `-d` 跳过重试以避免重放风险。
+**断点续传** —— `srv push` / `srv pull` 大文件传到一半断网时,2.6.4+ 自动续(只续单文件,目录递归是文件粒度续)。检测条件:远端已有部分文件且 size 严格小于本地 → 从断点续;不匹配 → 全量重传。
 
-**断线判定**:30 秒一次 KeepAlive,3 次失败(共 90 秒)判定断线退出,而不是无限挂着。
+**`srv -d` 是真正抗断网的姿势** —— 后台任务用 nohup + 输出落 `~/.srv-jobs/<id>.log`,本地连接断了不影响远端进程,事后 `srv logs <id> -f` / `srv kill <id>` 接回来。
 
 ---
 

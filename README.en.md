@@ -437,8 +437,10 @@ Set with `srv config set <profile> <key> <value>`. Bool strings (`true`/`false`)
 | `multiplex` | true | Enable ControlMaster connection sharing |
 | `compression` | true | SSH transport compression |
 | `connect_timeout` | 10 | Handshake timeout (seconds) |
-| `keepalive_interval` | 30 | Keepalive probe interval (seconds) |
+| `keepalive_interval` | 30 | SSH-level keepalive probe interval (seconds); drop to 10-15 on flaky networks |
 | `keepalive_count` | 3 | Probes that must fail before declaring the link dead |
+| `dial_attempts` | 1 | Number of times to retry the initial TCP dial / SSH handshake on transient failure (2.6.4+); set 3-5 on flaky networks. Auth / host-key errors never retry |
+| `dial_backoff` | `500ms` | Initial wait between dial retries; doubles each attempt up to 30s. `time.ParseDuration` format |
 | `control_persist` | `10m` | How long ControlMaster sockets linger idle |
 | `sync_root` | null | Default remote root for `srv sync` (used when no positional arg given) |
 | `sync_exclude` | `[]` | Profile-level extra excludes for `srv sync`, merged with defaults |
@@ -480,24 +482,38 @@ $ SRV_SESSION=ci-build-42 srv ./run.sh
 
 ## Network resilience
 
-Every ssh / scp call automatically gets:
+Four layers of protection against bad networks (high ping, packet loss, NAT idle-kill), kernel up to protocol:
+
+| Layer | Default | Tunable | What it does |
+|---|---|---|---|
+| **TCP keepalive (OS)** | always on, 15 s probes | not configurable, no downside | NAT/firewall-killed dead conns surface as EOF in seconds, not as a hung write |
+| **SSH keepalive (app)** | every 30 s, 3 missed = dead (~90 s total) | profile `keepalive_interval` / `keepalive_count` | Active probing keeps the SSH channel alive when intermediate hops drop packets, and prevents server-side idle kills |
+| **Daemon connection pool** | auto-spawned, exits after 30 min idle | nothing to tune | One handshake, many calls — sidesteps the ~2.7 s cold-handshake cost |
+| **Dial retry** (2.6.4+) | off (`dial_attempts=1`) | profile `dial_attempts` / `dial_backoff` | Auto-retry when the first SYN drops or hits an RST. Heals ~90% of "first call failed on flaky link" cases. Auth / host-key errors never retry. |
+
+**Tuning recipe for "high ping ~250 ms, occasional loss"**:
+
+```sh
+srv config set <profile> keepalive_interval 15      # tighter SSH probes
+srv config set <profile> keepalive_count 4          # tolerate one extra hiccup
+srv config set <profile> dial_attempts 4            # try up to 4 dials
+srv config set <profile> dial_backoff 800ms         # 800ms / 1.6s / 3.2s / 6.4s, capped at 30s
+srv config set <profile> connect_timeout 20         # bigger per-attempt budget
+```
+
+**Measure the link** — when you don't know whether srv is slow or the network is:
 
 ```
--o ControlMaster=auto
--o ControlPath=~/.srv/cm/%C.sock
--o ControlPersist=10m
--o ConnectTimeout=10
--o ServerAliveInterval=30
--o ServerAliveCountMax=3
--o TCPKeepAlive=yes
--o Compression=yes
+srv check --rtt                  # 10 SSH-level RTT samples; min/med/avg/max + loss%
+srv check --rtt --count 30       # longer sample
+srv check --rtt --interval 50ms  # tighter spacing for jitter view
 ```
 
-**Multiplexing**: after the first handshake, the socket sticks around for 10 minutes. Subsequent `srv` calls reuse it and skip TCP/SSH handshake — latency drops from 100–300 ms to under 30 ms on flaky links.
+The trailing `verdict:` line tags the link as `healthy` / `high latency` / `noticeable jitter` / `packet loss is high`, pointing you at the right knob.
 
-**Retry**: handshake-class failures (ssh exit==255 within 5 seconds) auto-retry up to 3 times with 1 s / 2 s backoff. `-t` (interactive) and `-d` (spawn) skip retry to avoid replay hazards.
+**Resumable transfers** — when `srv push` / `srv pull` of a large file is interrupted, 2.6.4+ resumes from the partial offset on the next try (single-file granularity; works inside directory recursion too). Triggered when the destination already exists and is strictly smaller than the source; otherwise it does a full overwrite.
 
-**Dead-link detection**: 30 s keepalive probes; 3 consecutive failures (90 s total) declare the link dead instead of hanging forever.
+**`srv -d` is the truly disconnect-proof option** — backgrounded jobs run under `nohup` with output to `~/.srv-jobs/<id>.log`, so a local connection drop doesn't kill the remote process. Reattach with `srv logs <id> -f` / `srv kill <id>`.
 
 ---
 

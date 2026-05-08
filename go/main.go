@@ -31,6 +31,7 @@ Quick start:
   srv -t htop                    interactive (TTY) command
   srv -P dev rsync ...           override profile for a single call
   srv check                      probe connectivity; diagnose key/host/port issues
+  srv check --rtt [--count N]    measure SSH-level RTT + packet loss
   srv doctor                     local config / daemon / SSH readiness report
   srv doctor --json              machine-readable diagnostics
   srv shell                      interactive remote shell (cwd-positioned)
@@ -213,7 +214,7 @@ func run(args []string) int {
 	case "status":
 		return cmdStatus(cfg, opts.profile)
 	case "check":
-		return cmdCheck(cfg, opts.profile)
+		return cmdCheck(rest[1:], cfg, opts.profile)
 	case "doctor":
 		return cmdDoctor(rest[1:], cfg, opts.profile)
 	case "shell":
