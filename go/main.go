@@ -12,7 +12,7 @@ import (
 
 // Version is overridable at build time via -ldflags "-X main.Version=...".
 // goreleaser sets it from the git tag on release builds.
-var Version = "2.6.5"
+var Version = "2.6.6"
 
 const helpEN = `srv - run commands on a remote SSH server with persistent cwd.
 

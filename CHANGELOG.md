@@ -1,5 +1,39 @@
 # Changelog
 
+## [Go 2.6.6] - 2026-05-10
+
+### Added
+- **`srv guard` —— MCP 高危操作确认开关(默认关闭,per-shell 开启)**。开启后 MCP 的 `run`/`detach` 命令命中高危 pattern(`rm -rf` / `dd of=` / `mkfs` / `shutdown`/`reboot`/`halt`/`poweroff` / `drop database/table` / `truncate -` / `> /dev/sd|nvme` / `chattr -i` 等)时拦截,需传 `confirm: true` 才放行;`sync` 在 `delete=true` 且非 dry-run 时同样拦截。`status` 工具回显 guard 状态便于模型先查再决定。优先级:`SRV_GUARD=1` env > session record > 默认关。CLI:`srv guard [on|off|status]`。
+- **`srv color` —— CLI 远端命令彩色输出(默认开启,所有平台)**。在非 TTY 模式给 `srv <cmd>` 注入 prologue:`export CLICOLOR_FORCE=1 FORCE_COLOR=1` + ls/grep/egrep/fgrep 函数包装(强制 `--color=always`)。MCP 路径**完全不走 prologue**,模型只看到纯文本。`srv color [on|off|use <name>|list|status]`,关闭即 `srv color off`。
+- **5 个内置主题**:`dracula`(默认)、`gruvbox-dark`、`nord`、`solarized-dark`、`tokyonight`。每个都是嵌入二进制的 `.sh` 文件(`//go:embed colors/*.sh`),用户也能 `cp` 到 `~/.srv/init/<name>.sh` 后修改作起点。
+- **6 种 drop-in 主题文件格式**(放 `~/.srv/init/`):`.sh`(原始 shell)、`.itermcolors`(iTerm2 plist)、`.toml`(Alacritty 新)、`.yml`/`.yaml`(Alacritty 老)、`.conf`(Kitty)、`.Xresources`(xterm/URxvt)。基本能消化 [iTerm2-Color-Schemes](https://github.com/mbadolato/iTerm2-Color-Schemes) 整个仓库。所有 parser 都是字符串扫描,**零第三方依赖**。
+
+### Changed
+- **MCP 内存/token 大幅优化**:
+  - `run` 工具的 stdout/stderr 不再同时塞进 text Content **和** `structuredContent`(之前是双份,模型历史里直接翻倍)。
+  - `run` 输出 cap 在 64 KiB 合并,超出截断 + marker 提示用 `head/tail/grep`(避免 `cat large.log` 撑爆模型上下文)。
+  - 7 个工具(`status`/`list_profiles`/`doctor`/`daemon_status`/`env`/`list_jobs`/`detach`)的响应从 pretty-printed JSON 双份改为 compact JSON 单份(去重 + 去 indent 共省 ~65%)。
+  - `tail_log` 不再把 tail 内容同时放 text 和 `structured.tail`。
+  - `sync --dry-run` / `sync_delete_dry_run` 的 `structuredContent` 不再带完整 files/deletes 数组(text 已截断显示),改为 `*_count`。
+  - 工具描述字符串瘦身,空 description 字段不输出。
+- **MCP `run` 改走 daemon**(之前每次都直接 `Dial`,~2.7s 冷握手;现在复用 daemon 池化连接)。
+- **per-window session(Windows)**:`SessionID()` 不再跳过 `cmd.exe`,每个 cmd / PowerShell / bash 窗口独立 session id。`srv color` / `srv guard` / `srv use` / `srv cd` 真正成为 per-window 状态。Python launcher 仍跳过(它确实是透明层)。
+
+### Fixed
+- **`runRemoteCapture` 的 keepalive goroutine 延迟退出**:`Client.Close()` 后要等下一个 keepalive_interval(默认 30s)才退,高频 MCP 调用时短期堆积大量空转 goroutine。加 `stopCh` + `closeOnce`,Close 立刻通知。
+- **daemon `lsCache` map 永不删除条目**:TTL 只在读时检查,key 一直堆积。`gc()` 加扫描清理。
+- **`prefetchSubdirs` 无界**:一次 tab 补全可能触发上百次后台 ls。加 `daemonPrefetchLimit = 24`。
+- **`sync_watch` 重叠上传**:debounce 期间事件密集时可能并行起两个 `tarUploadStream`。加 `running` 标志互斥 + 排队重试。
+- **`runCheck` 内层 Dial 超时未受外层 15s 上限约束**:用户改大 `connect_timeout` 时 goroutine 比 runCheck 活得久。`dialTimeout = min(connect_timeout, 14s)`。
+- **远端 `LS_COLORS=""` 空串导致 GNU ls 即使 `--color=always` 也不出色**(典型场景:zsh `eval "$(dircolors -b)"` 在 dircolors 数据库缺失时刷成空)。prologue 自带 dircolors 默认色板兜底。
+
+### Notes
+- 默认行为变化仅限 CLI:之前没颜色,现在有(可 `srv color off` 关)。
+- MCP 行为只是变快变省 token,**没新增任何对模型的 prompt 内容**。
+- guard 默认关闭,不开启不影响任何现有 MCP 流程。
+
+---
+
 ## [Go 2.6.5] - 2026-05-09
 
 ### Added
