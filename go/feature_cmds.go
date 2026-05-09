@@ -431,37 +431,50 @@ var colorReservedNames = map[string]bool{
 	"on": true, "off": true, "auto": true,
 }
 
+// colorBuiltinFallbackPalette is a minimal, well-understood LS_COLORS
+// string used as a fallback when neither the local nor the remote
+// environment has a meaningful one. It's the classic dircolors-default
+// palette: dirs blue, links cyan, executables green, archives red,
+// images/media magenta. Anything else stays default-foreground.
+const colorBuiltinFallbackPalette = `di=01;34:ln=01;36:so=01;35:pi=33:bd=33;01:cd=33;01:or=01;05;37;41:mi=01;05;37;41:ex=01;32:*.tar=01;31:*.tgz=01;31:*.gz=01;31:*.bz2=01;31:*.xz=01;31:*.zip=01;31:*.7z=01;31:*.rpm=01;31:*.deb=01;31:*.jpg=01;35:*.jpeg=01;35:*.png=01;35:*.gif=01;35:*.bmp=01;35:*.svg=01;35:*.mp3=01;35:*.mp4=01;35:*.mkv=01;35:*.avi=01;35`
+
 // colorBuiltinPrologue is the prologue used by both `srv color on`
 // and the platform-auto path on linux/mac. Strategy:
 //
-//   - Forward local LS_COLORS so the palette matches what the user
-//     sees in their own terminal.
 //   - Force colour env (CLICOLOR_FORCE for BSD ls, FORCE_COLOR for
-//     Node-flavoured tools).
-//   - Use aliases rather than shell functions. zsh expands aliases
-//     by default (ALIASES option) even non-interactively, which is
-//     where shell functions fail silently in some setups (observed:
-//     zsh -c with our cmd nested in `(...)` left functions undefined
-//     while aliases work). For bash, `shopt -s expand_aliases` flips
-//     the non-interactive default; absent in zsh/dash (silently
-//     ignored via 2>/dev/null).
-//
-// One alias per line so a parser hiccup on one entry doesn't kill
-// the rest. Trailing 2>/dev/null on shopt to silence the expected
-// error in shells that don't have it.
+//     Node-flavoured tools, COLORTERM for misc).
+//   - LS_COLORS handling:
+//   - If the local shell has one set, forward it -- the user's own
+//     palette wins.
+//   - Otherwise on the remote: only override when LS_COLORS is empty
+//     (`""`, not unset). Some distros' default zsh init does
+//     `eval "$(dircolors -b)"` on a system whose dircolors database
+//     is missing/broken, leaving LS_COLORS exported as an empty
+//     string. GNU ls reads that as "no rules" and refuses to emit
+//     any colour even with --color=always. We patch with a sane
+//     built-in palette in that case.
+//   - Use shell functions for the wrapper, not aliases. Functions
+//     dispatch at runtime and work in any POSIX-ish shell. Aliases
+//     have parse-time semantics that bite us in zsh -c when the
+//     definition and the use are in the same parsed unit.
 func colorBuiltinPrologue() string {
 	var b strings.Builder
+	b.WriteString("export CLICOLOR=1 CLICOLOR_FORCE=1 FORCE_COLOR=1 COLORTERM=truecolor\n")
 	if v := os.Getenv("LS_COLORS"); v != "" {
 		b.WriteString("export LS_COLORS=")
 		b.WriteString(shQuote(v))
 		b.WriteByte('\n')
+	} else {
+		// Patch only when remote is empty; if remote already has a
+		// non-empty value we trust it.
+		b.WriteString(`[ -n "$LS_COLORS" ] || export LS_COLORS=`)
+		b.WriteString(shQuote(colorBuiltinFallbackPalette))
+		b.WriteByte('\n')
 	}
-	b.WriteString("export CLICOLOR=1 CLICOLOR_FORCE=1 FORCE_COLOR=1\n")
-	b.WriteString("shopt -s expand_aliases 2>/dev/null\n")
-	b.WriteString("alias ls='ls --color=always'\n")
-	b.WriteString("alias grep='grep --color=always'\n")
-	b.WriteString("alias egrep='egrep --color=always'\n")
-	b.WriteString("alias fgrep='fgrep --color=always'\n")
+	b.WriteString(`ls()    { command ls    --color=always "$@"; }` + "\n")
+	b.WriteString(`grep()  { command grep  --color=always "$@"; }` + "\n")
+	b.WriteString(`egrep() { command egrep --color=always "$@"; }` + "\n")
+	b.WriteString(`fgrep() { command fgrep --color=always "$@"; }` + "\n")
 	return b.String()
 }
 
