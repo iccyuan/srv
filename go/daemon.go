@@ -726,6 +726,15 @@ func (s *daemonState) gc() {
 			delete(s.pool, name)
 		}
 	}
+	// Drop expired ls cache entries. Without this the map's keys grow
+	// without bound across a long-running daemon (every distinct directory
+	// ever tab-completed sticks around forever, even though the TTL check
+	// in cachedListing makes them functionally dead).
+	for k, e := range s.lsCache {
+		if now.Sub(e.cached) > lsCacheTTL {
+			delete(s.lsCache, k)
+		}
+	}
 	idle := now.Sub(s.lastReq) > daemonIdleTTL
 	s.mu.Unlock()
 	if idle {

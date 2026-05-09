@@ -29,6 +29,13 @@ type Client struct {
 	chain   []*ssh.Client
 	sftpMu  sync.Mutex
 	sftp    *sftp.Client
+	// stopCh is closed by Close() so the keepalive goroutine returns
+	// immediately instead of waiting up to one full keepalive_interval
+	// for its next tick. Matters for short-lived clients (every MCP
+	// `run` that bypasses the daemon dials a fresh client) where many
+	// idle keepalive goroutines pile up otherwise.
+	stopCh    chan struct{}
+	closeOnce sync.Once
 }
 
 // dialOpts controls the auth/host-key behavior for one Dial call.
@@ -144,7 +151,7 @@ func dialOnce(profile *Profile, defaultUser string, mkConfig func(string) *ssh.C
 		return nil, err
 	}
 
-	c := &Client{Profile: profile, Conn: conn, chain: chain}
+	c := &Client{Profile: profile, Conn: conn, chain: chain, stopCh: make(chan struct{})}
 	if interval := profile.GetKeepaliveInterval(); interval > 0 {
 		go c.runKeepalive(interval, profile.GetKeepaliveCount())
 	}
@@ -256,24 +263,37 @@ func (c *Client) runKeepalive(intervalSec, maxFails int) {
 	ticker := time.NewTicker(time.Duration(intervalSec) * time.Second)
 	defer ticker.Stop()
 	failures := 0
-	for range ticker.C {
-		if c.Conn == nil {
+	for {
+		select {
+		case <-c.stopCh:
 			return
-		}
-		_, _, err := c.Conn.SendRequest("keepalive@openssh.com", true, nil)
-		if err != nil {
-			failures++
-			if failures >= maxFails {
-				_ = c.Conn.Close()
+		case <-ticker.C:
+			if c.Conn == nil {
 				return
 			}
-		} else {
-			failures = 0
+			_, _, err := c.Conn.SendRequest("keepalive@openssh.com", true, nil)
+			if err != nil {
+				failures++
+				if failures >= maxFails {
+					_ = c.Conn.Close()
+					return
+				}
+			} else {
+				failures = 0
+			}
 		}
 	}
 }
 
 func (c *Client) Close() error {
+	// Signal the keepalive goroutine first so it returns immediately
+	// rather than waiting up to one keepalive_interval (default 30s) for
+	// its next tick. closeOnce protects against double-close panics.
+	c.closeOnce.Do(func() {
+		if c.stopCh != nil {
+			close(c.stopCh)
+		}
+	})
 	c.sftpMu.Lock()
 	if c.sftp != nil {
 		_ = c.sftp.Close()

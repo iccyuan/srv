@@ -162,6 +162,41 @@ func tryDaemonStreamRun(profileName, cwd, command string) (int, bool) {
 	}
 }
 
+// tryDaemonRunCapture runs `command` via the daemon's pooled SSH and
+// returns the captured stdout/stderr/exit_code. Returns (nil, false) when
+// no daemon is reachable or it answered with a non-OK -- caller should
+// fall back to a direct dial in either case.
+//
+// Unlike tryDaemonStreamRun this is for the MCP `run` tool path: the
+// caller wants a single buffered result, not real-time streaming. Reusing
+// the daemon's pooled SSH avoids the ~2.7s cold handshake every call.
+func tryDaemonRunCapture(profileName, cwd, command string) (*RunCaptureResult, bool) {
+	conn := daemonDial(200 * time.Millisecond)
+	if conn == nil {
+		if !ensureDaemon() {
+			return nil, false
+		}
+		conn = daemonDial(200 * time.Millisecond)
+		if conn == nil {
+			return nil, false
+		}
+	}
+	defer conn.Close()
+	// deadline=0: arbitrary-duration commands shouldn't get cut off mid-run.
+	resp, err := daemonCall(conn, daemonRequest{
+		Op: "run", Profile: profileName, Cwd: cwd, Command: command,
+	}, 0)
+	if err != nil || resp == nil || !resp.OK {
+		return nil, false
+	}
+	return &RunCaptureResult{
+		Stdout:   resp.Stdout,
+		Stderr:   resp.Stderr,
+		ExitCode: resp.ExitCode,
+		Cwd:      cwd,
+	}, true
+}
+
 // tryDaemonCd validates the target cwd via the daemon.
 //
 // Returns:

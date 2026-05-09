@@ -42,8 +42,18 @@ func runRemoteStream(profile *Profile, cwd, cmd string, tty bool) int {
 }
 
 // runRemoteCapture opens a connection, runs `cmd` capturing output, closes.
+//
+// Tries the daemon first when the profile is named -- the pooled SSH
+// connection reuses the handshake (~2.7s cold) and avoids spawning a
+// fresh keepalive goroutine per call. Falls back to a direct dial when
+// no daemon is reachable.
 func runRemoteCapture(profile *Profile, cwd, cmd string) (*RunCaptureResult, error) {
 	cmd = applyRemoteEnv(profile, cmd)
+	if profile.Name != "" {
+		if res, ok := tryDaemonRunCapture(profile.Name, cwd, cmd); ok {
+			return res, nil
+		}
+	}
 	c, err := Dial(profile)
 	if err != nil {
 		return &RunCaptureResult{

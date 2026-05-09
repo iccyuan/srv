@@ -297,10 +297,17 @@ func mcpHandleTool(name string, args map[string]any, cfg *Config) toolResult {
 			text += res.Stderr
 		}
 		text += fmt.Sprintf("\n[exit %d cwd %s]", res.ExitCode, cwd)
+		// Stdout/Stderr live in the text Content; don't duplicate them
+		// into StructuredContent -- the MCP client (Claude Code) keeps
+		// both in its conversation history, doubling memory for large
+		// command outputs.
 		return toolResult{
-			Content:           []toolContent{{Type: "text", Text: text}},
-			IsError:           res.ExitCode != 0,
-			StructuredContent: res,
+			Content: []toolContent{{Type: "text", Text: text}},
+			IsError: res.ExitCode != 0,
+			StructuredContent: map[string]any{
+				"exit_code": res.ExitCode,
+				"cwd":       cwd,
+			},
 		}
 
 	case "cd":
