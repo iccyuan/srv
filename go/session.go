@@ -210,10 +210,14 @@ func ColorPresetPath(name string) string {
 	return filepath.Join(ColorPresetsDir(), name+".sh")
 }
 
-// ListColorPresets enumerates the *.sh files in ColorPresetsDir(),
-// returning their names without the extension. Returns nil + nil
-// when the dir doesn't exist (treated as "no presets configured",
-// not an error -- the directory is created on demand by the user).
+// ListColorPresets enumerates user-supplied theme files in
+// ColorPresetsDir() and returns their basenames (extension stripped).
+// Accepts .sh / .itermcolors / .toml. When several files share a
+// basename, only one entry appears -- loadColorPresetBody resolves
+// the precedence at use time.
+//
+// Returns nil + nil when the dir doesn't exist; the directory is
+// created on demand by the user.
 func ListColorPresets() ([]string, error) {
 	dir := ColorPresetsDir()
 	entries, err := os.ReadDir(dir)
@@ -223,15 +227,26 @@ func ListColorPresets() ([]string, error) {
 		}
 		return nil, err
 	}
+	accepted := map[string]bool{}
+	for _, ext := range supportedThemeExts {
+		accepted[ext] = true
+	}
+	seen := map[string]bool{}
 	out := make([]string, 0, len(entries))
 	for _, e := range entries {
 		if e.IsDir() {
 			continue
 		}
-		name := e.Name()
-		if strings.HasSuffix(name, ".sh") {
-			out = append(out, strings.TrimSuffix(name, ".sh"))
+		ext := strings.ToLower(filepath.Ext(e.Name()))
+		if !accepted[ext] {
+			continue
 		}
+		base := strings.TrimSuffix(e.Name(), filepath.Ext(e.Name()))
+		if base == "" || seen[base] {
+			continue
+		}
+		out = append(out, base)
+		seen[base] = true
 	}
 	return out, nil
 }

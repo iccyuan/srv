@@ -509,14 +509,29 @@ var colorReservedNames = map[string]bool{
 func colorBuiltinPrologue() string {
 	var b strings.Builder
 	b.WriteString("export CLICOLOR=1 CLICOLOR_FORCE=1 FORCE_COLOR=1 COLORTERM=truecolor\n")
-	if v := os.Getenv("LS_COLORS"); v != "" {
-		b.WriteString("export LS_COLORS=")
-		b.WriteString(shQuote(v))
-		b.WriteByte('\n')
-	} else if content, ok := builtinThemeContent(builtinDefaultTheme); ok {
-		b.WriteString(content)
-		if !strings.HasSuffix(content, "\n") {
+
+	// Forward the local shell's LS_COLORS only on linux/mac. Those
+	// platforms have a real shell theme convention (vivid, dircolors,
+	// distro defaults) and the user's interactive palette is the most
+	// natural thing to mirror onto the remote. Windows is excluded:
+	// any LS_COLORS env you'd see there typically leaked in via WSL or
+	// git-bash and isn't representative of the user's chosen terminal
+	// theme, so we use the embedded default instead.
+	forwarded := false
+	if runtime.GOOS == "linux" || runtime.GOOS == "darwin" {
+		if v := os.Getenv("LS_COLORS"); v != "" {
+			b.WriteString("export LS_COLORS=")
+			b.WriteString(shQuote(v))
 			b.WriteByte('\n')
+			forwarded = true
+		}
+	}
+	if !forwarded {
+		if content, ok := builtinThemeContent(builtinDefaultTheme); ok {
+			b.WriteString(content)
+			if !strings.HasSuffix(content, "\n") {
+				b.WriteByte('\n')
+			}
 		}
 	}
 	b.WriteString(`ls()    { command ls    --color=always "$@"; }` + "\n")
@@ -566,12 +581,35 @@ func colorPrologue() string {
 	return b.String()
 }
 
-// loadColorPresetBody returns the shell snippet for a named preset,
-// looking first at the user's ~/.srv/init/<name>.sh and falling back
-// to a shipped built-in theme. Empty string if nothing matches.
+// userPresetExt returns the first matching extension for a user-
+// supplied theme file at ~/.srv/init/<name><ext>, in precedence order.
+// "" when no file of that name exists.
+func userPresetExt(name string) string {
+	dir := ColorPresetsDir()
+	for _, ext := range supportedThemeExts {
+		if _, err := os.Stat(filepath.Join(dir, name+ext)); err == nil {
+			return ext
+		}
+	}
+	return ""
+}
+
+// loadColorPresetBody returns the shell snippet for a named preset.
+// Lookup order:
+//
+//  1. ~/.srv/init/<name>.sh         -- raw shell snippet (highest)
+//  2. ~/.srv/init/<name>.itermcolors -- iTerm2 plist, parsed and
+//     converted to LS_COLORS truecolor on the fly
+//  3. ~/.srv/init/<name>.toml        -- Alacritty TOML, same idea
+//  4. embedded colors/<name>.sh     -- shipped built-in
+//
+// Empty string if nothing matches.
 func loadColorPresetBody(name string) string {
-	if data, err := os.ReadFile(ColorPresetPath(name)); err == nil && len(data) > 0 {
-		return string(data)
+	dir := ColorPresetsDir()
+	for _, ext := range supportedThemeExts {
+		if body := loadThemeFile(filepath.Join(dir, name+ext)); body != "" {
+			return body
+		}
 	}
 	if content, ok := builtinThemeContent(name); ok {
 		return content
@@ -641,20 +679,23 @@ func cmdColor(args []string) int {
 		if len(userPresets) > 0 {
 			fmt.Printf("user (%s):\n", ColorPresetsDir())
 			for _, p := range userPresets {
-				fmt.Printf("  %s%s\n", mark(p), p)
+				ext := userPresetExt(p)
+				fmt.Printf("  %s%-24s %s\n", mark(p), p, ext)
 			}
 		}
 		fmt.Println("built-in:")
 		for _, p := range builtinThemeNames() {
 			suffix := ""
 			if userSet[p] {
-				suffix = "  (overridden by user file)"
+				suffix = "(overridden by user file)"
 			} else if p == builtinDefaultTheme {
-				suffix = "  (default)"
+				suffix = "(default)"
 			}
-			fmt.Printf("  %s%s%s\n", mark(p), p, suffix)
+			fmt.Printf("  %s%-24s %s\n", mark(p), p, suffix)
 		}
-		fmt.Println("\nuse with: srv color use <name>")
+		fmt.Println()
+		fmt.Println("supported user formats: .sh / .itermcolors / .toml (Alacritty)")
+		fmt.Println("apply with: srv color use <name>")
 		return 0
 	case "use":
 		if len(args) < 2 || args[1] == "" {
@@ -667,12 +708,10 @@ func cmdColor(args []string) int {
 			fmt.Fprintf(os.Stderr, "color use: %q is a reserved mode name; use `srv color %s` directly.\n", name, name)
 			return 2
 		}
-		// Accept the name if either a user file or a built-in theme
-		// of that name exists.
-		_, userErr := os.Stat(ColorPresetPath(name))
+		userExt := userPresetExt(name)
 		_, builtin := builtinThemeContent(name)
-		if userErr != nil && !builtin {
-			fmt.Fprintf(os.Stderr, "color use: %q not found (no %s and no built-in theme)\n", name, ColorPresetPath(name))
+		if userExt == "" && !builtin {
+			fmt.Fprintf(os.Stderr, "color use: %q not found in %s (looked for *.sh / *.itermcolors / *.toml) and no built-in theme matches.\n", name, ColorPresetsDir())
 			fmt.Fprintln(os.Stderr, "list available with `srv color list`.")
 			return 1
 		}
@@ -682,8 +721,8 @@ func cmdColor(args []string) int {
 			return 1
 		}
 		origin := "built-in"
-		if userErr == nil {
-			origin = "user"
+		if userExt != "" {
+			origin = "user " + userExt
 		}
 		fmt.Printf("color: using %s preset %q (session=%s)\n", origin, name, sid)
 		return 0
@@ -700,9 +739,9 @@ func cmdColor(args []string) int {
 		default:
 			origin := "missing"
 			location := ""
-			if _, err := os.Stat(ColorPresetPath(mode)); err == nil {
-				origin = "user"
-				location = " at " + ColorPresetPath(mode)
+			if ext := userPresetExt(mode); ext != "" {
+				origin = "user " + ext
+				location = " at " + filepath.Join(ColorPresetsDir(), mode+ext)
 			} else if _, ok := builtinThemeContent(mode); ok {
 				origin = "built-in"
 			}
