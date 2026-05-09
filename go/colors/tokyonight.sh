@@ -1,0 +1,6 @@
+# Tokyo Night theme - https://github.com/folke/tokyonight.nvim
+#   neon dark palette inspired by Tokyo nightscape:
+#   violet dirs, cyan links, green executables, coral archives,
+#   pink media, sand-yellow data, bright cyan source.
+# Activate with `srv color use tokyonight`.
+export LS_COLORS='no=00:fi=00:di=01;38;5;105:ln=01;38;5;111:pi=38;5;221:so=01;38;5;176:bd=38;5;221;01:cd=38;5;221;01:or=01;38;5;204:mi=01;38;5;204:ex=01;38;5;115:*.tar=38;5;204:*.tgz=38;5;204:*.gz=38;5;204:*.bz2=38;5;204:*.xz=38;5;204:*.zst=38;5;204:*.zip=38;5;204:*.7z=38;5;204:*.rar=38;5;204:*.rpm=38;5;204:*.deb=38;5;204:*.iso=38;5;204:*.jpg=38;5;176:*.jpeg=38;5;176:*.png=38;5;176:*.gif=38;5;176:*.bmp=38;5;176:*.svg=38;5;176:*.ico=38;5;176:*.webp=38;5;176:*.mp3=38;5;176:*.mp4=38;5;176:*.mkv=38;5;176:*.avi=38;5;176:*.mov=38;5;176:*.flac=38;5;176:*.wav=38;5;176:*.md=38;5;221:*.txt=38;5;221:*.log=38;5;221:*.json=38;5;221:*.yaml=38;5;221:*.yml=38;5;221:*.toml=38;5;221:*.conf=38;5;221:*.ini=38;5;221:*.csv=38;5;221:*.go=01;38;5;111:*.py=01;38;5;111:*.js=01;38;5;111:*.ts=01;38;5;111:*.tsx=01;38;5;111:*.jsx=01;38;5;111:*.rs=01;38;5;111:*.c=01;38;5;111:*.h=01;38;5;111:*.cpp=01;38;5;111:*.hpp=01;38;5;111:*.java=01;38;5;111:*.kt=01;38;5;111:*.swift=01;38;5;111:*.rb=01;38;5;111:*.php=01;38;5;111:*.sh=38;5;115:*.bash=38;5;115:*.zsh=38;5;115:*.fish=38;5;115'

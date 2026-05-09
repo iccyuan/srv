@@ -2,9 +2,10 @@ package main
 
 import (
 	"bytes"
-	_ "embed"
+	"embed"
 	"encoding/json"
 	"fmt"
+	"io/fs"
 	"os"
 	"os/exec"
 	"path"
@@ -14,15 +15,59 @@ import (
 	"strings"
 )
 
-// colorDefaultTheme is the built-in fallback theme baked into the
-// binary. It's a real shell snippet (not a Go string built up with
-// concatenation) so the palette stays editable as data, not code.
-// The same file format is what users put in ~/.srv/init/<name>.sh
-// for custom presets, so the default is also a perfectly valid
-// drop-in starting template.
+// builtinThemes is the bundled directory of colour theme files.
+// Each colors/*.sh is a theme; the basename (without .sh) is what
+// `srv color use <name>` accepts. Themes shipped here are popular
+// dark palettes (dracula, gruvbox, nord, ...) so users can pick
+// one that matches their terminal without having to author a
+// preset by hand. User files in ~/.srv/init/<name>.sh override a
+// built-in of the same name -- copy, tweak, override.
 //
-//go:embed colors/dracula.sh
-var colorDefaultTheme string
+//go:embed colors/*.sh
+var builtinThemes embed.FS
+
+// builtinDefaultTheme names the theme used when no preset is
+// selected. The file is special: it tries the user's own dircolors
+// db first (~/.dir_colors / ~/.dircolors) before falling back to
+// its hardcoded palette, so a hand-tuned remote setup wins over
+// our defaults. Other shipped themes activate unconditionally
+// because the user explicitly picked them.
+const builtinDefaultTheme = "dracula"
+
+// builtinThemeContent loads colors/<name>.sh from the embedded
+// FS. Returns the file body and true on success; "" / false when
+// the theme isn't shipped.
+func builtinThemeContent(name string) (string, bool) {
+	if name == "" {
+		return "", false
+	}
+	data, err := builtinThemes.ReadFile("colors/" + name + ".sh")
+	if err != nil {
+		return "", false
+	}
+	return string(data), true
+}
+
+// builtinThemeNames lists the basenames of every shipped theme,
+// sorted alphabetically. Used by `srv color list`.
+func builtinThemeNames() []string {
+	entries, err := fs.ReadDir(builtinThemes, "colors")
+	if err != nil {
+		return nil
+	}
+	out := make([]string, 0, len(entries))
+	for _, e := range entries {
+		if e.IsDir() {
+			continue
+		}
+		n := e.Name()
+		if strings.HasSuffix(n, ".sh") {
+			out = append(out, strings.TrimSuffix(n, ".sh"))
+		}
+	}
+	sort.Strings(out)
+	return out
+}
 
 func cmdDoctor(args []string, cfg *Config, profileOverride string) int {
 	asJSON := len(args) > 0 && args[0] == "--json"
@@ -468,9 +513,9 @@ func colorBuiltinPrologue() string {
 		b.WriteString("export LS_COLORS=")
 		b.WriteString(shQuote(v))
 		b.WriteByte('\n')
-	} else {
-		b.WriteString(colorDefaultTheme)
-		if !strings.HasSuffix(colorDefaultTheme, "\n") {
+	} else if content, ok := builtinThemeContent(builtinDefaultTheme); ok {
+		b.WriteString(content)
+		if !strings.HasSuffix(content, "\n") {
 			b.WriteByte('\n')
 		}
 	}
@@ -484,13 +529,12 @@ func colorBuiltinPrologue() string {
 // colorPrologue resolves the per-session colour selection into the
 // shell snippet inlined before a non-TTY CLI command. Resolution:
 //
-//  1. mode == "off"        -> "" (explicit opt-out)
-//  2. mode == "on" / ""    -> built-in prologue. Default on, any
-//     platform: the user typed `srv ls -al` to look at output, plain
-//     text loses information that colour conveys for free.
-//  3. mode == <preset name>-> read ~/.srv/init/<name>.sh and inline
-//     it; if the file is gone, fall back to the built-in prologue
-//     instead of silently losing colour.
+//  1. mode == "off"            -> "" (explicit opt-out)
+//  2. mode == "" / "on" / "auto" -> built-in prologue. Default on,
+//     any platform.
+//  3. mode == <preset name>    -> first try ~/.srv/init/<name>.sh
+//     (user-authored), then a shipped built-in theme of that name.
+//     If neither exists, fall back to the default prologue.
 //
 // MCP never goes through this path; it stays plain text.
 func colorPrologue() string {
@@ -501,19 +545,38 @@ func colorPrologue() string {
 	case "", "on", "auto":
 		return colorBuiltinPrologue()
 	}
-	// Custom preset.
-	path := ColorPresetPath(mode)
-	if data, err := os.ReadFile(path); err == nil && len(data) > 0 {
-		body := string(data)
-		if !strings.HasSuffix(body, "\n") {
-			body += "\n"
-		}
-		return body
+
+	body := loadColorPresetBody(mode)
+	if body == "" {
+		// Stale pin -- the file or built-in vanished. Don't lose
+		// colour silently; reuse the default.
+		return colorBuiltinPrologue()
 	}
-	// File vanished after selection. Fall back to built-in prologue
-	// so colour still works instead of silently dropping it because
-	// of a stale session pin.
-	return colorBuiltinPrologue()
+
+	var b strings.Builder
+	b.WriteString("export CLICOLOR=1 CLICOLOR_FORCE=1 FORCE_COLOR=1 COLORTERM=truecolor\n")
+	b.WriteString(body)
+	if !strings.HasSuffix(body, "\n") {
+		b.WriteByte('\n')
+	}
+	b.WriteString(`ls()    { command ls    --color=always "$@"; }` + "\n")
+	b.WriteString(`grep()  { command grep  --color=always "$@"; }` + "\n")
+	b.WriteString(`egrep() { command egrep --color=always "$@"; }` + "\n")
+	b.WriteString(`fgrep() { command fgrep --color=always "$@"; }` + "\n")
+	return b.String()
+}
+
+// loadColorPresetBody returns the shell snippet for a named preset,
+// looking first at the user's ~/.srv/init/<name>.sh and falling back
+// to a shipped built-in theme. Empty string if nothing matches.
+func loadColorPresetBody(name string) string {
+	if data, err := os.ReadFile(ColorPresetPath(name)); err == nil && len(data) > 0 {
+		return string(data)
+	}
+	if content, ok := builtinThemeContent(name); ok {
+		return content
+	}
+	return ""
 }
 
 // cmdColor implements `srv color [on|off|auto|use <name>|list|status]`.
@@ -559,31 +622,44 @@ func cmdColor(args []string) int {
 		fmt.Printf("color: auto (session=%s)\n", sid)
 		return 0
 	case "list":
-		presets, err := ListColorPresets()
+		userPresets, err := ListColorPresets()
 		if err != nil {
 			fmt.Fprintln(os.Stderr, "color list:", err)
 			return 1
 		}
-		dir := ColorPresetsDir()
-		if len(presets) == 0 {
-			fmt.Printf("(no presets in %s)\n", dir)
-			fmt.Println("drop a *.sh file there, then `srv color use <name>` to apply.")
-			fmt.Println("for the default behaviour, just `srv color on` -- no file needed.")
-			return 0
+		userSet := map[string]bool{}
+		for _, p := range userPresets {
+			userSet[p] = true
 		}
 		active := GetColorPreset()
-		for _, p := range presets {
-			marker := "  "
-			if p == active {
-				marker = "* "
+		mark := func(name string) string {
+			if name == active {
+				return "* "
 			}
-			fmt.Printf("%s%s\n", marker, p)
+			return "  "
 		}
+		if len(userPresets) > 0 {
+			fmt.Printf("user (%s):\n", ColorPresetsDir())
+			for _, p := range userPresets {
+				fmt.Printf("  %s%s\n", mark(p), p)
+			}
+		}
+		fmt.Println("built-in:")
+		for _, p := range builtinThemeNames() {
+			suffix := ""
+			if userSet[p] {
+				suffix = "  (overridden by user file)"
+			} else if p == builtinDefaultTheme {
+				suffix = "  (default)"
+			}
+			fmt.Printf("  %s%s%s\n", mark(p), p, suffix)
+		}
+		fmt.Println("\nuse with: srv color use <name>")
 		return 0
 	case "use":
 		if len(args) < 2 || args[1] == "" {
 			fmt.Fprintln(os.Stderr, "usage: srv color use <name>")
-			fmt.Fprintln(os.Stderr, "(or `srv color on` if you don't need a custom preset.)")
+			fmt.Fprintln(os.Stderr, "list available with `srv color list`.")
 			return 2
 		}
 		name := args[1]
@@ -591,9 +667,12 @@ func cmdColor(args []string) int {
 			fmt.Fprintf(os.Stderr, "color use: %q is a reserved mode name; use `srv color %s` directly.\n", name, name)
 			return 2
 		}
-		path := ColorPresetPath(name)
-		if _, err := os.Stat(path); err != nil {
-			fmt.Fprintf(os.Stderr, "color use: %s not found at %s\n", name, path)
+		// Accept the name if either a user file or a built-in theme
+		// of that name exists.
+		_, userErr := os.Stat(ColorPresetPath(name))
+		_, builtin := builtinThemeContent(name)
+		if userErr != nil && !builtin {
+			fmt.Fprintf(os.Stderr, "color use: %q not found (no %s and no built-in theme)\n", name, ColorPresetPath(name))
 			fmt.Fprintln(os.Stderr, "list available with `srv color list`.")
 			return 1
 		}
@@ -602,7 +681,11 @@ func cmdColor(args []string) int {
 			fmt.Fprintln(os.Stderr, "color use:", err)
 			return 1
 		}
-		fmt.Printf("color: using preset %q (session=%s)\n", name, sid)
+		origin := "built-in"
+		if userErr == nil {
+			origin = "user"
+		}
+		fmt.Printf("color: using %s preset %q (session=%s)\n", origin, name, sid)
 		return 0
 	case "status", "":
 		sid := SessionID()
@@ -615,7 +698,15 @@ func cmdColor(args []string) int {
 		case "", "auto":
 			fmt.Printf("color: on by default (session=%s; `srv color off` to disable)\n", sid)
 		default:
-			fmt.Printf("color: preset %q at %s (session=%s)\n", mode, ColorPresetPath(mode), sid)
+			origin := "missing"
+			location := ""
+			if _, err := os.Stat(ColorPresetPath(mode)); err == nil {
+				origin = "user"
+				location = " at " + ColorPresetPath(mode)
+			} else if _, ok := builtinThemeContent(mode); ok {
+				origin = "built-in"
+			}
+			fmt.Printf("color: %s preset %q%s (session=%s)\n", origin, mode, location, sid)
 		}
 		return 0
 	}

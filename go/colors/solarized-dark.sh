@@ -1,0 +1,6 @@
+# Solarized Dark theme - https://ethanschoonover.com/solarized
+#   Ethan Schoonover's selective-contrast palette: deep blue dirs,
+#   teal links, olive-green executables, bright red archives,
+#   magenta media, yellow data.
+# Activate with `srv color use solarized-dark`.
+export LS_COLORS='no=00:fi=00:di=01;38;5;33:ln=01;38;5;37:pi=38;5;136:so=01;38;5;125:bd=38;5;136;01:cd=38;5;136;01:or=01;38;5;160:mi=01;38;5;160:ex=01;38;5;64:*.tar=38;5;160:*.tgz=38;5;160:*.gz=38;5;160:*.bz2=38;5;160:*.xz=38;5;160:*.zst=38;5;160:*.zip=38;5;160:*.7z=38;5;160:*.rar=38;5;160:*.rpm=38;5;160:*.deb=38;5;160:*.iso=38;5;160:*.jpg=38;5;125:*.jpeg=38;5;125:*.png=38;5;125:*.gif=38;5;125:*.bmp=38;5;125:*.svg=38;5;125:*.ico=38;5;125:*.webp=38;5;125:*.mp3=38;5;125:*.mp4=38;5;125:*.mkv=38;5;125:*.avi=38;5;125:*.mov=38;5;125:*.flac=38;5;125:*.wav=38;5;125:*.md=38;5;136:*.txt=38;5;136:*.log=38;5;136:*.json=38;5;136:*.yaml=38;5;136:*.yml=38;5;136:*.toml=38;5;136:*.conf=38;5;136:*.ini=38;5;136:*.csv=38;5;136:*.go=01;38;5;37:*.py=01;38;5;37:*.js=01;38;5;37:*.ts=01;38;5;37:*.tsx=01;38;5;37:*.jsx=01;38;5;37:*.rs=01;38;5;37:*.c=01;38;5;37:*.h=01;38;5;37:*.cpp=01;38;5;37:*.hpp=01;38;5;37:*.java=01;38;5;37:*.kt=01;38;5;37:*.swift=01;38;5;37:*.rb=01;38;5;37:*.php=01;38;5;37:*.sh=38;5;64:*.bash=38;5;64:*.zsh=38;5;64:*.fish=38;5;64'
