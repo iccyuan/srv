@@ -431,12 +431,24 @@ var colorReservedNames = map[string]bool{
 	"on": true, "off": true, "auto": true,
 }
 
-// colorBuiltinPrologue is the prologue used by both the explicit
-// `srv color on` mode and the platform-auto path on linux/mac. It
-// forwards the local LS_COLORS palette (if set) and force-emits
-// colour for ls/grep regardless of TTY. Defined as shell functions
-// rather than aliases because non-interactive bash skips alias
-// expansion by default.
+// colorBuiltinPrologue is the prologue used by both `srv color on`
+// and the platform-auto path on linux/mac. Strategy:
+//
+//   - Forward local LS_COLORS so the palette matches what the user
+//     sees in their own terminal.
+//   - Force colour env (CLICOLOR_FORCE for BSD ls, FORCE_COLOR for
+//     Node-flavoured tools).
+//   - Use aliases rather than shell functions. zsh expands aliases
+//     by default (ALIASES option) even non-interactively, which is
+//     where shell functions fail silently in some setups (observed:
+//     zsh -c with our cmd nested in `(...)` left functions undefined
+//     while aliases work). For bash, `shopt -s expand_aliases` flips
+//     the non-interactive default; absent in zsh/dash (silently
+//     ignored via 2>/dev/null).
+//
+// One alias per line so a parser hiccup on one entry doesn't kill
+// the rest. Trailing 2>/dev/null on shopt to silence the expected
+// error in shells that don't have it.
 func colorBuiltinPrologue() string {
 	var b strings.Builder
 	if v := os.Getenv("LS_COLORS"); v != "" {
@@ -444,11 +456,12 @@ func colorBuiltinPrologue() string {
 		b.WriteString(shQuote(v))
 		b.WriteByte('\n')
 	}
-	b.WriteString("export CLICOLOR=1 CLICOLOR_FORCE=1\n")
-	b.WriteString(`ls() { command ls --color=always "$@"; }` + "\n")
-	b.WriteString(`grep() { command grep --color=always "$@"; }` + "\n")
-	b.WriteString(`egrep() { command egrep --color=always "$@"; }` + "\n")
-	b.WriteString(`fgrep() { command fgrep --color=always "$@"; }` + "\n")
+	b.WriteString("export CLICOLOR=1 CLICOLOR_FORCE=1 FORCE_COLOR=1\n")
+	b.WriteString("shopt -s expand_aliases 2>/dev/null\n")
+	b.WriteString("alias ls='ls --color=always'\n")
+	b.WriteString("alias grep='grep --color=always'\n")
+	b.WriteString("alias egrep='egrep --color=always'\n")
+	b.WriteString("alias fgrep='fgrep --color=always'\n")
 	return b.String()
 }
 
