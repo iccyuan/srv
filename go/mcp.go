@@ -18,10 +18,10 @@ const mcpProtocolVersion = "2024-11-05"
 //
 // Rationale: the MCP client keeps every tool result in its conversation
 // history, so a single `cat /var/log/...` or `journalctl -n 100000`
-// permanently inflates the client's memory by the full payload. 256 KiB
-// is generous for typical command output (a long `ls -laR`, `ps auxf`,
-// `git log --stat`) while drawing a hard line against runaway dumps.
-const mcpRunTextMax = 256 * 1024
+// permanently inflates the client's memory by the full payload. 64 KiB is
+// enough for typical command output while drawing a hard line against
+// runaway dumps.
+const mcpRunTextMax = 64 * 1024
 
 type jsonRPCRequest struct {
 	JSONRPC string          `json:"jsonrpc"`
@@ -82,23 +82,23 @@ func mcpToolDefs() []toolDef {
 	return []toolDef{
 		{
 			Name:        "run",
-			Description: "Run a shell command on the remote in the persisted cwd. Returns stdout, stderr, exit code.",
+			Description: "Run remote shell command.",
 			InputSchema: map[string]any{
 				"type": "object",
 				"properties": map[string]any{
-					"command": str("Shell command to execute on the remote host."),
-					"profile": str("Optional profile override."),
+					"command": str("Remote shell command."),
+					"profile": str(""),
 				},
 				"required": []string{"command"},
 			},
 		},
 		{
 			Name:        "cd",
-			Description: "Change the persisted remote cwd for this MCP session.",
+			Description: "Set remote cwd.",
 			InputSchema: map[string]any{
 				"type": "object",
 				"properties": map[string]any{
-					"path":    str("Target path (absolute, ~-prefixed, or relative)."),
+					"path":    str("Path."),
 					"profile": str(""),
 				},
 				"required": []string{"path"},
@@ -106,7 +106,7 @@ func mcpToolDefs() []toolDef {
 		},
 		{
 			Name:        "pwd",
-			Description: "Get the persisted remote cwd for this session.",
+			Description: "Get remote cwd.",
 			InputSchema: map[string]any{
 				"type":       "object",
 				"properties": map[string]any{"profile": str("")},
@@ -114,7 +114,7 @@ func mcpToolDefs() []toolDef {
 		},
 		{
 			Name:        "use",
-			Description: "Pin a profile for this MCP session. Pass `clear: true` to unpin.",
+			Description: "Pin or clear profile.",
 			InputSchema: map[string]any{
 				"type": "object",
 				"properties": map[string]any{
@@ -125,7 +125,7 @@ func mcpToolDefs() []toolDef {
 		},
 		{
 			Name:        "status",
-			Description: "Get the active profile, target host, current cwd, and session id.",
+			Description: "Show active profile.",
 			InputSchema: map[string]any{
 				"type":       "object",
 				"properties": map[string]any{"profile": str("")},
@@ -133,12 +133,12 @@ func mcpToolDefs() []toolDef {
 		},
 		{
 			Name:        "list_profiles",
-			Description: "List profiles, the global default, and the session pin.",
+			Description: "List profiles.",
 			InputSchema: map[string]any{"type": "object", "properties": map[string]any{}},
 		},
 		{
 			Name:        "check",
-			Description: "Probe SSH connectivity. Returns a diagnosis tag (ok / no-key / host-key-changed / dns / refused / no-route / tcp-timeout / timeout / perm-denied / unknown) and human-readable fix steps for failures.",
+			Description: "Probe SSH connectivity.",
 			InputSchema: map[string]any{
 				"type":       "object",
 				"properties": map[string]any{"profile": str("")},
@@ -146,7 +146,7 @@ func mcpToolDefs() []toolDef {
 		},
 		{
 			Name:        "doctor",
-			Description: "Run local srv diagnostics for config, daemon, and active profile readiness.",
+			Description: "Run local diagnostics.",
 			InputSchema: map[string]any{
 				"type":       "object",
 				"properties": map[string]any{"profile": str("")},
@@ -154,30 +154,30 @@ func mcpToolDefs() []toolDef {
 		},
 		{
 			Name:        "daemon_status",
-			Description: "Return daemon running state, pooled profiles, uptime, and protocol version.",
+			Description: "Show daemon status.",
 			InputSchema: map[string]any{"type": "object", "properties": map[string]any{}},
 		},
 		{
 			Name:        "env",
-			Description: "List, set, unset, or clear profile-level remote environment variables.",
+			Description: "Manage remote env.",
 			InputSchema: map[string]any{
 				"type": "object",
 				"properties": map[string]any{
 					"action":  map[string]any{"type": "string", "enum": []string{"list", "set", "unset", "clear"}, "default": "list"},
-					"key":     str("Environment variable name."),
-					"value":   str("Environment variable value for action=set."),
+					"key":     str("Env var name."),
+					"value":   str("Env var value."),
 					"profile": str(""),
 				},
 			},
 		},
 		{
 			Name:        "diff",
-			Description: "Compare a local file with its remote counterpart. Returns a unified diff when git is available.",
+			Description: "Diff local vs remote file.",
 			InputSchema: map[string]any{
 				"type": "object",
 				"properties": map[string]any{
-					"local":   str("Local file path."),
-					"remote":  str("Remote file path. Defaults to local path relative to cwd."),
+					"local":   str("Local file."),
+					"remote":  str("Remote file."),
 					"profile": str(""),
 				},
 				"required": []string{"local"},
@@ -185,12 +185,12 @@ func mcpToolDefs() []toolDef {
 		},
 		{
 			Name:        "push",
-			Description: "Upload a local file or directory to the remote server via SFTP.",
+			Description: "Upload file or directory.",
 			InputSchema: map[string]any{
 				"type": "object",
 				"properties": map[string]any{
 					"local":   str(""),
-					"remote":  str("Optional. Defaults to basename(local) under cwd."),
+					"remote":  str("Remote path."),
 					"profile": str(""),
 				},
 				"required": []string{"local"},
@@ -198,12 +198,12 @@ func mcpToolDefs() []toolDef {
 		},
 		{
 			Name:        "pull",
-			Description: "Download a remote file or directory to the local machine via SFTP.",
+			Description: "Download file or directory.",
 			InputSchema: map[string]any{
 				"type": "object",
 				"properties": map[string]any{
 					"remote":    str(""),
-					"local":     str("Optional. Defaults to current local directory."),
+					"local":     str("Local path."),
 					"recursive": map[string]any{"type": "boolean", "default": false},
 					"profile":   str(""),
 				},
@@ -212,14 +212,14 @@ func mcpToolDefs() []toolDef {
 		},
 		{
 			Name:        "sync",
-			Description: "Bulk-sync changed files local->remote via tar stream, preserving relative paths. Auto-detects git repos.",
+			Description: "Sync local changes to remote.",
 			InputSchema: map[string]any{
 				"type": "object",
 				"properties": map[string]any{
-					"remote_root": str("Remote target root."),
+					"remote_root": str("Remote root."),
 					"mode":        map[string]any{"type": "string", "enum": []string{"git", "mtime", "glob", "list"}},
 					"git_scope":   map[string]any{"type": "string", "enum": []string{"all", "staged", "modified", "untracked"}, "default": "all"},
-					"since":       str("Duration like '2h' (mtime mode)."),
+					"since":       str("Duration, e.g. 2h."),
 					"include":     map[string]any{"type": "array", "items": map[string]any{"type": "string"}},
 					"exclude":     map[string]any{"type": "array", "items": map[string]any{"type": "string"}},
 					"files":       map[string]any{"type": "array", "items": map[string]any{"type": "string"}},
@@ -230,7 +230,7 @@ func mcpToolDefs() []toolDef {
 					"delete_limit": map[string]any{
 						"type":        "integer",
 						"default":     20,
-						"description": "Maximum remote deletes allowed without yes=true. Set 0 to use the default.",
+						"description": "Max deletes without yes=true.",
 					},
 					"profile": str(""),
 				},
@@ -238,7 +238,7 @@ func mcpToolDefs() []toolDef {
 		},
 		{
 			Name:        "sync_delete_dry_run",
-			Description: "Preview remote deletes for git-tracked files deleted locally. Does not transfer or delete.",
+			Description: "Preview sync deletes.",
 			InputSchema: map[string]any{
 				"type":       "object",
 				"properties": map[string]any{"root": str("Local root."), "remote_root": str("Remote root."), "profile": str("")},
@@ -246,7 +246,7 @@ func mcpToolDefs() []toolDef {
 		},
 		{
 			Name:        "detach",
-			Description: "Spawn a detached (nohup) command on the remote. Returns immediately with a job id and pid.",
+			Description: "Start remote detached job.",
 			InputSchema: map[string]any{
 				"type": "object",
 				"properties": map[string]any{
@@ -258,7 +258,7 @@ func mcpToolDefs() []toolDef {
 		},
 		{
 			Name:        "list_jobs",
-			Description: "List local records of detached jobs.",
+			Description: "List detached jobs.",
 			InputSchema: map[string]any{
 				"type":       "object",
 				"properties": map[string]any{"profile": str("")},
@@ -266,7 +266,7 @@ func mcpToolDefs() []toolDef {
 		},
 		{
 			Name:        "tail_log",
-			Description: "Read the last N lines of a detached job's remote log file.",
+			Description: "Tail job log.",
 			InputSchema: map[string]any{
 				"type": "object",
 				"properties": map[string]any{
@@ -278,7 +278,7 @@ func mcpToolDefs() []toolDef {
 		},
 		{
 			Name:        "kill_job",
-			Description: "Send a signal (TERM by default) to a detached job's pid and forget it.",
+			Description: "Signal detached job.",
 			InputSchema: map[string]any{
 				"type": "object",
 				"properties": map[string]any{
@@ -451,8 +451,6 @@ func mcpHandleTool(name string, args map[string]any, cfg *Config) toolResult {
 			"ok":        res.OK,
 			"diagnosis": res.Diagnosis,
 			"exit_code": res.ExitCode,
-			"stderr":    res.Stderr,
-			"advice":    advice,
 		}
 		var text string
 		if res.OK {
@@ -771,9 +769,14 @@ func mcpHandleTool(name string, args map[string]any, cfg *Config) toolResult {
 			text += ": " + terr.Error()
 		}
 		return toolResult{
-			Content:           []toolContent{{Type: "text", Text: text}},
-			IsError:           rc != 0,
-			StructuredContent: map[string]any{"files": files, "deletes": deletes, "remote_root": remoteRoot, "exit_code": rc},
+			Content: []toolContent{{Type: "text", Text: text}},
+			IsError: rc != 0,
+			StructuredContent: map[string]any{
+				"files_count":   len(files),
+				"deletes_count": len(deletes),
+				"remote_root":   remoteRoot,
+				"exit_code":     rc,
+			},
 		}
 
 	case "sync_delete_dry_run":
