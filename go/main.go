@@ -80,6 +80,7 @@ Sessions (per-shell isolation):
 Integrations:
   srv completion <bash|zsh|powershell>   emit shell completion script
   srv mcp                                run as a stdio MCP server
+  srv guard [on|off|status]              MCP confirmation guard for high-risk ops (default off)
   srv daemon                             keep ssh sessions warm (foreground)
   srv daemon status                      show running daemon's pool
   srv daemon status --json               machine-readable daemon status
@@ -165,6 +166,7 @@ const helpZH = `srv - 跨平台 SSH 远端命令工具,持久 cwd / 连接复用
 集成 / 工具:
   srv completion <bash|zsh|powershell>   输出 shell 补全脚本
   srv mcp                                以 stdio MCP server 跑
+  srv guard [on|off|status]              MCP 高危操作确认开关(默认关闭,可针对当前 shell 开启)
   srv daemon                             连接池前台运行(主要给调试)
   srv daemon status [--json]             看池里的 profile / uptime
   srv daemon stop                        停 daemon
@@ -190,7 +192,7 @@ var reservedSubcommands = map[string]bool{
 	"status": true, "check": true, "shell": true, "run": true, "exec": true,
 	"push": true, "pull": true, "sync": true, "tunnel": true, "edit": true,
 	"open": true, "code": true, "diff": true, "doctor": true,
-	"env": true, "install": true, "completion": true, "mcp": true, "daemon": true,
+	"env": true, "install": true, "completion": true, "mcp": true, "daemon": true, "guard": true,
 	"_profiles": true, "_ls": true,
 	"jobs": true, "logs": true, "kill": true, "sessions": true,
 	"help": true, "--help": true, "-h": true,
@@ -341,6 +343,8 @@ func run(args []string) int {
 		return cmdSessions(rest[1:])
 	case "mcp":
 		return cmdMcp(cfg)
+	case "guard":
+		return cmdGuard(rest[1:])
 	case "daemon":
 		return cmdDaemon(rest[1:])
 	case "_profiles":

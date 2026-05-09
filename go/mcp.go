@@ -59,6 +59,66 @@ type toolContent struct {
 	Text string `json:"text"`
 }
 
+// runRiskyTokens are substrings that flag a remote command as
+// destructive enough to require confirm=true when the session guard is
+// on. Matched case-insensitively against the full command string. The
+// list is intentionally short and conservative -- false-positive on a
+// real `rm -rf` is fine (the model can re-issue with confirm=true);
+// false-negatives are the real concern, so we cover the canonical
+// "oh no" set: recursive force delete, raw-disk writes, mkfs, system
+// halt, SQL drops, and explicit truncates.
+var runRiskyTokens = []string{
+	"rm -rf", "rm -fr", "rm -rF", "rm -Rf", "rm -fR", "rm -RF", "rm -FR",
+	"rm --recursive --force", "rm --force --recursive",
+	"rm -r --force", "rm -f --recursive",
+	"dd of=", "dd if=/dev/zero", "dd if=/dev/random", "dd if=/dev/urandom",
+	"mkfs.", "mkfs ",
+	"shutdown ", "shutdown\n", "shutdown;",
+	" reboot", ";reboot", "&&reboot",
+	" halt", "; halt", "&& halt",
+	" poweroff", ";poweroff", "&&poweroff",
+	"drop database", "drop table", "drop schema",
+	"truncate table", "truncate -",
+	":>/", ":> /",
+	"chattr -i",
+	"> /dev/sd", "> /dev/nvme", "> /dev/disk", "> /dev/hd",
+}
+
+// runRiskyMatch reports the first risky token contained in `command`,
+// or "" if none match. Match is case-insensitive.
+func runRiskyMatch(command string) string {
+	if command == "" {
+		return ""
+	}
+	lc := strings.ToLower(command)
+	for _, t := range runRiskyTokens {
+		if strings.Contains(lc, strings.ToLower(t)) {
+			return t
+		}
+	}
+	return ""
+}
+
+// guardBlocked builds a uniform error response when the session guard
+// refuses an operation. The message tells the model both how to
+// proceed (confirm=true) and how to disable the guard entirely (`srv
+// guard off`) so it doesn't have to ask the user back-and-forth.
+func guardBlocked(tool, reason string) toolResult {
+	text := fmt.Sprintf(
+		"guard: %s blocked. %s\nRe-run with confirm=true if intentional, or disable via `srv guard off` (or unset SRV_GUARD).",
+		tool, reason,
+	)
+	return toolResult{
+		IsError: true,
+		Content: []toolContent{{Type: "text", Text: text}},
+		StructuredContent: map[string]any{
+			"guard_blocked": true,
+			"tool":          tool,
+			"reason":        reason,
+		},
+	}
+}
+
 // mcpJSONResult returns a tool result whose Content is a *compact* JSON
 // rendering of `info`, with no separate StructuredContent. Both fields
 // reach the MCP client; duplicating the same JSON in pretty-printed text
@@ -88,6 +148,7 @@ func mcpToolDefs() []toolDef {
 				"properties": map[string]any{
 					"command": str("Remote shell command."),
 					"profile": str(""),
+					"confirm": map[string]any{"type": "boolean", "default": false, "description": "Required when guard is on AND command hits a high-risk pattern (rm -rf, dd, mkfs, drop ...)."},
 				},
 				"required": []string{"command"},
 			},
@@ -233,6 +294,7 @@ func mcpToolDefs() []toolDef {
 						"description": "Max deletes without yes=true.",
 					},
 					"profile": str(""),
+					"confirm": map[string]any{"type": "boolean", "default": false, "description": "Required when guard is on AND delete=true (non-dry-run)."},
 				},
 			},
 		},
@@ -252,6 +314,7 @@ func mcpToolDefs() []toolDef {
 				"properties": map[string]any{
 					"command": str(""),
 					"profile": str(""),
+					"confirm": map[string]any{"type": "boolean", "default": false, "description": "Required when guard is on AND command hits a high-risk pattern."},
 				},
 				"required": []string{"command"},
 			},
@@ -306,6 +369,13 @@ func mcpHandleTool(name string, args map[string]any, cfg *Config) toolResult {
 		cmd, _ := args["command"].(string)
 		if cmd == "" {
 			return textErr("error: command is required")
+		}
+		confirm, _ := args["confirm"].(bool)
+		if GuardOn() && !confirm {
+			if pat := runRiskyMatch(cmd); pat != "" {
+				return guardBlocked("run",
+					fmt.Sprintf("command contains a high-risk pattern %q", pat))
+			}
 		}
 		profName, prof, err := ResolveProfile(cfg, profileOverride)
 		if err != nil {
@@ -414,6 +484,7 @@ func mcpHandleTool(name string, args map[string]any, cfg *Config) toolResult {
 			"session":       sid,
 			"multiplex":     multiplex,
 			"compression":   prof.GetCompression(),
+			"guard":         GuardOn(),
 		})
 
 	case "list_profiles":
@@ -653,6 +724,16 @@ func mcpHandleTool(name string, args map[string]any, cfg *Config) toolResult {
 		if v, ok := args["yes"].(bool); ok {
 			o.yes = v
 		}
+		// Block sync-with-delete under the guard unless confirmed. Done
+		// here so we short-circuit before doing the file walk and remote
+		// dial. Pure dry_run is allowed -- it doesn't mutate state.
+		if o.delete && !o.dryRun && GuardOn() {
+			confirm, _ := args["confirm"].(bool)
+			if !confirm {
+				return guardBlocked("sync",
+					"delete=true would remove remote files")
+			}
+		}
 		if v, ok := args["delete_limit"].(float64); ok {
 			o.deleteLimit = int(v)
 		}
@@ -822,6 +903,13 @@ func mcpHandleTool(name string, args map[string]any, cfg *Config) toolResult {
 		cmd, _ := args["command"].(string)
 		if cmd == "" {
 			return textErr("command is required")
+		}
+		confirm, _ := args["confirm"].(bool)
+		if GuardOn() && !confirm {
+			if pat := runRiskyMatch(cmd); pat != "" {
+				return guardBlocked("detach",
+					fmt.Sprintf("command contains a high-risk pattern %q", pat))
+			}
 		}
 		profName, prof, err := ResolveProfile(cfg, profileOverride)
 		if err != nil {

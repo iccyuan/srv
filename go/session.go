@@ -13,10 +13,18 @@ import (
 //
 //	{ "profile": <pinned profile or null>,
 //	  "cwds":    { profileName: cwd, ... },
+//	  "guard":   <bool, optional>,
 //	  "started": iso, "last_seen": iso }
+//
+// Guard, when true, makes the MCP server refuse high-risk operations
+// (destructive `run`/`detach` patterns, `sync` with delete) unless the
+// caller passes confirm=true. Default off so existing flows are
+// unchanged. Toggled per-shell via `srv guard on|off`, or globally via
+// the SRV_GUARD env var (which trumps the session record).
 type SessionRecord struct {
 	Profile  *string           `json:"profile"`
 	Cwds     map[string]string `json:"cwds"`
+	Guard    bool              `json:"guard,omitempty"`
 	Started  string            `json:"started"`
 	LastSeen string            `json:"last_seen"`
 }
@@ -100,6 +108,43 @@ func saveSessionsWith(sid string, rec *SessionRecord) error {
 	s := loadSessionsFile()
 	s.Sessions[sid] = rec
 	return writeSessionsFile(s)
+}
+
+// GuardOn reports whether the high-risk-op confirmation guard is
+// active for the calling session.
+//
+// Precedence (high to low):
+//  1. SRV_GUARD env: "1"/"true"/"on"/"yes" -> on; "0"/"false"/"off"/"no" -> off.
+//     Use this in MCP server registrations so the guard travels with the
+//     subprocess regardless of which shell session id it inherits.
+//  2. SessionRecord.Guard, set via `srv guard on|off`.
+//  3. Default: off.
+func GuardOn() bool {
+	if v := os.Getenv("SRV_GUARD"); v != "" {
+		switch strings.ToLower(strings.TrimSpace(v)) {
+		case "1", "true", "on", "yes":
+			return true
+		case "0", "false", "off", "no":
+			return false
+		}
+	}
+	sid := SessionID()
+	s := loadSessionsFile()
+	rec, ok := s.Sessions[sid]
+	return ok && rec.Guard
+}
+
+// SetGuard toggles the calling session's guard flag and persists.
+// Returns the resolved session id so callers can echo it back to users
+// (the `srv guard on` command does this so the user can see *which*
+// session it bound to -- handy when SRV_SESSION is set).
+func SetGuard(on bool) (string, error) {
+	sid, rec := TouchSession()
+	rec.Guard = on
+	if err := saveSessionsWith(sid, rec); err != nil {
+		return sid, err
+	}
+	return sid, nil
 }
 
 // PidAlive returns true if a process with the given pid (as string) exists.
