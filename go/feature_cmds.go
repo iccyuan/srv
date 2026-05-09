@@ -484,12 +484,13 @@ func colorBuiltinPrologue() string {
 // colorPrologue resolves the per-session colour selection into the
 // shell snippet inlined before a non-TTY CLI command. Resolution:
 //
-//  1. mode == "off"      -> "" (force off, regardless of platform)
-//  2. mode == "on"       -> built-in prologue (force on, any platform)
-//  3. mode == "" (auto)  -> built-in on linux/mac, "" on windows
-//  4. mode == <name>     -> read ~/.srv/init/<name>.sh and inline it;
-//     if the file is gone, fall back to auto so
-//     colour still works on linux/mac
+//  1. mode == "off"        -> "" (explicit opt-out)
+//  2. mode == "on" / ""    -> built-in prologue. Default on, any
+//     platform: the user typed `srv ls -al` to look at output, plain
+//     text loses information that colour conveys for free.
+//  3. mode == <preset name>-> read ~/.srv/init/<name>.sh and inline
+//     it; if the file is gone, fall back to the built-in prologue
+//     instead of silently losing colour.
 //
 // MCP never goes through this path; it stays plain text.
 func colorPrologue() string {
@@ -497,13 +498,8 @@ func colorPrologue() string {
 	switch mode {
 	case "off":
 		return ""
-	case "on":
+	case "", "on", "auto":
 		return colorBuiltinPrologue()
-	case "", "auto":
-		if runtime.GOOS == "linux" || runtime.GOOS == "darwin" {
-			return colorBuiltinPrologue()
-		}
-		return ""
 	}
 	// Custom preset.
 	path := ColorPresetPath(mode)
@@ -514,13 +510,10 @@ func colorPrologue() string {
 		}
 		return body
 	}
-	// File vanished after selection. Fall back to platform auto so
-	// linux/mac users still get reasonable colour, instead of silently
-	// losing it because of a stale session pin.
-	if runtime.GOOS == "linux" || runtime.GOOS == "darwin" {
-		return colorBuiltinPrologue()
-	}
-	return ""
+	// File vanished after selection. Fall back to built-in prologue
+	// so colour still works instead of silently dropping it because
+	// of a stale session pin.
+	return colorBuiltinPrologue()
 }
 
 // cmdColor implements `srv color [on|off|auto|use <name>|list|status]`.
@@ -620,11 +613,7 @@ func cmdColor(args []string) int {
 		case "off":
 			fmt.Printf("color: off (session=%s)\n", sid)
 		case "", "auto":
-			if runtime.GOOS == "linux" || runtime.GOOS == "darwin" {
-				fmt.Printf("color: auto -> on (%s local, session=%s)\n", runtime.GOOS, sid)
-			} else {
-				fmt.Printf("color: auto -> off (%s local, session=%s; use `srv color on` to force)\n", runtime.GOOS, sid)
-			}
+			fmt.Printf("color: on by default (session=%s; `srv color off` to disable)\n", sid)
 		default:
 			fmt.Printf("color: preset %q at %s (session=%s)\n", mode, ColorPresetPath(mode), sid)
 		}
