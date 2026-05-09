@@ -422,3 +422,48 @@ func cmdGuard(args []string) int {
 	fmt.Fprintln(os.Stderr, "usage: srv guard [on|off|status]")
 	return 2
 }
+
+// cmdColor implements `srv color [on|off|status]`. Toggles the
+// per-session colour-output flag (off by default). When on, the MCP
+// `run` tool prepends a shell prologue that makes colour-aware tools
+// (ls, grep) emit ANSI escapes even though the SSH session lacks a TTY.
+func cmdColor(args []string) int {
+	envHint := func() string {
+		if v := os.Getenv("SRV_COLOR"); v != "" {
+			return fmt.Sprintf("  [SRV_COLOR=%s]", v)
+		}
+		return ""
+	}
+	action := "status"
+	if len(args) > 0 {
+		action = strings.ToLower(args[0])
+	}
+	switch action {
+	case "on", "enable":
+		sid, err := SetColor(true)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "color on:", err)
+			return 1
+		}
+		fmt.Printf("color: on  (session=%s)%s\n", sid, envHint())
+		return 0
+	case "off", "disable":
+		sid, err := SetColor(false)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "color off:", err)
+			return 1
+		}
+		fmt.Printf("color: off (session=%s)%s\n", sid, envHint())
+		return 0
+	case "status", "":
+		sid := SessionID()
+		state := "off"
+		if ColorOn() {
+			state = "on"
+		}
+		fmt.Printf("color: %s (session=%s)%s\n", state, sid, envHint())
+		return 0
+	}
+	fmt.Fprintln(os.Stderr, "usage: srv color [on|off|status]")
+	return 2
+}

@@ -41,6 +41,25 @@ func runRemoteStream(profile *Profile, cwd, cmd string, tty bool) int {
 	return rc
 }
 
+// colorPrologue is prepended to a remote command when the caller has
+// opted into colourised output. Strategy:
+//   - One-shot probe whether `ls --color=always` is accepted (GNU yes,
+//     BSD/macOS no). Result cached in __SRV_C so each invocation is cheap.
+//   - Wrap ls/grep/egrep/fgrep as shell functions so colour escapes are
+//     emitted even though the SSH session has no TTY (auto-detection
+//     would otherwise turn colour off when the stdout is a pipe).
+//   - Export the env vars that other colour-aware tools respect
+//     (Node FORCE_COLOR, BSD CLICOLOR_FORCE, generic COLORTERM/TERM).
+//
+// Functions defined in this prologue are visible to subsequent commands
+// and pipeline stages in the same shell (Bash forks pipelines but
+// inherits functions). They do NOT propagate into `bash -c '...'` /
+// `sh -c '...'`; that's an accepted edge case.
+//
+// All on one line so we can prepend it to the user's command without
+// fighting heredoc / line-continuation quoting in wrapWithCwd.
+const colorPrologue = `__SRV_C=$(command ls --color=always /dev/null >/dev/null 2>&1 && printf -- '--color=always'); ls(){ command ls $__SRV_C "$@"; }; grep(){ command grep --color=always "$@"; }; egrep(){ command egrep --color=always "$@"; }; fgrep(){ command fgrep --color=always "$@"; }; export TERM=${TERM:-xterm-256color} CLICOLOR=1 CLICOLOR_FORCE=1 FORCE_COLOR=1 COLORTERM=truecolor; `
+
 // runRemoteCapture opens a connection, runs `cmd` capturing output, closes.
 //
 // Tries the daemon first when the profile is named -- the pooled SSH
@@ -48,7 +67,20 @@ func runRemoteStream(profile *Profile, cwd, cmd string, tty bool) int {
 // fresh keepalive goroutine per call. Falls back to a direct dial when
 // no daemon is reachable.
 func runRemoteCapture(profile *Profile, cwd, cmd string) (*RunCaptureResult, error) {
+	return runRemoteCaptureOpts(profile, cwd, cmd, false)
+}
+
+// runRemoteCaptureOpts is runRemoteCapture with extra knobs. The bool
+// is split out instead of an opts struct because there's only one knob
+// today and a struct would force every call site to import a package
+// that's not otherwise needed.
+func runRemoteCaptureOpts(profile *Profile, cwd, cmd string, withColor bool) (*RunCaptureResult, error) {
 	cmd = applyRemoteEnv(profile, cmd)
+	if withColor {
+		// Prologue first so its function definitions are in scope for
+		// the env-prefixed user command (`KEY=val foo`) that follows.
+		cmd = colorPrologue + cmd
+	}
 	if profile.Name != "" {
 		if res, ok := tryDaemonRunCapture(profile.Name, cwd, cmd); ok {
 			return res, nil

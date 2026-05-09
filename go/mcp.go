@@ -382,7 +382,7 @@ func mcpHandleTool(name string, args map[string]any, cfg *Config) toolResult {
 			return textErr(err.Error())
 		}
 		cwd := GetCwd(profName, prof)
-		res, _ := runRemoteCapture(prof, cwd, cmd)
+		res, _ := runRemoteCaptureOpts(prof, cwd, cmd, ColorOn())
 		text, truncatedBytes := buildMCPRunText(res, cwd)
 		// Stdout/Stderr live in the text Content; don't duplicate them
 		// into StructuredContent -- the MCP client (Claude Code) keeps
@@ -485,6 +485,7 @@ func mcpHandleTool(name string, args map[string]any, cfg *Config) toolResult {
 			"multiplex":     multiplex,
 			"compression":   prof.GetCompression(),
 			"guard":         GuardOn(),
+			"color":         ColorOn(),
 		})
 
 	case "list_profiles":
