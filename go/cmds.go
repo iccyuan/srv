@@ -386,6 +386,8 @@ func applyProfileSet(p *Profile, key, value string) {
 		p.DialBackoff = value
 	case "sync_root":
 		p.SyncRoot = value
+	case "init_file":
+		p.InitFile = value
 	case "jump":
 		// Comma-separated list of "[user@]host[:port]" hops. Empty / null
 		// clears.
@@ -585,6 +587,17 @@ func cmdRun(args []string, cfg *Config, profileOverride string, tty bool) int {
 	}
 	cmd := strings.Join(args, " ")
 	cmd = applyRemoteEnv(profile, cmd)
+	// In TTY mode the remote allocates a real interactive shell which
+	// already sources ~/.bashrc and friends -- adding our init-file
+	// sourcing on top is redundant. For non-TTY (the capture/stream
+	// path), the remote shell is non-interactive and skips .bashrc, so
+	// this is the only hook the user has to inject aliases / colour /
+	// custom PATH for `srv <cmd>` and the MCP run tool.
+	if !tty {
+		if prefix := remoteInitPrefix(profile); prefix != "" {
+			cmd = prefix + cmd
+		}
+	}
 	cwd := GetCwd(name, profile)
 	return runRemoteStream(profile, cwd, cmd, tty)
 }

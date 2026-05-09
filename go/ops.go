@@ -41,6 +41,30 @@ func runRemoteStream(profile *Profile, cwd, cmd string, tty bool) int {
 	return rc
 }
 
+// remoteInitPrefix returns a leading shell snippet that sources a
+// user-provided init file before the actual command runs, when one is
+// configured. The path resolves in this order:
+//
+//  1. SRV_REMOTE_INIT env -- per-shell / per-MCP-launch override.
+//  2. profile.init_file from ~/.srv/config.json -- per-profile default.
+//  3. "" -- no file, no prefix; default behaviour preserved.
+//
+// The returned snippet uses `[ -f X ] && . X` so a missing file on the
+// remote is a silent no-op (cheap test, doesn't fail the command).
+// Functions / aliases / exports defined by the file stay in scope for
+// the user's command in the same shell, which is the whole point.
+func remoteInitPrefix(profile *Profile) string {
+	p := os.Getenv("SRV_REMOTE_INIT")
+	if p == "" && profile != nil {
+		p = profile.InitFile
+	}
+	if p == "" {
+		return ""
+	}
+	q := shQuotePath(p)
+	return "[ -f " + q + " ] && . " + q + "; "
+}
+
 // runRemoteCapture opens a connection, runs `cmd` capturing output, closes.
 //
 // Tries the daemon first when the profile is named -- the pooled SSH
@@ -49,6 +73,9 @@ func runRemoteStream(profile *Profile, cwd, cmd string, tty bool) int {
 // no daemon is reachable.
 func runRemoteCapture(profile *Profile, cwd, cmd string) (*RunCaptureResult, error) {
 	cmd = applyRemoteEnv(profile, cmd)
+	if prefix := remoteInitPrefix(profile); prefix != "" {
+		cmd = prefix + cmd
+	}
 	if profile.Name != "" {
 		if res, ok := tryDaemonRunCapture(profile.Name, cwd, cmd); ok {
 			return res, nil
