@@ -59,14 +59,30 @@ type toolContent struct {
 	Text string `json:"text"`
 }
 
+// mcpJSONResult returns a tool result whose Content is a *compact* JSON
+// rendering of `info`, with no separate StructuredContent. Both fields
+// reach the MCP client; duplicating the same JSON in pretty-printed text
+// AND a structured payload doubled the tokens many tools were spending
+// on every call. Compact text is enough -- the model parses it fine and
+// pretty-printing was costing ~30% extra whitespace tokens on top.
+func mcpJSONResult(info any) toolResult {
+	b, _ := json.Marshal(info)
+	return toolResult{Content: []toolContent{{Type: "text", Text: string(b)}}}
+}
+
 func mcpToolDefs() []toolDef {
+	// Empty descriptions are dropped so the loaded-once tools/list response
+	// doesn't carry `,"description":""` on every passthrough field.
 	str := func(desc string) map[string]any {
+		if desc == "" {
+			return map[string]any{"type": "string"}
+		}
 		return map[string]any{"type": "string", "description": desc}
 	}
 	return []toolDef{
 		{
 			Name:        "run",
-			Description: "Run a shell command on the configured remote SSH server in the persisted cwd. Returns stdout, stderr, and exit code.",
+			Description: "Run a shell command on the remote in the persisted cwd. Returns stdout, stderr, exit code.",
 			InputSchema: map[string]any{
 				"type": "object",
 				"properties": map[string]any{
@@ -78,7 +94,7 @@ func mcpToolDefs() []toolDef {
 		},
 		{
 			Name:        "cd",
-			Description: "Change the persisted remote working directory for THIS MCP session. Validated by `cd <path> && pwd` on the remote.",
+			Description: "Change the persisted remote cwd for this MCP session.",
 			InputSchema: map[string]any{
 				"type": "object",
 				"properties": map[string]any{
@@ -90,7 +106,7 @@ func mcpToolDefs() []toolDef {
 		},
 		{
 			Name:        "pwd",
-			Description: "Get the persisted remote working directory for this session.",
+			Description: "Get the persisted remote cwd for this session.",
 			InputSchema: map[string]any{
 				"type":       "object",
 				"properties": map[string]any{"profile": str("")},
@@ -117,7 +133,7 @@ func mcpToolDefs() []toolDef {
 		},
 		{
 			Name:        "list_profiles",
-			Description: "List configured SSH profiles, the global default, and what's pinned for this session.",
+			Description: "List profiles, the global default, and the session pin.",
 			InputSchema: map[string]any{"type": "object", "properties": map[string]any{}},
 		},
 		{
@@ -196,7 +212,7 @@ func mcpToolDefs() []toolDef {
 		},
 		{
 			Name:        "sync",
-			Description: "Bulk-sync changed files from local to remote, preserving relative paths via in-process tar streaming. Auto-detects git repo.",
+			Description: "Bulk-sync changed files local->remote via tar stream, preserving relative paths. Auto-detects git repos.",
 			InputSchema: map[string]any{
 				"type": "object",
 				"properties": map[string]any{
@@ -230,7 +246,7 @@ func mcpToolDefs() []toolDef {
 		},
 		{
 			Name:        "detach",
-			Description: "Spawn a long-running command on the remote server, detached via nohup. Returns immediately with a job id and pid.",
+			Description: "Spawn a detached (nohup) command on the remote. Returns immediately with a job id and pid.",
 			InputSchema: map[string]any{
 				"type": "object",
 				"properties": map[string]any{
@@ -387,7 +403,7 @@ func mcpHandleTool(name string, args map[string]any, cfg *Config) toolResult {
 			pinned = *rec.Profile
 		}
 		multiplex := prof.Multiplex == nil || *prof.Multiplex
-		info := map[string]any{
+		return mcpJSONResult(map[string]any{
 			"profile":       profName,
 			"pinned":        pinned,
 			"host":          prof.Host,
@@ -398,12 +414,7 @@ func mcpHandleTool(name string, args map[string]any, cfg *Config) toolResult {
 			"session":       sid,
 			"multiplex":     multiplex,
 			"compression":   prof.GetCompression(),
-		}
-		b, _ := json.MarshalIndent(info, "", "  ")
-		return toolResult{
-			Content:           []toolContent{{Type: "text", Text: string(b)}},
-			StructuredContent: info,
-		}
+		})
 
 	case "list_profiles":
 		sid, rec := TouchSession()
@@ -415,17 +426,12 @@ func mcpHandleTool(name string, args map[string]any, cfg *Config) toolResult {
 		for n := range cfg.Profiles {
 			names = append(names, n)
 		}
-		info := map[string]any{
+		return mcpJSONResult(map[string]any{
 			"default":  cfg.DefaultProfile,
 			"pinned":   pinned,
 			"session":  sid,
 			"profiles": names,
-		}
-		b, _ := json.MarshalIndent(info, "", "  ")
-		return toolResult{
-			Content:           []toolContent{{Type: "text", Text: string(b)}},
-			StructuredContent: info,
-		}
+		})
 
 	case "check":
 		profName, prof, err := ResolveProfile(cfg, profileOverride)
@@ -467,27 +473,26 @@ func mcpHandleTool(name string, args map[string]any, cfg *Config) toolResult {
 
 	case "doctor":
 		checks, ok := doctorChecks(cfg, profileOverride)
-		b, _ := json.MarshalIndent(map[string]any{"ok": ok, "checks": checks}, "", "  ")
-		return toolResult{
-			Content:           []toolContent{{Type: "text", Text: string(b)}},
-			IsError:           !ok,
-			StructuredContent: map[string]any{"ok": ok, "checks": checks},
-		}
+		res := mcpJSONResult(map[string]any{"ok": ok, "checks": checks})
+		res.IsError = !ok
+		return res
 
 	case "daemon_status":
 		conn := daemonDial(time.Second)
 		if conn == nil {
-			info := map[string]any{"running": false}
-			return toolResult{Content: []toolContent{{Type: "text", Text: `{"running":false}`}}, StructuredContent: info}
+			return mcpJSONResult(map[string]any{"running": false})
 		}
 		defer conn.Close()
 		resp, err := daemonCall(conn, daemonRequest{Op: "status"}, 2*time.Second)
 		if err != nil || resp == nil {
 			return textErr(fmt.Sprintf("daemon status failed: %v", err))
 		}
-		info := map[string]any{"running": true, "uptime_sec": resp.Uptime, "profiles_pooled": resp.Profiles, "protocol": resp.V}
-		b, _ := json.MarshalIndent(info, "", "  ")
-		return toolResult{Content: []toolContent{{Type: "text", Text: string(b)}}, StructuredContent: info}
+		return mcpJSONResult(map[string]any{
+			"running":         true,
+			"uptime_sec":      resp.Uptime,
+			"profiles_pooled": resp.Profiles,
+			"protocol":        resp.V,
+		})
 
 	case "env":
 		action, _ := args["action"].(string)
@@ -529,9 +534,7 @@ func mcpHandleTool(name string, args map[string]any, cfg *Config) toolResult {
 		default:
 			return textErr("unknown env action")
 		}
-		info := map[string]any{"profile": profName, "env": prof.Env}
-		b, _ := json.MarshalIndent(info, "", "  ")
-		return toolResult{Content: []toolContent{{Type: "text", Text: string(b)}}, StructuredContent: info}
+		return mcpJSONResult(map[string]any{"profile": profName, "env": prof.Env})
 
 	case "diff":
 		local, _ := args["local"].(string)
@@ -740,9 +743,19 @@ func mcpHandleTool(name string, args map[string]any, cfg *Config) toolResult {
 			if len(deletes) > 0 {
 				text += "\nwould delete:\n" + strings.Join(deletes, "\n")
 			}
+			// Don't re-emit the full files list in structured -- text
+			// already shows the first 200 with a "(N more)" marker, and a
+			// 5000-file repo otherwise puts ~150KB of duplicated paths
+			// into the MCP client's context. Counts are enough for the
+			// model to decide whether to dig deeper via `srv sync` directly.
 			return toolResult{
-				Content:           []toolContent{{Type: "text", Text: text}},
-				StructuredContent: map[string]any{"files": files, "deletes": deletes, "remote_root": remoteRoot, "dry_run": true},
+				Content: []toolContent{{Type: "text", Text: text}},
+				StructuredContent: map[string]any{
+					"files_count":   len(files),
+					"deletes_count": len(deletes),
+					"remote_root":   remoteRoot,
+					"dry_run":       true,
+				},
 			}
 		}
 		rc := 0
@@ -791,9 +804,15 @@ func mcpHandleTool(name string, args map[string]any, cfg *Config) toolResult {
 			remoteRoot = resolveRemotePath(prof.SyncRoot, cwd)
 		}
 		text := fmt.Sprintf("would delete %d files from %s\n%s", len(deletes), remoteRoot, strings.Join(deletes, "\n"))
+		// Text already contains the full deletes list -- don't double it
+		// in structured. Count is enough to verify scope.
 		return toolResult{
-			Content:           []toolContent{{Type: "text", Text: text}},
-			StructuredContent: map[string]any{"deletes": deletes, "remote_root": remoteRoot, "dry_run": true},
+			Content: []toolContent{{Type: "text", Text: text}},
+			StructuredContent: map[string]any{
+				"deletes_count": len(deletes),
+				"remote_root":   remoteRoot,
+				"dry_run":       true,
+			},
 		}
 
 	case "detach":
@@ -809,11 +828,7 @@ func mcpHandleTool(name string, args map[string]any, cfg *Config) toolResult {
 		if err != nil {
 			return textErr(err.Error())
 		}
-		b, _ := json.MarshalIndent(rec, "", "  ")
-		return toolResult{
-			Content:           []toolContent{{Type: "text", Text: string(b)}},
-			StructuredContent: rec,
-		}
+		return mcpJSONResult(rec)
 
 	case "list_jobs":
 		jobs := loadJobsFile().Jobs
@@ -826,11 +841,7 @@ func mcpHandleTool(name string, args map[string]any, cfg *Config) toolResult {
 			}
 			jobs = out
 		}
-		b, _ := json.MarshalIndent(jobs, "", "  ")
-		return toolResult{
-			Content:           []toolContent{{Type: "text", Text: string(b)}},
-			StructuredContent: map[string]any{"jobs": jobs},
-		}
+		return mcpJSONResult(map[string]any{"jobs": jobs})
 
 	case "tail_log":
 		jid, _ := args["id"].(string)
@@ -852,10 +863,14 @@ func mcpHandleTool(name string, args map[string]any, cfg *Config) toolResult {
 		if text == "" {
 			text = res.Stderr
 		}
+		// The tail content lives in Content; don't re-emit it as
+		// structured.tail. With lines=5000 the duplication doubles the
+		// tokens this tool spends per call. The job record is already
+		// available via list_jobs if the model needs metadata.
 		return toolResult{
 			Content:           []toolContent{{Type: "text", Text: text}},
 			IsError:           res.ExitCode != 0,
-			StructuredContent: map[string]any{"job": j, "tail": res.Stdout, "exit_code": res.ExitCode},
+			StructuredContent: map[string]any{"job_id": j.ID, "exit_code": res.ExitCode},
 		}
 
 	case "kill_job":
