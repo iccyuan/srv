@@ -64,14 +64,6 @@ type Profile struct {
 	// up to a 30s cap. Default "500ms". Parsed via time.ParseDuration so
 	// "1s" / "200ms" / "2s500ms" all work.
 	DialBackoff string `json:"dial_backoff,omitempty"`
-	// InitFile: a remote shell file sourced before each captured remote
-	// command (`srv <cmd>` and the MCP `run` tool). Use it to install
-	// aliases / functions / env exports the user wants applied across
-	// every invocation -- e.g. `alias ls='ls --color=always'` to recover
-	// colour output that the non-TTY SSH session would otherwise drop.
-	// Default empty: nothing sourced. The runtime check `[ -f path ]`
-	// keeps a missing file silent rather than spamming errors.
-	InitFile string `json:"init_file,omitempty"`
 	// Free-form bag for unknown keys forwarded from older Python configs.
 	Extra map[string]any `json:"-"`
 	// Name is the profile's lookup key in Config.Profiles. Populated by

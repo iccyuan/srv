@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -11,22 +12,31 @@ import (
 
 // SessionRecord mirrors the Python schema:
 //
-//	{ "profile": <pinned profile or null>,
-//	  "cwds":    { profileName: cwd, ... },
-//	  "guard":   <bool, optional>,
-//	  "started": iso, "last_seen": iso }
+//	{ "profile":      <pinned profile or null>,
+//	  "cwds":         { profileName: cwd, ... },
+//	  "guard":        <bool, optional>,
+//	  "color_preset": <string, optional>,
+//	  "started":      iso, "last_seen": iso }
 //
 // Guard, when true, makes the MCP server refuse high-risk operations
 // (destructive `run`/`detach` patterns, `sync` with delete) unless the
 // caller passes confirm=true. Default off so existing flows are
 // unchanged. Toggled per-shell via `srv guard on|off`, or globally via
 // the SRV_GUARD env var (which trumps the session record).
+//
+// ColorPreset names a shell snippet under ~/.srv/init/<name>.sh that
+// `srv <cmd>` (CLI non-TTY) inlines before the user's command. Empty
+// means use the platform default (forward local LS_COLORS on
+// linux/mac, nothing on windows). Toggled via `srv color use <name>`
+// / `srv color off`. MCP runs are NOT affected -- the model wants
+// plain text, not ANSI escapes.
 type SessionRecord struct {
-	Profile  *string           `json:"profile"`
-	Cwds     map[string]string `json:"cwds"`
-	Guard    bool              `json:"guard,omitempty"`
-	Started  string            `json:"started"`
-	LastSeen string            `json:"last_seen"`
+	Profile     *string           `json:"profile"`
+	Cwds        map[string]string `json:"cwds"`
+	Guard       bool              `json:"guard,omitempty"`
+	ColorPreset string            `json:"color_preset,omitempty"`
+	Started     string            `json:"started"`
+	LastSeen    string            `json:"last_seen"`
 }
 
 type sessionsFile struct {
@@ -145,6 +155,71 @@ func SetGuard(on bool) (string, error) {
 		return sid, err
 	}
 	return sid, nil
+}
+
+// GetColorPreset returns the active colour preset name for the
+// calling session, or "" if none. Used by cmdRun to decide which
+// shell snippet (if any) to inline before the user's command.
+func GetColorPreset() string {
+	sid := SessionID()
+	s := loadSessionsFile()
+	rec, ok := s.Sessions[sid]
+	if !ok {
+		return ""
+	}
+	return rec.ColorPreset
+}
+
+// SetColorPreset persists the chosen preset name (or "" to clear)
+// to the calling session. Returns the resolved session id so the CLI
+// can echo it back.
+func SetColorPreset(name string) (string, error) {
+	sid, rec := TouchSession()
+	rec.ColorPreset = name
+	if err := saveSessionsWith(sid, rec); err != nil {
+		return sid, err
+	}
+	return sid, nil
+}
+
+// ColorPresetsDir returns ~/.srv/init/, the directory the user drops
+// custom shell snippets into. Each *.sh file is one preset; the
+// filename without extension is what `srv color use <name>` accepts.
+func ColorPresetsDir() string {
+	return filepath.Join(ConfigDir(), "init")
+}
+
+// ColorPresetPath resolves a preset name to its absolute file path
+// under ColorPresetsDir(). Doesn't check existence; callers test
+// with os.Stat so missing files surface a clear error.
+func ColorPresetPath(name string) string {
+	return filepath.Join(ColorPresetsDir(), name+".sh")
+}
+
+// ListColorPresets enumerates the *.sh files in ColorPresetsDir(),
+// returning their names without the extension. Returns nil + nil
+// when the dir doesn't exist (treated as "no presets configured",
+// not an error -- the directory is created on demand by the user).
+func ListColorPresets() ([]string, error) {
+	dir := ColorPresetsDir()
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	out := make([]string, 0, len(entries))
+	for _, e := range entries {
+		if e.IsDir() {
+			continue
+		}
+		name := e.Name()
+		if strings.HasSuffix(name, ".sh") {
+			out = append(out, strings.TrimSuffix(name, ".sh"))
+		}
+	}
+	return out, nil
 }
 
 // PidAlive returns true if a process with the given pid (as string) exists.

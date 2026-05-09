@@ -81,9 +81,9 @@ Integrations:
   srv completion <bash|zsh|powershell>   emit shell completion script
   srv mcp                                run as a stdio MCP server
   srv guard [on|off|status]              MCP confirmation guard for high-risk ops (default off)
-  srv config <profile> set init_file ~/.srv-init.sh   sourced before each remote run (default empty)
-                                                      e.g. put 'alias ls=ls --color=always' to keep colour
-  SRV_REMOTE_INIT=<path> env                          per-shell override of init_file
+  srv color [list|use <name>|off|status] CLI run colour: linux/mac auto-forwards local
+                                         LS_COLORS; drop *.sh into ~/.srv/init/ for presets.
+                                         MCP runs are always plain text.
   srv daemon                             keep ssh sessions warm (foreground)
   srv daemon status                      show running daemon's pool
   srv daemon status --json               machine-readable daemon status
@@ -170,9 +170,9 @@ const helpZH = `srv - 跨平台 SSH 远端命令工具,持久 cwd / 连接复用
   srv completion <bash|zsh|powershell>   输出 shell 补全脚本
   srv mcp                                以 stdio MCP server 跑
   srv guard [on|off|status]              MCP 高危操作确认开关(默认关闭,可针对当前 shell 开启)
-  srv config <profile> set init_file ~/.srv-init.sh   每次远端 run 前 source 该文件(默认空)
-                                                      在文件里写 alias/export 自定义颜色与 PATH
-  SRV_REMOTE_INIT=<path> 环境变量                     当前 shell 临时覆盖 init_file
+  srv color [list|use <name>|off|status] CLI 远端命令彩色: 本地是 linux/mac 时自动
+                                         转发本地 LS_COLORS;~/.srv/init/*.sh 为
+                                         自定义预设。MCP run 始终保持纯文本。
   srv daemon                             连接池前台运行(主要给调试)
   srv daemon status [--json]             看池里的 profile / uptime
   srv daemon stop                        停 daemon
@@ -198,7 +198,7 @@ var reservedSubcommands = map[string]bool{
 	"status": true, "check": true, "shell": true, "run": true, "exec": true,
 	"push": true, "pull": true, "sync": true, "tunnel": true, "edit": true,
 	"open": true, "code": true, "diff": true, "doctor": true,
-	"env": true, "install": true, "completion": true, "mcp": true, "daemon": true, "guard": true,
+	"env": true, "install": true, "completion": true, "mcp": true, "daemon": true, "guard": true, "color": true,
 	"_profiles": true, "_ls": true,
 	"jobs": true, "logs": true, "kill": true, "sessions": true,
 	"help": true, "--help": true, "-h": true,
@@ -351,6 +351,8 @@ func run(args []string) int {
 		return cmdMcp(cfg)
 	case "guard":
 		return cmdGuard(rest[1:])
+	case "color":
+		return cmdColor(rest[1:])
 	case "daemon":
 		return cmdDaemon(rest[1:])
 	case "_profiles":
