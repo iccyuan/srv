@@ -694,7 +694,7 @@ func cmdColor(args []string) int {
 			fmt.Printf("  %s%-24s %s\n", mark(p), p, suffix)
 		}
 		fmt.Println()
-		fmt.Println("supported user formats: .sh / .itermcolors / .toml (Alacritty)")
+		fmt.Println("supported user formats: .sh / .itermcolors / .toml / .yml / .conf (Kitty) / .Xresources")
 		fmt.Println("apply with: srv color use <name>")
 		return 0
 	case "use":

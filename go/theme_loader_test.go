@@ -108,10 +108,10 @@ cyan    = "#94e2d5"
 white   = "#a6adc8"
 `
 
-func TestAlacrittyPaletteCatppuccin(t *testing.T) {
-	p, err := alacrittyPalette([]byte(alacrittyCatppuccinSample))
+func TestAlacrittyTOMLPaletteCatppuccin(t *testing.T) {
+	p, err := alacrittyTOMLPalette([]byte(alacrittyCatppuccinSample))
 	if err != nil {
-		t.Fatalf("alacrittyPalette: %v", err)
+		t.Fatalf("alacrittyTOMLPalette: %v", err)
 	}
 	// Blue -- #89b4fa -> 137, 180, 250
 	if p.ansi[4].r != 0x89 || p.ansi[4].g != 0xb4 || p.ansi[4].b != 0xfa {
@@ -126,7 +126,7 @@ func TestAlacrittyPaletteCatppuccin(t *testing.T) {
 }
 
 func TestThemeToLSColorsHasTruecolor(t *testing.T) {
-	p, err := alacrittyPalette([]byte(alacrittyCatppuccinSample))
+	p, err := alacrittyTOMLPalette([]byte(alacrittyCatppuccinSample))
 	if err != nil {
 		t.Fatalf("parse: %v", err)
 	}
@@ -140,5 +140,163 @@ func TestThemeToLSColorsHasTruecolor(t *testing.T) {
 	wantRed := "*.tar=38;2;243;139;168"
 	if !strings.Contains(out, wantRed) {
 		t.Errorf("missing %q in output", wantRed)
+	}
+}
+
+const alacrittyYAMLSample = `# Catppuccin Mocha (legacy YAML)
+colors:
+  primary:
+    background: '#1e1e2e'
+    foreground: '#cdd6f4'
+  cursor:
+    text: '#1e1e2e'
+    cursor: '#f5e0dc'
+  normal:
+    black:   '#45475a'
+    red:     '#f38ba8'
+    green:   '#a6e3a1'
+    yellow:  '#f9e2af'
+    blue:    '#89b4fa'
+    magenta: '#f5c2e7'
+    cyan:    '#94e2d5'
+    white:   '#bac2de'
+  bright:
+    black:   '#585b70'
+    red:     '#f38ba8'
+    green:   '#a6e3a1'
+    yellow:  '#f9e2af'
+    blue:    '#89b4fa'
+    magenta: '#f5c2e7'
+    cyan:    '#94e2d5'
+    white:   '#a6adc8'
+  dim:
+    black:   '#1e1e2e'
+`
+
+func TestAlacrittyYAMLPaletteCatppuccin(t *testing.T) {
+	p, err := alacrittyYAMLPalette([]byte(alacrittyYAMLSample))
+	if err != nil {
+		t.Fatalf("alacrittyYAMLPalette: %v", err)
+	}
+	if p.ansi[4].r != 0x89 || p.ansi[4].g != 0xb4 || p.ansi[4].b != 0xfa {
+		t.Errorf("normal blue = %d/%d/%d, want 137/180/250",
+			p.ansi[4].r, p.ansi[4].g, p.ansi[4].b)
+	}
+	// `dim:` follows `bright:` in the file; the section reset should
+	// have kicked in by the time we parsed `dim.black`, so bright[0]
+	// must still be #585b70 (88/91/112), NOT #1e1e2e.
+	if p.ansi[8].r != 0x58 || p.ansi[8].g != 0x5b || p.ansi[8].b != 0x70 {
+		t.Errorf("bright black after dim leak: %d/%d/%d, want 88/91/112",
+			p.ansi[8].r, p.ansi[8].g, p.ansi[8].b)
+	}
+}
+
+const kittyCatppuccinSample = `# Kitty terminal: Catppuccin Mocha
+foreground       #cdd6f4
+background       #1e1e2e
+
+color0  #45475a
+color8  #585b70
+color1  #f38ba8
+color9  #f38ba8
+color2  #a6e3a1
+color10 #a6e3a1
+color3  #f9e2af
+color11 #f9e2af
+color4  #89b4fa
+color12 #89b4fa
+color5  #f5c2e7
+color13 #f5c2e7
+color6  #94e2d5
+color14 #94e2d5
+color7  #bac2de
+color15 #a6adc8
+`
+
+func TestKittyPaletteCatppuccin(t *testing.T) {
+	p, err := kittyPalette([]byte(kittyCatppuccinSample))
+	if err != nil {
+		t.Fatalf("kittyPalette: %v", err)
+	}
+	if p.ansi[4].r != 0x89 || p.ansi[4].g != 0xb4 || p.ansi[4].b != 0xfa {
+		t.Errorf("color4 = %d/%d/%d, want 137/180/250",
+			p.ansi[4].r, p.ansi[4].g, p.ansi[4].b)
+	}
+	if p.ansi[15].r != 0xa6 || p.ansi[15].g != 0xad || p.ansi[15].b != 0xc8 {
+		t.Errorf("color15 = %d/%d/%d, want 166/173/200",
+			p.ansi[15].r, p.ansi[15].g, p.ansi[15].b)
+	}
+}
+
+const xresourcesCatppuccinSample = `! Catppuccin Mocha (Xresources)
+*.foreground: #cdd6f4
+*.background: #1e1e2e
+*.cursorColor: #f5e0dc
+
+! Black
+*.color0:  #45475a
+*.color8:  #585b70
+
+! Red
+*.color1:  #f38ba8
+*.color9:  #f38ba8
+
+! Green
+*.color2:  #a6e3a1
+*.color10: #a6e3a1
+
+! Yellow
+*.color3:  #f9e2af
+*.color11: #f9e2af
+
+! Blue
+*.color4:  #89b4fa
+*.color12: #89b4fa
+
+! Magenta
+*.color5:  #f5c2e7
+*.color13: #f5c2e7
+
+! Cyan
+*.color6:  #94e2d5
+*.color14: #94e2d5
+
+! White
+*.color7:  #bac2de
+*.color15: #a6adc8
+`
+
+func TestXresourcesPaletteCatppuccin(t *testing.T) {
+	p, err := xresourcesPalette([]byte(xresourcesCatppuccinSample))
+	if err != nil {
+		t.Fatalf("xresourcesPalette: %v", err)
+	}
+	if p.ansi[4].r != 0x89 || p.ansi[4].g != 0xb4 || p.ansi[4].b != 0xfa {
+		t.Errorf("color4 = %d/%d/%d, want 137/180/250",
+			p.ansi[4].r, p.ansi[4].g, p.ansi[4].b)
+	}
+	if p.ansi[8].r != 0x58 || p.ansi[8].g != 0x5b || p.ansi[8].b != 0x70 {
+		t.Errorf("color8 = %d/%d/%d, want 88/91/112",
+			p.ansi[8].r, p.ansi[8].g, p.ansi[8].b)
+	}
+}
+
+func TestXresourcesNoClassPrefix(t *testing.T) {
+	// Some files just use bare `colorN:` without a class prefix.
+	src := `color0: #112233
+color1: #445566
+color2: #778899
+color3: #aabbcc
+color4: #ddeeff
+color5: #001122
+color6: #334455
+color7: #667788
+`
+	p, err := xresourcesPalette([]byte(src))
+	if err != nil {
+		t.Fatalf("xresourcesPalette: %v", err)
+	}
+	if p.ansi[4].r != 0xdd || p.ansi[4].g != 0xee || p.ansi[4].b != 0xff {
+		t.Errorf("color4 = %d/%d/%d", p.ansi[4].r, p.ansi[4].g, p.ansi[4].b)
 	}
 }

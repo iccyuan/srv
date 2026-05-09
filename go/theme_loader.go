@@ -93,17 +93,18 @@ func floatToByte(f float64) uint8 {
 	return uint8(f*255 + 0.5)
 }
 
-var alacrittyHexPat = regexp.MustCompile(`(?:#|0x)([0-9a-fA-F]{6})`)
+var hexColorPat = regexp.MustCompile(`(?:#|0x)([0-9a-fA-F]{6})`)
 
-// alacrittyPalette parses an Alacritty .toml config and returns the
-// 16 ANSI colours. Looks for the [colors.normal] and [colors.bright]
-// tables; ignores everything else (primary fg/bg, cursor, etc.).
+// alacrittyTOMLPalette parses an Alacritty .toml config and returns
+// the 16 ANSI colours. Looks for the [colors.normal] and
+// [colors.bright] tables; ignores everything else (primary fg/bg,
+// cursor, etc.).
 //
 // We don't pull in a TOML library because Alacritty's colour tables
 // are uniform enough to handle with a tiny line scanner. Keys are
 // the 8 standard ANSI names; values are quoted strings of the form
 // "#hhhhhh" or "0xhhhhhh".
-func alacrittyPalette(data []byte) (*themeColors, error) {
+func alacrittyTOMLPalette(data []byte) (*themeColors, error) {
 	out := &themeColors{}
 	section := ""
 	found := 0
@@ -132,7 +133,7 @@ func alacrittyPalette(data []byte) (*themeColors, error) {
 		}
 		key := strings.TrimSpace(line[:eq])
 		val := line[eq+1:]
-		m := alacrittyHexPat.FindStringSubmatch(val)
+		m := hexColorPat.FindStringSubmatch(val)
 		if m == nil {
 			continue
 		}
@@ -145,6 +146,163 @@ func alacrittyPalette(data []byte) (*themeColors, error) {
 	}
 	if found < 8 {
 		return nil, fmt.Errorf("alacritty toml: only %d/16 colours found", found)
+	}
+	return out, nil
+}
+
+// alacrittyYAMLPalette parses Alacritty's pre-0.13 YAML config.
+// Same idea as the TOML cousin: the file always nests
+//
+//	colors:
+//	  normal:
+//	    black:   '#...'
+//	    ...
+//	  bright:
+//	    black:   '#...'
+//	    ...
+//
+// We don't bring in a YAML library either -- the structure is so
+// uniform that recognising "normal:" / "bright:" headers and the
+// 8 colour keys underneath is enough. Any header outside that set
+// resets section tracking, so subsequent fg/bg/cursor sub-tables
+// don't accidentally map onto colour keys.
+func alacrittyYAMLPalette(data []byte) (*themeColors, error) {
+	out := &themeColors{}
+	section := ""
+	found := 0
+	for _, line := range strings.Split(string(data), "\n") {
+		// Drop comments after a space-prefixed `#`. Quoted strings
+		// in our domain don't contain `#` other than for hex, so
+		// stripping the trailing comment would risk eating the value;
+		// just skip whole-line comments for now.
+		stripped := strings.TrimSpace(line)
+		if stripped == "" || strings.HasPrefix(stripped, "#") {
+			continue
+		}
+		// A YAML header line ends with ':' and has no value.
+		if strings.HasSuffix(stripped, ":") {
+			name := strings.TrimSpace(strings.TrimSuffix(stripped, ":"))
+			switch name {
+			case "normal":
+				section = "normal"
+			case "bright":
+				section = "bright"
+			default:
+				section = ""
+			}
+			continue
+		}
+		// `key: value` line.
+		eq := strings.Index(stripped, ":")
+		if eq < 0 {
+			continue
+		}
+		key := strings.TrimSpace(stripped[:eq])
+		val := stripped[eq+1:]
+		m := hexColorPat.FindStringSubmatch(val)
+		if m == nil {
+			continue
+		}
+		bright := false
+		switch section {
+		case "normal":
+		case "bright":
+			bright = true
+		default:
+			continue
+		}
+		idx := ansiIndex(key, bright)
+		if idx < 0 {
+			continue
+		}
+		out.ansi[idx] = decodeHex(m[1])
+		found++
+	}
+	if found < 8 {
+		return nil, fmt.Errorf("alacritty yaml: only %d/16 colours found", found)
+	}
+	return out, nil
+}
+
+// kittyPalette parses a Kitty terminal .conf file. Kitty names the
+// 16 ANSI colours as `color0` through `color15`, one per line:
+//
+//	color0  #45475a
+//	color1  #f38ba8
+//	...
+//
+// Comments use `#` at line start. Lines that don't match the
+// `colorN <hex>` shape are ignored (foreground/background/cursor/...
+// are valid Kitty keys, just not what we care about here).
+func kittyPalette(data []byte) (*themeColors, error) {
+	out := &themeColors{}
+	found := 0
+	for _, line := range strings.Split(string(data), "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		fields := strings.Fields(line)
+		if len(fields) < 2 || !strings.HasPrefix(fields[0], "color") {
+			continue
+		}
+		n, err := strconv.Atoi(strings.TrimPrefix(fields[0], "color"))
+		if err != nil || n < 0 || n > 15 {
+			continue
+		}
+		m := hexColorPat.FindStringSubmatch(fields[1])
+		if m == nil {
+			continue
+		}
+		out.ansi[n] = decodeHex(m[1])
+		found++
+	}
+	if found < 8 {
+		return nil, fmt.Errorf("kitty conf: only %d/16 colours found", found)
+	}
+	return out, nil
+}
+
+// xresourcesColorPat matches the `<class>.colorN: #hex` (or just
+// `colorN: #hex`) pattern used by .Xresources files. The class is
+// usually `*`, `URxvt`, or `XTerm`, separated by `.` or `*` from
+// the resource name.
+var xresourcesColorPat = regexp.MustCompile(`(?i)(?:^|[*.])color(\d+)\s*:\s*(#?[0-9a-fA-F]{6})`)
+
+// xresourcesPalette parses .Xresources / .xresources files used by
+// xterm, URxvt, and most classic X terminals:
+//
+//	*.foreground: #cdd6f4
+//	*.color0:     #45475a
+//	URxvt.color1: #f38ba8
+//	color2:       #a6e3a1
+//
+// Comments use `!`. We ignore everything that isn't a colorN line.
+func xresourcesPalette(data []byte) (*themeColors, error) {
+	out := &themeColors{}
+	found := 0
+	for _, line := range strings.Split(string(data), "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" || strings.HasPrefix(line, "!") {
+			continue
+		}
+		m := xresourcesColorPat.FindStringSubmatch(line)
+		if m == nil {
+			continue
+		}
+		n, err := strconv.Atoi(m[1])
+		if err != nil || n < 0 || n > 15 {
+			continue
+		}
+		hex := strings.TrimPrefix(m[2], "#")
+		if len(hex) != 6 {
+			continue
+		}
+		out.ansi[n] = decodeHex(hex)
+		found++
+	}
+	if found < 8 {
+		return nil, fmt.Errorf("xresources: only %d/16 colours found", found)
 	}
 	return out, nil
 }
@@ -241,8 +399,17 @@ func themeToLSColorsShell(t *themeColors) string {
 
 // supportedThemeExts is the list of file extensions the user can
 // drop into ~/.srv/init/, in order of precedence when multiple
-// files share the same basename.
-var supportedThemeExts = []string{".sh", ".itermcolors", ".toml"}
+// files share the same basename. Compared lower-case at use time
+// so .Xresources / .xresources / .YML / etc all work.
+var supportedThemeExts = []string{
+	".sh",          // raw shell snippet, highest priority
+	".itermcolors", // iTerm2 plist (XML)
+	".toml",        // Alacritty TOML (post-0.13)
+	".yml",         // Alacritty YAML (legacy, pre-0.13)
+	".yaml",        // same; some forks/forks use the longer suffix
+	".conf",        // Kitty terminal config
+	".xresources",  // xterm / urxvt classic Xresources
+}
 
 // loadThemeFile reads a single theme file from disk and returns the
 // shell snippet to inline before remote commands. Empty string when
@@ -261,7 +428,19 @@ func loadThemeFile(p string) string {
 			return themeToLSColorsShell(t)
 		}
 	case ".toml":
-		if t, perr := alacrittyPalette(data); perr == nil {
+		if t, perr := alacrittyTOMLPalette(data); perr == nil {
+			return themeToLSColorsShell(t)
+		}
+	case ".yml", ".yaml":
+		if t, perr := alacrittyYAMLPalette(data); perr == nil {
+			return themeToLSColorsShell(t)
+		}
+	case ".conf":
+		if t, perr := kittyPalette(data); perr == nil {
+			return themeToLSColorsShell(t)
+		}
+	case ".xresources":
+		if t, perr := xresourcesPalette(data); perr == nil {
 			return themeToLSColorsShell(t)
 		}
 	}
