@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	_ "embed"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -12,6 +13,16 @@ import (
 	"sort"
 	"strings"
 )
+
+// colorDefaultTheme is the built-in fallback theme baked into the
+// binary. It's a real shell snippet (not a Go string built up with
+// concatenation) so the palette stays editable as data, not code.
+// The same file format is what users put in ~/.srv/init/<name>.sh
+// for custom presets, so the default is also a perfectly valid
+// drop-in starting template.
+//
+//go:embed colors/dracula.sh
+var colorDefaultTheme string
 
 func cmdDoctor(args []string, cfg *Config, profileOverride string) int {
 	asJSON := len(args) > 0 && args[0] == "--json"
@@ -431,13 +442,6 @@ var colorReservedNames = map[string]bool{
 	"on": true, "off": true, "auto": true,
 }
 
-// colorBuiltinFallbackPalette is a minimal, well-understood LS_COLORS
-// string used as a fallback when neither the local nor the remote
-// environment has a meaningful one. It's the classic dircolors-default
-// palette: dirs blue, links cyan, executables green, archives red,
-// images/media magenta. Anything else stays default-foreground.
-const colorBuiltinFallbackPalette = `di=01;34:ln=01;36:so=01;35:pi=33:bd=33;01:cd=33;01:or=01;05;37;41:mi=01;05;37;41:ex=01;32:*.tar=01;31:*.tgz=01;31:*.gz=01;31:*.bz2=01;31:*.xz=01;31:*.zip=01;31:*.7z=01;31:*.rpm=01;31:*.deb=01;31:*.jpg=01;35:*.jpeg=01;35:*.png=01;35:*.gif=01;35:*.bmp=01;35:*.svg=01;35:*.mp3=01;35:*.mp4=01;35:*.mkv=01;35:*.avi=01;35`
-
 // colorBuiltinPrologue is the prologue used by both `srv color on`
 // and the platform-auto path on linux/mac. Strategy:
 //
@@ -446,13 +450,13 @@ const colorBuiltinFallbackPalette = `di=01;34:ln=01;36:so=01;35:pi=33:bd=33;01:c
 //   - LS_COLORS handling:
 //   - If the local shell has one set, forward it -- the user's own
 //     palette wins.
-//   - Otherwise on the remote: only override when LS_COLORS is empty
-//     (`""`, not unset). Some distros' default zsh init does
-//     `eval "$(dircolors -b)"` on a system whose dircolors database
-//     is missing/broken, leaving LS_COLORS exported as an empty
-//     string. GNU ls reads that as "no rules" and refuses to emit
-//     any colour even with --color=always. We patch with a sane
-//     built-in palette in that case.
+//   - Otherwise inline the embedded default theme. The theme file
+//     itself does `[ -n "$LS_COLORS" ] || export ...`, so a remote
+//     that already has a non-empty palette keeps it; only the
+//     "exported as empty string" case (some distros' zsh defaults
+//     run `eval "$(dircolors -b)"` on a system whose dircolors
+//     database is missing, leaving LS_COLORS=""; GNU ls then emits
+//     no colour even with --color=always) gets patched.
 //   - Use shell functions for the wrapper, not aliases. Functions
 //     dispatch at runtime and work in any POSIX-ish shell. Aliases
 //     have parse-time semantics that bite us in zsh -c when the
@@ -465,11 +469,10 @@ func colorBuiltinPrologue() string {
 		b.WriteString(shQuote(v))
 		b.WriteByte('\n')
 	} else {
-		// Patch only when remote is empty; if remote already has a
-		// non-empty value we trust it.
-		b.WriteString(`[ -n "$LS_COLORS" ] || export LS_COLORS=`)
-		b.WriteString(shQuote(colorBuiltinFallbackPalette))
-		b.WriteByte('\n')
+		b.WriteString(colorDefaultTheme)
+		if !strings.HasSuffix(colorDefaultTheme, "\n") {
+			b.WriteByte('\n')
+		}
 	}
 	b.WriteString(`ls()    { command ls    --color=always "$@"; }` + "\n")
 	b.WriteString(`grep()  { command grep  --color=always "$@"; }` + "\n")
