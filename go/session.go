@@ -14,7 +14,6 @@ import (
 //	{ "profile": <pinned profile or null>,
 //	  "cwds":    { profileName: cwd, ... },
 //	  "guard":   <bool, optional>,
-//	  "color":   <bool, optional>,
 //	  "started": iso, "last_seen": iso }
 //
 // Guard, when true, makes the MCP server refuse high-risk operations
@@ -22,17 +21,10 @@ import (
 // caller passes confirm=true. Default off so existing flows are
 // unchanged. Toggled per-shell via `srv guard on|off`, or globally via
 // the SRV_GUARD env var (which trumps the session record).
-//
-// Color, when true, prepends a small shell prologue to MCP `run`
-// commands so colour-aware tools (ls, grep, ...) emit ANSI escapes
-// even though the SSH session is not a TTY. Default off because the
-// escape codes inflate output size and most callers do not benefit.
-// Toggled per-shell via `srv color on|off`, or globally via SRV_COLOR.
 type SessionRecord struct {
 	Profile  *string           `json:"profile"`
 	Cwds     map[string]string `json:"cwds"`
 	Guard    bool              `json:"guard,omitempty"`
-	Color    bool              `json:"color,omitempty"`
 	Started  string            `json:"started"`
 	LastSeen string            `json:"last_seen"`
 }
@@ -149,34 +141,6 @@ func GuardOn() bool {
 func SetGuard(on bool) (string, error) {
 	sid, rec := TouchSession()
 	rec.Guard = on
-	if err := saveSessionsWith(sid, rec); err != nil {
-		return sid, err
-	}
-	return sid, nil
-}
-
-// ColorOn reports whether colour-emitting prologue should be prepended
-// to MCP `run` commands. Same precedence rules as GuardOn: SRV_COLOR
-// env > session record > default off.
-func ColorOn() bool {
-	if v := os.Getenv("SRV_COLOR"); v != "" {
-		switch strings.ToLower(strings.TrimSpace(v)) {
-		case "1", "true", "on", "yes":
-			return true
-		case "0", "false", "off", "no":
-			return false
-		}
-	}
-	sid := SessionID()
-	s := loadSessionsFile()
-	rec, ok := s.Sessions[sid]
-	return ok && rec.Color
-}
-
-// SetColor toggles the calling session's color flag and persists.
-func SetColor(on bool) (string, error) {
-	sid, rec := TouchSession()
-	rec.Color = on
 	if err := saveSessionsWith(sid, rec); err != nil {
 		return sid, err
 	}
