@@ -65,20 +65,34 @@ func writeSessionsFile(s *sessionsFile) error {
 	return writeJSONFile(SessionsFile(), s)
 }
 
-// _INTERMEDIATE_EXES (Windows): exes that are transparent layers between the
-// user's shell and our binary. Walking up through these yields a stable id.
+// intermediateExes (Windows): exes that are transparent launcher
+// layers, NOT the shell the user is typing into. Walking up through
+// these yields the actual host shell's pid.
+//
+// cmd.exe is intentionally NOT in this set. Treating cmd.exe as the
+// session boundary makes "every cmd window is its own session", which
+// matches user mental model: open two cmd windows under the same
+// Windows Terminal, expect two separate `srv color` / `srv guard`
+// states. Same for powershell.exe, bash.exe, etc -- whichever shell
+// lives at the bottom of the tree owns the session.
+//
+// python launchers stay in here so that `python -c "subprocess.run([srv,...])"`
+// from a long-running python REPL keeps the SAME session across calls
+// (parent = python = walked through; grandparent = the user's shell).
 var intermediateExes = map[string]bool{
-	"cmd.exe": true, "python.exe": true, "py.exe": true,
+	"python.exe": true, "py.exe": true,
 	"pythonw.exe": true, "python3.exe": true, "python3w.exe": true,
 }
 
 // SessionID returns a stable identifier for the calling shell.
 //
 // Override: $SRV_SESSION wins. Otherwise:
-//   - Unix: os.Getppid().
-//   - Windows: walk up the process tree, skipping intermediate exes (cmd.exe
-//     shim, python.exe launchers), return the first non-intermediate ancestor
-//     pid -- usually the user's powershell.exe / bash.exe.
+//   - Unix: os.Getppid() -- direct parent shell.
+//   - Windows: walk up the process tree, skipping launcher wrappers
+//     (python.exe et al.), return the first non-wrapper ancestor's
+//     pid. This is normally the cmd.exe / powershell.exe / bash.exe
+//     window the user is typing into, so each window has its own
+//     session.
 func SessionID() string {
 	if v := os.Getenv("SRV_SESSION"); v != "" {
 		return strings.TrimSpace(v)
