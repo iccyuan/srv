@@ -423,42 +423,21 @@ func cmdGuard(args []string) int {
 	return 2
 }
 
-// colorPrologue returns the shell snippet inlined before a non-TTY
-// CLI command (`srv ls -al`) to recover colour the SSH non-interactive
-// shell would otherwise drop. Resolution order:
-//
-//  1. Custom preset selected (`srv color use <name>`): read
-//     ~/.srv/init/<name>.sh and return its bytes verbatim. The user
-//     decides everything; nothing is hardcoded in the binary.
-//  2. Local OS is linux or darwin, no preset: forward the LOCAL
-//     LS_COLORS env to the remote and define minimal ls/grep
-//     functions with --color=always, so remote `ls -al` paints with
-//     the same palette the user sees in their own terminal.
-//  3. Otherwise (typically Windows local): "" -- nothing injected,
-//     remote shell decides on its own.
-//
-// MCP never goes through this path; it stays plain text.
-func colorPrologue() string {
-	if name := GetColorPreset(); name != "" {
-		path := ColorPresetPath(name)
-		if data, err := os.ReadFile(path); err == nil && len(data) > 0 {
-			body := string(data)
-			if !strings.HasSuffix(body, "\n") {
-				body += "\n"
-			}
-			return body
-		}
-		// Preset selected but file missing/unreadable -- fall through
-		// to the platform default rather than running with no colour
-		// hint. The CLI command surfaces stat errors at selection
-		// time, so reaching this path means the file was deleted
-		// after `srv color use ...`. Quiet fallback is the right call
-		// here -- the alternative (empty prologue) is also fine, but
-		// the platform default keeps colour working on linux/mac.
-	}
-	if runtime.GOOS != "linux" && runtime.GOOS != "darwin" {
-		return ""
-	}
+// colorReservedNames are sentinel values that take the slot of a
+// preset name in the session record but mean "use a built-in mode"
+// rather than "load a file". Users can't pick them as preset
+// filenames -- cmdColor's `use` rejects them.
+var colorReservedNames = map[string]bool{
+	"on": true, "off": true, "auto": true,
+}
+
+// colorBuiltinPrologue is the prologue used by both the explicit
+// `srv color on` mode and the platform-auto path on linux/mac. It
+// forwards the local LS_COLORS palette (if set) and force-emits
+// colour for ls/grep regardless of TTY. Defined as shell functions
+// rather than aliases because non-interactive bash skips alias
+// expansion by default.
+func colorBuiltinPrologue() string {
 	var b strings.Builder
 	if v := os.Getenv("LS_COLORS"); v != "" {
 		b.WriteString("export LS_COLORS=")
@@ -473,21 +452,90 @@ func colorPrologue() string {
 	return b.String()
 }
 
-// cmdColor implements `srv color [list|use <name>|off|status]`.
+// colorPrologue resolves the per-session colour selection into the
+// shell snippet inlined before a non-TTY CLI command. Resolution:
 //
-//   - list: enumerate ~/.srv/init/*.sh by basename
-//   - use <name>: persist <name> to the calling session; future
-//     `srv <cmd>` runs inline its file contents
-//   - off (or "clear", or "use" with no name): drop the selection and
-//     fall back to the platform default
-//   - status (default): print active preset + the resolved prologue
-//     mode so the user can verify what's going to happen on next run
+//  1. mode == "off"      -> "" (force off, regardless of platform)
+//  2. mode == "on"       -> built-in prologue (force on, any platform)
+//  3. mode == "" (auto)  -> built-in on linux/mac, "" on windows
+//  4. mode == <name>     -> read ~/.srv/init/<name>.sh and inline it;
+//     if the file is gone, fall back to auto so
+//     colour still works on linux/mac
+//
+// MCP never goes through this path; it stays plain text.
+func colorPrologue() string {
+	mode := GetColorPreset()
+	switch mode {
+	case "off":
+		return ""
+	case "on":
+		return colorBuiltinPrologue()
+	case "", "auto":
+		if runtime.GOOS == "linux" || runtime.GOOS == "darwin" {
+			return colorBuiltinPrologue()
+		}
+		return ""
+	}
+	// Custom preset.
+	path := ColorPresetPath(mode)
+	if data, err := os.ReadFile(path); err == nil && len(data) > 0 {
+		body := string(data)
+		if !strings.HasSuffix(body, "\n") {
+			body += "\n"
+		}
+		return body
+	}
+	// File vanished after selection. Fall back to platform auto so
+	// linux/mac users still get reasonable colour, instead of silently
+	// losing it because of a stale session pin.
+	if runtime.GOOS == "linux" || runtime.GOOS == "darwin" {
+		return colorBuiltinPrologue()
+	}
+	return ""
+}
+
+// cmdColor implements `srv color [on|off|auto|use <name>|list|status]`.
+//
+//   - on / off / auto: simple toggles -- no preset file needed.
+//     "on" forces colour on regardless of local OS, "off" forces off,
+//     "auto" (the default) is on for linux/mac local and off for
+//     windows local.
+//   - use <name>: load ~/.srv/init/<name>.sh as the prologue; lets a
+//     power user fully customise. Reserved names (on/off/auto) are
+//     rejected.
+//   - list: enumerate ~/.srv/init/*.sh by basename, marking the
+//     active preset.
+//   - status (default): print which mode + prologue source is live.
 func cmdColor(args []string) int {
 	action := "status"
 	if len(args) > 0 {
 		action = strings.ToLower(args[0])
 	}
 	switch action {
+	case "on":
+		sid, err := SetColorPreset("on")
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "color on:", err)
+			return 1
+		}
+		fmt.Printf("color: on (session=%s)\n", sid)
+		return 0
+	case "off", "disable":
+		sid, err := SetColorPreset("off")
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "color off:", err)
+			return 1
+		}
+		fmt.Printf("color: off (session=%s)\n", sid)
+		return 0
+	case "auto", "clear", "default":
+		sid, err := SetColorPreset("")
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "color auto:", err)
+			return 1
+		}
+		fmt.Printf("color: auto (session=%s)\n", sid)
+		return 0
 	case "list":
 		presets, err := ListColorPresets()
 		if err != nil {
@@ -498,6 +546,7 @@ func cmdColor(args []string) int {
 		if len(presets) == 0 {
 			fmt.Printf("(no presets in %s)\n", dir)
 			fmt.Println("drop a *.sh file there, then `srv color use <name>` to apply.")
+			fmt.Println("for the default behaviour, just `srv color on` -- no file needed.")
 			return 0
 		}
 		active := GetColorPreset()
@@ -511,18 +560,15 @@ func cmdColor(args []string) int {
 		return 0
 	case "use":
 		if len(args) < 2 || args[1] == "" {
-			// `srv color use` with no name = clear, matching the
-			// "off" verb. Lets users tab-complete `use` and then
-			// erase to drop the preset.
-			sid, err := SetColorPreset("")
-			if err != nil {
-				fmt.Fprintln(os.Stderr, "color use:", err)
-				return 1
-			}
-			fmt.Printf("color: cleared (session=%s)\n", sid)
-			return 0
+			fmt.Fprintln(os.Stderr, "usage: srv color use <name>")
+			fmt.Fprintln(os.Stderr, "(or `srv color on` if you don't need a custom preset.)")
+			return 2
 		}
 		name := args[1]
+		if colorReservedNames[name] {
+			fmt.Fprintf(os.Stderr, "color use: %q is a reserved mode name; use `srv color %s` directly.\n", name, name)
+			return 2
+		}
 		path := ColorPresetPath(name)
 		if _, err := os.Stat(path); err != nil {
 			fmt.Fprintf(os.Stderr, "color use: %s not found at %s\n", name, path)
@@ -534,30 +580,27 @@ func cmdColor(args []string) int {
 			fmt.Fprintln(os.Stderr, "color use:", err)
 			return 1
 		}
-		fmt.Printf("color: using %q (session=%s)\n", name, sid)
-		return 0
-	case "off", "clear", "disable":
-		sid, err := SetColorPreset("")
-		if err != nil {
-			fmt.Fprintln(os.Stderr, "color off:", err)
-			return 1
-		}
-		fmt.Printf("color: cleared (session=%s)\n", sid)
+		fmt.Printf("color: using preset %q (session=%s)\n", name, sid)
 		return 0
 	case "status", "":
 		sid := SessionID()
-		preset := GetColorPreset()
-		switch {
-		case preset != "":
-			path := ColorPresetPath(preset)
-			fmt.Printf("color: preset=%q (%s, session=%s)\n", preset, path, sid)
-		case runtime.GOOS == "linux" || runtime.GOOS == "darwin":
-			fmt.Printf("color: auto (forwarding local LS_COLORS, session=%s)\n", sid)
+		mode := GetColorPreset()
+		switch mode {
+		case "on":
+			fmt.Printf("color: on (session=%s)\n", sid)
+		case "off":
+			fmt.Printf("color: off (session=%s)\n", sid)
+		case "", "auto":
+			if runtime.GOOS == "linux" || runtime.GOOS == "darwin" {
+				fmt.Printf("color: auto -> on (%s local, session=%s)\n", runtime.GOOS, sid)
+			} else {
+				fmt.Printf("color: auto -> off (%s local, session=%s; use `srv color on` to force)\n", runtime.GOOS, sid)
+			}
 		default:
-			fmt.Printf("color: off (no preset, %s local, session=%s)\n", runtime.GOOS, sid)
+			fmt.Printf("color: preset %q at %s (session=%s)\n", mode, ColorPresetPath(mode), sid)
 		}
 		return 0
 	}
-	fmt.Fprintln(os.Stderr, "usage: srv color [list|use <name>|off|status]")
+	fmt.Fprintln(os.Stderr, "usage: srv color [on|off|auto|use <name>|list|status]")
 	return 2
 }

@@ -81,9 +81,11 @@ Integrations:
   srv completion <bash|zsh|powershell>   emit shell completion script
   srv mcp                                run as a stdio MCP server
   srv guard [on|off|status]              MCP confirmation guard for high-risk ops (default off)
-  srv color [list|use <name>|off|status] CLI run colour: linux/mac auto-forwards local
-                                         LS_COLORS; drop *.sh into ~/.srv/init/ for presets.
-                                         MCP runs are always plain text.
+  srv color [on|off|auto|use <name>|list|status]
+                                         CLI run colour. on/off/auto is enough -- no
+                                         filename needed. auto is on for linux/mac local,
+                                         off for windows. drop *.sh into ~/.srv/init/
+                                         only for custom presets. MCP runs stay plain text.
   srv daemon                             keep ssh sessions warm (foreground)
   srv daemon status                      show running daemon's pool
   srv daemon status --json               machine-readable daemon status
@@ -170,9 +172,11 @@ const helpZH = `srv - 跨平台 SSH 远端命令工具,持久 cwd / 连接复用
   srv completion <bash|zsh|powershell>   输出 shell 补全脚本
   srv mcp                                以 stdio MCP server 跑
   srv guard [on|off|status]              MCP 高危操作确认开关(默认关闭,可针对当前 shell 开启)
-  srv color [list|use <name>|off|status] CLI 远端命令彩色: 本地是 linux/mac 时自动
-                                         转发本地 LS_COLORS;~/.srv/init/*.sh 为
-                                         自定义预设。MCP run 始终保持纯文本。
+  srv color [on|off|auto|use <name>|list|status]
+                                         CLI 远端命令彩色。on/off/auto 直接用,不需要文件名。
+                                         auto: 本地 linux/mac 自动开,Windows 关。
+                                         自定义预设把 *.sh 放进 ~/.srv/init/。
+                                         MCP run 始终保持纯文本。
   srv daemon                             连接池前台运行(主要给调试)
   srv daemon status [--json]             看池里的 profile / uptime
   srv daemon stop                        停 daemon
