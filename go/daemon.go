@@ -126,6 +126,10 @@ const (
 	daemonIdleTTL = 30 * time.Minute
 	// Cleanup tick.
 	gcInterval = 60 * time.Second
+	// Completion prefetch is a latency optimization. Keep it bounded so a
+	// directory with hundreds of children does not spend seconds issuing
+	// background remote ls calls after one tab completion.
+	daemonPrefetchLimit = 24
 )
 
 func daemonSocketPath() string {
@@ -524,9 +528,13 @@ func (s *daemonState) prefetchSubdirs(profileName, parent string, entries []stri
 		return
 	}
 	parent = strings.TrimRight(parent, "/") + "/"
+	prefetched := 0
 	for _, e := range entries {
 		if !strings.HasSuffix(e, "/") {
 			continue
+		}
+		if prefetched >= daemonPrefetchLimit {
+			return
 		}
 		sub := parent + e
 		if _, hit := s.cachedListing(profileName, sub); hit {
@@ -537,6 +545,7 @@ func (s *daemonState) prefetchSubdirs(profileName, parent string, entries []stri
 			continue
 		}
 		s.cacheListing(profileName, sub, listing)
+		prefetched++
 	}
 }
 

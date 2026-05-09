@@ -26,11 +26,21 @@ type CheckResult struct {
 func runCheck(profile *Profile) *CheckResult {
 	res := &CheckResult{}
 
+	// The dial budget must stay strictly inside the outer 15s timeout --
+	// otherwise a profile with a large `connect_timeout` (some users set
+	// 30s or 60s for high-latency links) leaves the inner goroutine
+	// blocked in Dial well after runCheck has already returned a
+	// "timeout" verdict, briefly piling up under repeated checks.
+	dialTimeout := time.Duration(profile.GetConnectTimeout()) * time.Second
+	if dialTimeout <= 0 || dialTimeout > 14*time.Second {
+		dialTimeout = 14 * time.Second
+	}
+
 	done := make(chan *CheckResult, 1)
 	go func() {
 		c, err := DialOpts(profile, dialOpts{
 			strictHostKey: false, // accept-new like the Python version
-			timeout:       time.Duration(profile.GetConnectTimeout()) * time.Second,
+			timeout:       dialTimeout,
 		})
 		if err != nil {
 			done <- &CheckResult{

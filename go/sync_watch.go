@@ -43,12 +43,30 @@ func runSyncWatch(o *syncOpts, profile *Profile, localRoot, remoteRoot string, a
 	var (
 		mu      sync.Mutex
 		pending bool
+		running bool
 		timer   *time.Timer
 	)
-	doSync := func() {
+	var doSync func()
+	doSync = func() {
 		mu.Lock()
 		pending = false
+		if running {
+			pending = true
+			mu.Unlock()
+			return
+		}
+		running = true
 		mu.Unlock()
+		defer func() {
+			mu.Lock()
+			rerun := pending
+			if rerun {
+				pending = false
+				timer = time.AfterFunc(watchDebounce, doSync)
+			}
+			running = false
+			mu.Unlock()
+		}()
 		// Re-collect each round so we pick up new files / git status changes.
 		files, err := collectSyncFiles(o, localRoot, allExcludes)
 		if err != nil {
@@ -114,6 +132,7 @@ func runSyncWatch(o *syncOpts, profile *Profile, localRoot, remoteRoot string, a
 			if timer != nil {
 				timer.Stop()
 			}
+			pending = false
 			mu.Unlock()
 			if needFinal {
 				doSync()

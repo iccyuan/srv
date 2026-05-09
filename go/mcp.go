@@ -12,6 +12,17 @@ import (
 
 const mcpProtocolVersion = "2024-11-05"
 
+// mcpRunTextMax caps the combined stdout+stderr the `run` tool returns
+// to the MCP client (Claude Code et al.). Beyond this, output is
+// truncated with a marker pointing the caller at remote-side filtering.
+//
+// Rationale: the MCP client keeps every tool result in its conversation
+// history, so a single `cat /var/log/...` or `journalctl -n 100000`
+// permanently inflates the client's memory by the full payload. 256 KiB
+// is generous for typical command output (a long `ls -laR`, `ps auxf`,
+// `git log --stat`) while drawing a hard line against runaway dumps.
+const mcpRunTextMax = 256 * 1024
+
 type jsonRPCRequest struct {
 	JSONRPC string          `json:"jsonrpc"`
 	ID      any             `json:"id,omitempty"`
@@ -286,28 +297,22 @@ func mcpHandleTool(name string, args map[string]any, cfg *Config) toolResult {
 		}
 		cwd := GetCwd(profName, prof)
 		res, _ := runRemoteCapture(prof, cwd, cmd)
-		text := ""
-		if res.Stdout != "" {
-			text += res.Stdout
-		}
-		if res.Stderr != "" {
-			if text != "" {
-				text += "\n--- stderr ---\n"
-			}
-			text += res.Stderr
-		}
-		text += fmt.Sprintf("\n[exit %d cwd %s]", res.ExitCode, cwd)
+		text, truncatedBytes := buildMCPRunText(res, cwd)
 		// Stdout/Stderr live in the text Content; don't duplicate them
 		// into StructuredContent -- the MCP client (Claude Code) keeps
 		// both in its conversation history, doubling memory for large
 		// command outputs.
+		structured := map[string]any{
+			"exit_code": res.ExitCode,
+			"cwd":       cwd,
+		}
+		if truncatedBytes > 0 {
+			structured["truncated_bytes"] = truncatedBytes
+		}
 		return toolResult{
-			Content: []toolContent{{Type: "text", Text: text}},
-			IsError: res.ExitCode != 0,
-			StructuredContent: map[string]any{
-				"exit_code": res.ExitCode,
-				"cwd":       cwd,
-			},
+			Content:           []toolContent{{Type: "text", Text: text}},
+			IsError:           res.ExitCode != 0,
+			StructuredContent: structured,
 		}
 
 	case "cd":
@@ -890,6 +895,29 @@ func mcpHandleTool(name string, args map[string]any, cfg *Config) toolResult {
 	}
 
 	return textErr(fmt.Sprintf("unknown tool %q", name))
+}
+
+// buildMCPRunText assembles the textual payload returned by the `run`
+// tool, capping the combined stdout+stderr at mcpRunTextMax. Returns
+// (text, truncatedBytes); truncatedBytes is 0 when the output fit.
+func buildMCPRunText(res *RunCaptureResult, cwd string) (string, int) {
+	text := res.Stdout
+	if res.Stderr != "" {
+		if text != "" {
+			text += "\n--- stderr ---\n"
+		}
+		text += res.Stderr
+	}
+	truncated := 0
+	if len(text) > mcpRunTextMax {
+		truncated = len(text) - mcpRunTextMax
+		text = text[:mcpRunTextMax] + fmt.Sprintf(
+			"\n\n... [%d bytes truncated; pipe through head/tail/grep on the remote to slice the output] ...",
+			truncated,
+		)
+	}
+	text += fmt.Sprintf("\n[exit %d cwd %s]", res.ExitCode, cwd)
+	return text, truncated
 }
 
 func mcpSend(obj any) {
