@@ -21,14 +21,14 @@ import (
 //
 // Stops cleanly on SIGINT/SIGTERM, or when the underlying ssh connection
 // drops -- whichever comes first.
-func cmdTunnel(args []string, cfg *Config, profileOverride string) int {
+func cmdTunnel(args []string, cfg *Config, profileOverride string) error {
 	if len(args) == 0 {
 		fmt.Fprintln(os.Stderr, "usage: srv tunnel [-R] <localPort>[:[<host>:]<remotePort>]")
 		fmt.Fprintln(os.Stderr, "  srv tunnel 8080            # local 8080 -> remote 127.0.0.1:8080")
 		fmt.Fprintln(os.Stderr, "  srv tunnel 8080:9090       # local 8080 -> remote 127.0.0.1:9090")
 		fmt.Fprintln(os.Stderr, "  srv tunnel 8080:db:5432    # local 8080 -> db:5432 (resolved on remote)")
 		fmt.Fprintln(os.Stderr, "  srv tunnel -R 9000:3000    # remote 9000 -> local 127.0.0.1:3000")
-		return 2
+		return exitCode(2)
 	}
 	reverse := false
 	if args[0] == "-R" || args[0] == "--reverse" {
@@ -37,34 +37,34 @@ func cmdTunnel(args []string, cfg *Config, profileOverride string) int {
 	}
 	if len(args) == 0 {
 		fmt.Fprintln(os.Stderr, "usage: srv tunnel [-R] <port-spec>")
-		return 2
+		return exitCode(2)
 	}
 	lp, rh, rp, err := parseTunnelSpec(args[0])
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "srv tunnel:", err)
-		return 2
+		return exitCode(2)
 	}
 
 	_, profile, err := ResolveProfile(cfg, profileOverride)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)
-		return 1
+		return exitCode(1)
 	}
 	c, err := Dial(profile)
 	if err != nil {
 		printDiagError(err, profile)
-		return 255
+		return exitCode(255)
 	}
 	defer c.Close()
 	if reverse {
-		return runReverseTunnel(c, profile, lp, rh, rp)
+		return exitCode(runReverseTunnel(c, profile, lp, rh, rp))
 	}
 
 	listenAddr := net.JoinHostPort("127.0.0.1", strconv.Itoa(lp))
 	listener, err := net.Listen("tcp", listenAddr)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "srv tunnel: listen:", err)
-		return 1
+		return exitCode(1)
 	}
 	defer listener.Close()
 
@@ -116,7 +116,7 @@ func cmdTunnel(args []string, cfg *Config, profileOverride string) int {
 		}(local)
 	}
 	wg.Wait()
-	return 0
+	return nil
 }
 
 func runReverseTunnel(c *Client, profile *Profile, remotePort int, localHost string, localPort int) int {

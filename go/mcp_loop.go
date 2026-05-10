@@ -20,7 +20,7 @@ var mcpMode bool
 // stdin one line at a time, dispatches by method, writes responses to
 // stdout. Logs lifecycle events to ~/.srv/mcp.log so disconnects can be
 // post-mortem'd (the client doesn't surface why a session ended).
-func cmdMcp(cfg *Config) int {
+func cmdMcp(cfg *Config) error {
 	mcpMode = true
 	mcpLogf("start v=%s", Version)
 	rd := bufio.NewReader(os.Stdin)
@@ -33,7 +33,7 @@ func cmdMcp(cfg *Config) int {
 			// so users debugging "why did mcp drop" can tell normal
 			// lifecycle apart from real crashes.
 			mcpLogf("exit reason=stdin-%s", classifyReadErr(err))
-			return 0
+			return nil
 		}
 		line = strings.TrimSpace(line)
 		if line == "" {

@@ -208,29 +208,27 @@ func loadColorPresetBody(name string) string {
 // the same one-line confirmation `srv color use <name>` always has.
 // Shared between the explicit `srv color use <name>` form and the TTY
 // picker fallback.
-func applyColorPreset(name string) int {
+func applyColorPreset(name string) error {
 	if colorReservedNames[name] {
-		fmt.Fprintf(os.Stderr, "color use: %q is a reserved mode name; use `srv color %s` directly.\n", name, name)
-		return 2
+		return exitErr(2, "color use: %q is a reserved mode name; use `srv color %s` directly.", name, name)
 	}
 	userExt := userPresetExt(name)
 	_, builtin := builtinThemeContent(name)
 	if userExt == "" && !builtin {
-		fmt.Fprintf(os.Stderr, "color use: %q not found in %s (looked for *.sh / *.itermcolors / *.toml) and no built-in theme matches.\n", name, ColorPresetsDir())
-		fmt.Fprintln(os.Stderr, "list available with `srv color list`.")
-		return 1
+		return exitErr(1,
+			"color use: %q not found in %s (looked for *.sh / *.itermcolors / *.toml) and no built-in theme matches.\nlist available with `srv color list`.",
+			name, ColorPresetsDir())
 	}
 	sid, err := SetColorPreset(name)
 	if err != nil {
-		fmt.Fprintln(os.Stderr, "color use:", err)
-		return 1
+		return exitErr(1, "color use: %v", err)
 	}
 	origin := "built-in"
 	if userExt != "" {
 		origin = "user " + userExt
 	}
 	fmt.Printf("color: using %s preset %q (session=%s)\n", origin, name, sid)
-	return 0
+	return nil
 }
 
 // buildColorPickerItems lists every selectable colour preset for the TTY
@@ -281,7 +279,7 @@ func buildColorPickerItems() []*pickerItem {
 //   - list: enumerate ~/.srv/init/*.sh by basename, marking the
 //     active preset.
 //   - status (default): print which mode + prologue source is live.
-func cmdColor(args []string) int {
+func cmdColor(args []string) error {
 	action := "status"
 	if len(args) > 0 {
 		action = strings.ToLower(args[0])
@@ -291,31 +289,31 @@ func cmdColor(args []string) int {
 		sid, err := SetColorPreset("on")
 		if err != nil {
 			fmt.Fprintln(os.Stderr, "color on:", err)
-			return 1
+			return exitCode(1)
 		}
 		fmt.Printf("color: on (session=%s)\n", sid)
-		return 0
+		return nil
 	case "off", "disable":
 		sid, err := SetColorPreset("off")
 		if err != nil {
 			fmt.Fprintln(os.Stderr, "color off:", err)
-			return 1
+			return exitCode(1)
 		}
 		fmt.Printf("color: off (session=%s)\n", sid)
-		return 0
+		return nil
 	case "auto", "clear", "default":
 		sid, err := SetColorPreset("")
 		if err != nil {
 			fmt.Fprintln(os.Stderr, "color auto:", err)
-			return 1
+			return exitCode(1)
 		}
 		fmt.Printf("color: auto (session=%s)\n", sid)
-		return 0
+		return nil
 	case "list":
 		userPresets, err := ListColorPresets()
 		if err != nil {
 			fmt.Fprintln(os.Stderr, "color list:", err)
-			return 1
+			return exitCode(1)
 		}
 		userSet := map[string]bool{}
 		for _, p := range userPresets {
@@ -348,7 +346,7 @@ func cmdColor(args []string) int {
 		fmt.Println()
 		fmt.Println("supported user formats: .sh / .itermcolors / .toml / .yml / .conf (Kitty) / .Xresources")
 		fmt.Println("apply with: srv color use <name>")
-		return 0
+		return nil
 	case "use":
 		if len(args) < 2 || args[1] == "" {
 			// TTY: open the same picker `srv use` uses, populated with
@@ -359,17 +357,17 @@ func cmdColor(args []string) int {
 				items := buildColorPickerItems()
 				if len(items) == 0 {
 					fmt.Fprintln(os.Stderr, "(no colour presets available)")
-					return 1
+					return exitCode(1)
 				}
 				sel, ok := runItemPicker(items, "Select a colour preset for this shell:", pickerLabels{pin: "active", def: "default"})
 				if !ok {
-					return 0
+					return nil
 				}
 				return applyColorPreset(sel)
 			}
 			fmt.Fprintln(os.Stderr, "usage: srv color use <name>")
 			fmt.Fprintln(os.Stderr, "list available with `srv color list`.")
-			return 2
+			return exitCode(2)
 		}
 		return applyColorPreset(args[1])
 	case "status", "":
@@ -393,8 +391,8 @@ func cmdColor(args []string) int {
 			}
 			fmt.Printf("color: %s preset %q%s (session=%s)\n", origin, mode, location, sid)
 		}
-		return 0
+		return nil
 	}
 	fmt.Fprintln(os.Stderr, "usage: srv color [on|off|auto|use <name>|list|status]")
-	return 2
+	return exitCode(2)
 }

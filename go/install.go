@@ -31,7 +31,7 @@ var installHTML []byte
 // Bootstrap entry points: ./install.ps1 -Gui and ./install.sh --gui both
 // just locate srv and exec it with `install`. Power users can also run
 // `srv install` directly once it's on PATH.
-func cmdInstall(args []string) int {
+func cmdInstall(args []string) error {
 	noBrowser := false
 	for _, a := range args {
 		switch a {
@@ -39,21 +39,21 @@ func cmdInstall(args []string) int {
 			noBrowser = true
 		case "--help", "-h":
 			fmt.Println("usage: srv install [--no-browser]")
-			return 0
+			return nil
 		}
 	}
 
 	bin, err := os.Executable()
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "srv install: can't locate own binary:", err)
-		return 1
+		return exitCode(1)
 	}
 	bin, _ = filepath.Abs(bin)
 
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "srv install: listen:", err)
-		return 1
+		return exitCode(1)
 	}
 	addr := listener.Addr().(*net.TCPAddr)
 	url := fmt.Sprintf("http://127.0.0.1:%d", addr.Port)
@@ -122,7 +122,7 @@ func cmdInstall(args []string) int {
 	}
 	_ = server.Close()
 	fmt.Fprintln(os.Stderr, "srv installer: done.")
-	return 0
+	return nil
 }
 
 // installStatus is what /api/status returns -- the UI renders it directly.

@@ -7,11 +7,11 @@ import (
 	"strings"
 )
 
-func cmdEnv(args []string, cfg *Config, profileOverride string) int {
+func cmdEnv(args []string, cfg *Config, profileOverride string) error {
 	name, profile, err := ResolveProfile(cfg, profileOverride)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)
-		return 1
+		return exitCode(1)
 	}
 	action := "list"
 	if len(args) > 0 {
@@ -30,7 +30,7 @@ func cmdEnv(args []string, cfg *Config, profileOverride string) int {
 	case "set":
 		if len(args) < 3 {
 			fmt.Fprintln(os.Stderr, "usage: srv env set <key> <value>")
-			return 2
+			return exitCode(2)
 		}
 		if profile.Env == nil {
 			profile.Env = map[string]string{}
@@ -38,30 +38,30 @@ func cmdEnv(args []string, cfg *Config, profileOverride string) int {
 		profile.Env[args[1]] = strings.Join(args[2:], " ")
 		if err := SaveConfig(cfg); err != nil {
 			fmt.Fprintln(os.Stderr, err)
-			return 1
+			return exitCode(1)
 		}
 		fmt.Printf("%s.%s=%s\n", name, args[1], profile.Env[args[1]])
 	case "unset":
 		if len(args) != 2 {
 			fmt.Fprintln(os.Stderr, "usage: srv env unset <key>")
-			return 2
+			return exitCode(2)
 		}
 		delete(profile.Env, args[1])
 		if err := SaveConfig(cfg); err != nil {
 			fmt.Fprintln(os.Stderr, err)
-			return 1
+			return exitCode(1)
 		}
 	case "clear":
 		profile.Env = nil
 		if err := SaveConfig(cfg); err != nil {
 			fmt.Fprintln(os.Stderr, err)
-			return 1
+			return exitCode(1)
 		}
 	default:
 		fmt.Fprintln(os.Stderr, "usage: srv env [list|set|unset|clear]")
-		return 2
+		return exitCode(2)
 	}
-	return 0
+	return nil
 }
 
 // applyRemoteEnv prepends `KEY=value ...` exports to the user's command,

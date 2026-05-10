@@ -240,7 +240,7 @@ func printDiagError(err error, profile *Profile) {
 	}
 }
 
-func cmdCheck(args []string, cfg *Config, profileOverride string) int {
+func cmdCheck(args []string, cfg *Config, profileOverride string) error {
 	rtt := false
 	count := 10
 	interval := 200 * time.Millisecond
@@ -269,18 +269,18 @@ func cmdCheck(args []string, cfg *Config, profileOverride string) int {
 			}
 		default:
 			if strings.HasPrefix(a, "-") {
-				fatal("error: unknown check flag %q", a)
+				return exitErr(1, "error: unknown check flag %q", a)
 			}
 		}
 	}
 
 	name, profile, err := ResolveProfile(cfg, profileOverride)
 	if err != nil {
-		fatal("%v", err)
+		return exitErr(1, "%v", err)
 	}
 
 	if rtt {
-		return runRTTProbe(profile, name, count, interval)
+		return exitCode(runRTTProbe(profile, name, count, interval))
 	}
 
 	user := profile.User
@@ -301,7 +301,7 @@ func cmdCheck(args []string, cfg *Config, profileOverride string) int {
 
 	if res.OK {
 		fmt.Println("OK -- connected; key authentication works.")
-		return 0
+		return nil
 	}
 	fmt.Printf("FAIL (%s; exit %d)\n", res.Diagnosis, res.ExitCode)
 	if res.Stderr != "" {
@@ -315,7 +315,7 @@ func cmdCheck(args []string, cfg *Config, profileOverride string) int {
 	for _, line := range checkAdvice(res.Diagnosis, profile, name) {
 		fmt.Println(line)
 	}
-	return 1
+	return exitCode(1)
 }
 
 // runRTTProbe times `count` SSH-level keepalive round trips against the

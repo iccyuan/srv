@@ -12,7 +12,7 @@ import (
 	"strings"
 )
 
-func cmdDoctor(args []string, cfg *Config, profileOverride string) int {
+func cmdDoctor(args []string, cfg *Config, profileOverride string) error {
 	asJSON := len(args) > 0 && args[0] == "--json"
 	rows, ok := doctorChecks(cfg, profileOverride)
 	for _, row := range rows {
@@ -39,9 +39,9 @@ func cmdDoctor(args []string, cfg *Config, profileOverride string) int {
 		fmt.Println(string(b))
 	}
 	if ok {
-		return 0
+		return nil
 	}
-	return 1
+	return exitCode(1)
 }
 
 func doctorChecks(cfg *Config, profileOverride string) ([]map[string]any, bool) {
@@ -115,36 +115,36 @@ func editJSONValue(v any, pattern string) ([]byte, error) {
 	return os.ReadFile(tmpPath)
 }
 
-func cmdOpen(args []string, cfg *Config, profileOverride string) int {
+func cmdOpen(args []string, cfg *Config, profileOverride string) error {
 	if len(args) == 0 {
 		fmt.Fprintln(os.Stderr, "usage: srv open <remote_file>")
-		return 2
+		return exitCode(2)
 	}
 	name, profile, err := ResolveProfile(cfg, profileOverride)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)
-		return 1
+		return exitCode(1)
 	}
 	cwd := GetCwd(name, profile)
 	remote := resolveRemotePath(args[0], cwd)
 	tmpDir, err := os.MkdirTemp("", "srv-open-")
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "srv open:", err)
-		return 1
+		return exitCode(1)
 	}
 	local := filepath.Join(tmpDir, path.Base(strings.TrimRight(remote, "/")))
 	if rc, _, err := pullPath(profile, remote, local, false); err != nil || rc != 0 {
 		if err != nil {
 			fmt.Fprintln(os.Stderr, "srv open:", err)
 		}
-		return 1
+		return exitCode(1)
 	}
 	fmt.Fprintln(os.Stderr, "opened local copy:", local)
 	if err := openLocal(local); err != nil {
 		fmt.Fprintln(os.Stderr, "srv open:", err)
-		return 1
+		return exitCode(1)
 	}
-	return 0
+	return nil
 }
 
 func openLocal(p string) error {
@@ -158,11 +158,11 @@ func openLocal(p string) error {
 	}
 }
 
-func cmdCode(args []string, cfg *Config, profileOverride string) int {
+func cmdCode(args []string, cfg *Config, profileOverride string) error {
 	name, profile, err := ResolveProfile(cfg, profileOverride)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)
-		return 1
+		return exitCode(1)
 	}
 	cwd := GetCwd(name, profile)
 	target := cwd
@@ -175,10 +175,10 @@ func cmdCode(args []string, cfg *Config, profileOverride string) int {
 	}
 	uri := "vscode-remote://ssh-remote+" + host + target
 	if code, err := exec.LookPath("code"); err == nil {
-		return runLocal(code, "--folder-uri", uri)
+		return exitCode(runLocal(code, "--folder-uri", uri))
 	}
 	fmt.Println("code --folder-uri", uri)
-	return 0
+	return nil
 }
 
 func runLocal(name string, args ...string) int {
@@ -191,10 +191,9 @@ func runLocal(name string, args ...string) int {
 	return 0
 }
 
-func cmdDiff(args []string, cfg *Config, profileOverride string) int {
+func cmdDiff(args []string, cfg *Config, profileOverride string) error {
 	if len(args) == 0 {
-		fmt.Fprintln(os.Stderr, "usage: srv diff <local_file> [remote_file]")
-		return 2
+		return exitErr(2, "usage: srv diff <local_file> [remote_file]")
 	}
 	if args[0] == "--changed" {
 		return cmdDiffChanged(args[1:], cfg, profileOverride)
@@ -206,11 +205,10 @@ func cmdDiff(args []string, cfg *Config, profileOverride string) int {
 	}
 	text, rc, err := diffLocalRemote(cfg, profileOverride, local, remoteArg)
 	if err != nil {
-		fmt.Fprintln(os.Stderr, "srv diff:", err)
-		return 1
+		return exitErr(1, "srv diff: %v", err)
 	}
 	fmt.Print(text)
-	return rc
+	return exitCode(rc)
 }
 
 func diffLocalRemote(cfg *Config, profileOverride, local, remoteArg string) (string, int, error) {
@@ -259,11 +257,11 @@ func diffLocalRemote(cfg *Config, profileOverride, local, remoteArg string) (str
 	return fmt.Sprintf("files differ: %s %s\n", local, remote), rc, nil
 }
 
-func cmdDiffChanged(args []string, cfg *Config, profileOverride string) int {
+func cmdDiffChanged(args []string, cfg *Config, profileOverride string) error {
 	root := findGitRoot(mustCwd())
 	if root == "" {
 		fmt.Fprintln(os.Stderr, "srv diff --changed: not in a git repo")
-		return 2
+		return exitCode(2)
 	}
 	scope := "all"
 	if len(args) > 0 {
@@ -272,24 +270,24 @@ func cmdDiffChanged(args []string, cfg *Config, profileOverride string) int {
 	files, err := gitChangedFiles(root, scope)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "srv diff --changed:", err)
-		return 1
+		return exitCode(1)
 	}
 	if len(files) == 0 {
 		fmt.Fprintln(os.Stderr, "(no changed files)")
-		return 0
+		return nil
 	}
-	rc := 0
+	var lastErr error
 	for _, rel := range files {
 		local := filepath.Join(root, filepath.FromSlash(rel))
 		if st, err := os.Stat(local); err != nil || st.IsDir() {
 			continue
 		}
 		fmt.Fprintf(os.Stderr, "\n--- %s ---\n", rel)
-		if drc := cmdDiff([]string{local, rel}, cfg, profileOverride); drc != 0 {
-			rc = drc
+		if derr := cmdDiff([]string{local, rel}, cfg, profileOverride); derr != nil {
+			lastErr = derr
 		}
 	}
-	return rc
+	return lastErr
 }
 
 func simpleDiff(a, b string) int {

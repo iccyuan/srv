@@ -138,29 +138,27 @@ func daemonSocketPath() string {
 
 // cmdDaemon starts the daemon listener (foreground). Ctrl-C stops it
 // cleanly and unlinks the socket file.
-func cmdDaemon(args []string) int {
+func cmdDaemon(args []string) error {
 	// Subcommands of `srv daemon` itself: status / stop.
 	if len(args) > 0 {
 		switch args[0] {
 		case "status":
-			return daemonClientStatus(args[1:])
+			return exitCode(daemonClientStatus(args[1:]))
 		case "stop":
-			return daemonClientStop()
+			return exitCode(daemonClientStop())
 		case "restart":
-			rc := daemonClientStop()
-			if rc != 0 {
-				return rc
+			if rc := daemonClientStop(); rc != 0 {
+				return exitCode(rc)
 			}
 			if ensureDaemon() {
 				fmt.Println("daemon: restarted")
-				return 0
+				return nil
 			}
-			fmt.Fprintln(os.Stderr, "daemon: restart failed")
-			return 1
+			return exitErr(1, "daemon: restart failed")
 		case "logs":
-			return daemonClientLogs()
+			return exitCode(daemonClientLogs())
 		case "prune-cache":
-			return daemonClientPruneCache()
+			return exitCode(daemonClientPruneCache())
 		}
 	}
 	sockPath := daemonSocketPath()
@@ -172,14 +170,14 @@ func cmdDaemon(args []string) int {
 			_ = os.Remove(sockPath)
 		} else {
 			fmt.Fprintln(os.Stderr, "daemon already running at", sockPath)
-			return 1
+			return exitCode(1)
 		}
 	}
 
 	listener, err := net.Listen("unix", sockPath)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "daemon listen:", err)
-		return 1
+		return exitCode(1)
 	}
 	_ = os.Chmod(sockPath, 0o600)
 	fmt.Fprintln(os.Stderr, "srv daemon listening at", sockPath)
@@ -213,7 +211,7 @@ func cmdDaemon(args []string) int {
 			case <-state.stopCh:
 				state.closeAll()
 				_ = os.Remove(sockPath)
-				return 0
+				return nil
 			default:
 				fmt.Fprintln(os.Stderr, "daemon accept:", err)
 				continue

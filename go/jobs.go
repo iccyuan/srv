@@ -30,7 +30,11 @@ func loadJobsFile() *jobsFile {
 		return j
 	}
 	if err := json.Unmarshal(data, j); err != nil {
-		fatal("error: %s is not valid JSON: %v", JobsFile(), err)
+		// Helper used in MCP-reachable paths -- can't os.Exit.
+		// Treat a corrupt jobs file as empty; the user can `srv jobs`
+		// see the empty list and recover.
+		fmt.Fprintf(os.Stderr, "warning: %s is not valid JSON: %v\n", JobsFile(), err)
+		return j
 	}
 	if j.Jobs == nil {
 		j.Jobs = []*JobRecord{}
@@ -60,7 +64,12 @@ func findJob(j *jobsFile, idOrPrefix string) *JobRecord {
 		return matches[0]
 	}
 	if len(matches) > 1 {
-		fatal("error: ambiguous job id %q matches %d jobs.", idOrPrefix, len(matches))
+		// Helper -- callers (cmdLogs, cmdKill, MCP tail_log/kill_job)
+		// each format the error themselves. Surface ambiguity as
+		// "no match" so they treat it as not-found and the user sees
+		// our hint.
+		fmt.Fprintf(os.Stderr, "ambiguous job id %q matches %d jobs.\n", idOrPrefix, len(matches))
+		return nil
 	}
 	return nil
 }
@@ -98,27 +107,27 @@ func spawnDetached(profileName string, profile *Profile, userCmd string) (*JobRe
 	return rec, nil
 }
 
-func cmdDetach(args []string, cfg *Config, profileOverride string) int {
+func cmdDetach(args []string, cfg *Config, profileOverride string) error {
 	if len(args) == 0 {
-		fatal("error: srv -d needs a command.")
+		return exitErr(1, "error: srv -d needs a command.")
 	}
 	name, profile, err := ResolveProfile(cfg, profileOverride)
 	if err != nil {
-		fatal("%v", err)
+		return exitErr(1, "%v", err)
 	}
 	userCmd := strings.Join(args, " ")
 	rec, err := spawnDetached(name, profile, userCmd)
 	if err != nil {
-		fatal("error: %v", err)
+		return exitErr(1, "error: %v", err)
 	}
 	fmt.Printf("job   %s  pid=%d  profile=%s\n", rec.ID, rec.Pid, rec.Profile)
 	fmt.Printf("log   %s\n", rec.Log)
 	fmt.Printf("tail  srv logs %s -f\n", rec.ID)
 	fmt.Printf("kill  srv kill %s\n", rec.ID)
-	return 0
+	return nil
 }
 
-func cmdJobs(cfg *Config, profileOverride string) int {
+func cmdJobs(cfg *Config, profileOverride string) error {
 	jobs := loadJobsFile().Jobs
 	if profileOverride != "" {
 		filtered := jobs[:0]
@@ -131,7 +140,7 @@ func cmdJobs(cfg *Config, profileOverride string) int {
 	}
 	if len(jobs) == 0 {
 		fmt.Println("(no jobs)")
-		return 0
+		return nil
 	}
 	sort.Slice(jobs, func(i, k int) bool { return jobs[i].ID < jobs[k].ID })
 	for _, j := range jobs {
@@ -142,12 +151,12 @@ func cmdJobs(cfg *Config, profileOverride string) int {
 		fmt.Printf("%s  pid=%-7d profile=%-10s started=%s  cmd=%s\n",
 			j.ID, j.Pid, j.Profile, j.Started, cmd)
 	}
-	return 0
+	return nil
 }
 
-func cmdLogs(args []string, cfg *Config, profileOverride string) int {
+func cmdLogs(args []string, cfg *Config, profileOverride string) error {
 	if len(args) == 0 || args[0] == "-f" || args[0] == "--follow" {
-		fatal("usage: srv logs <id> [-f]")
+		return exitErr(1, "usage: srv logs <id> [-f]")
 	}
 	jid := args[0]
 	follow := false
@@ -159,22 +168,22 @@ func cmdLogs(args []string, cfg *Config, profileOverride string) int {
 	jobs := loadJobsFile()
 	j := findJob(jobs, jid)
 	if j == nil {
-		fatal("error: no such job %q", jid)
+		return exitErr(1, "error: no such job %q", jid)
 	}
 	prof, ok := cfg.Profiles[j.Profile]
 	if !ok {
-		fatal("error: profile %q (from job) not found.", j.Profile)
+		return exitErr(1, "error: profile %q (from job) not found.", j.Profile)
 	}
 	cmd := "cat " + j.Log
 	if follow {
 		cmd = "tail -f " + j.Log
 	}
-	return runRemoteStream(prof, "", cmd, follow)
+	return exitCode(runRemoteStream(prof, "", cmd, follow))
 }
 
-func cmdKill(args []string, cfg *Config, profileOverride string) int {
+func cmdKill(args []string, cfg *Config, profileOverride string) error {
 	if len(args) == 0 {
-		fatal("usage: srv kill <id>")
+		return exitErr(1, "usage: srv kill <id>")
 	}
 	jid := args[0]
 	sig := "TERM"
@@ -188,11 +197,11 @@ func cmdKill(args []string, cfg *Config, profileOverride string) int {
 	jobs := loadJobsFile()
 	j := findJob(jobs, jid)
 	if j == nil {
-		fatal("error: no such job %q", jid)
+		return exitErr(1, "error: no such job %q", jid)
 	}
 	prof, ok := cfg.Profiles[j.Profile]
 	if !ok {
-		fatal("error: profile %q (from job) not found.", j.Profile)
+		return exitErr(1, "error: profile %q (from job) not found.", j.Profile)
 	}
 	cmd := fmt.Sprintf("kill -%s %d 2>/dev/null && echo killed || echo 'no such pid (already exited?)'", sig, j.Pid)
 	rc := runRemoteStream(prof, "", cmd, false)
@@ -205,5 +214,5 @@ func cmdKill(args []string, cfg *Config, profileOverride string) int {
 	}
 	jobs.Jobs = out
 	_ = saveJobsFile(jobs)
-	return rc
+	return exitCode(rc)
 }

@@ -245,15 +245,76 @@ func parseGlobalFlags(args []string) (globalOpts, []string) {
 	return opts, args[i:]
 }
 
-// fatal prints to stderr and exits 1 -- the standard CLI failure path.
-// Never call from a code path that might also be reached under MCP, since
-// os.Exit terminates the entire stdio server and Claude Code surfaces
-// that to the user as the unhelpful "tools no longer available". As a
-// belt-and-suspenders guard, when mcpMode is true we panic instead so
-// safeMCPHandle catches the failure and reports it as an isError tool
-// result -- the MCP loop survives. New code should still prefer
-// returning an error over fatal(); this trap exists so a misplaced
-// fatal in a shared helper can't take down the MCP server silently.
+// errExit is the error type cmd handlers return to signal a non-zero
+// exit code with an optional stderr message. main.go's run() translates
+// it back into an exit code via translateExit. Replaces the old global
+// fatal() / os.Exit pattern: cmd code now propagates rather than
+// terminating, so the same handler can be safely reused under the MCP
+// path (where os.Exit would have killed the whole server).
+type errExit struct {
+	code int
+	msg  string
+}
+
+func (e *errExit) Error() string {
+	if e.msg == "" {
+		return fmt.Sprintf("exit %d", e.code)
+	}
+	return e.msg
+}
+
+// exitErr builds an errExit with a printf-formatted message. Use code 1
+// for ordinary failures, 2 for usage / argument errors (POSIX convention).
+func exitErr(code int, format string, args ...any) error {
+	return &errExit{code: code, msg: fmt.Sprintf(format, args...)}
+}
+
+// exitCode wraps a bare numeric exit code into an error. Useful when a
+// non-cmd helper (runRemoteStream, etc.) already returned the right
+// code and we just want to propagate it without an extra message.
+func exitCode(code int) error {
+	if code == 0 {
+		return nil
+	}
+	return &errExit{code: code}
+}
+
+// exitCodeOf is the inverse of exitCode -- pulls the numeric code out
+// of an error. nil → 0, errExit → its code, anything else → 1. Used by
+// cmdRunWithHints to decide whether a remote command exited 127 (the
+// "did you mean a local subcommand?" hint trigger).
+func exitCodeOf(err error) int {
+	if err == nil {
+		return 0
+	}
+	if ex, ok := err.(*errExit); ok {
+		return ex.code
+	}
+	return 1
+}
+
+// translateExit converts a cmd handler's error return into the int
+// run() needs to pass to os.Exit. Empty-msg errExits (exitCode-style)
+// emit no stderr line; non-errExit errors are printed verbatim and
+// surface as exit 1.
+func translateExit(err error) int {
+	if err == nil {
+		return 0
+	}
+	if ex, ok := err.(*errExit); ok {
+		if ex.msg != "" {
+			fmt.Fprintln(os.Stderr, ex.msg)
+		}
+		return ex.code
+	}
+	fmt.Fprintln(os.Stderr, err)
+	return 1
+}
+
+// fatal is retained for the few CLI-only argument-parsing paths in
+// main.go that run before any handler dispatch (parseGlobalFlags). It
+// also panics under mcpMode so a stray future call can't silently kill
+// the MCP server. New code should return errors via exitErr instead.
 func fatal(format string, args ...any) {
 	msg := fmt.Sprintf(format, args...)
 	if mcpMode {
@@ -304,7 +365,7 @@ func run(args []string) int {
 	}
 
 	if known {
-		return cmd.handler(ctx)
+		return translateExit(cmd.handler(ctx))
 	}
 
 	// Default: treat as a remote command. Nudge the user if the first
@@ -312,7 +373,7 @@ func run(args []string) int {
 	// run still proceeds (their command might be the right one).
 	emitTypoHintPre(ctx.cfg, opts, sub)
 	if opts.detach {
-		return cmdDetach(rest, ctx.cfg, opts.profile)
+		return translateExit(cmdDetach(rest, ctx.cfg, opts.profile))
 	}
-	return cmdRunWithHints(rest, ctx.cfg, opts)
+	return translateExit(cmdRunWithHints(rest, ctx.cfg, opts))
 }

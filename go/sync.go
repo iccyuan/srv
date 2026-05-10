@@ -675,11 +675,11 @@ func deleteRemoteFiles(profile *Profile, remoteRoot string, files []string) (int
 	return 0, nil
 }
 
-func cmdSync(args []string, cfg *Config, profileOverride string) int {
+func cmdSync(args []string, cfg *Config, profileOverride string) error {
 	o := parseSyncOpts(args)
 	name, profile, err := ResolveProfile(cfg, profileOverride)
 	if err != nil {
-		fatal("%v", err)
+		return exitErr(1, "%v", err)
 	}
 
 	// local root
@@ -694,11 +694,11 @@ func cmdSync(args []string, cfg *Config, profileOverride string) int {
 	}
 	abs, err := filepath.Abs(localRoot)
 	if err != nil {
-		fatal("error: bad local root: %v", err)
+		return exitErr(1, "error: bad local root: %v", err)
 	}
 	localRoot = abs
 	if st, err := os.Stat(localRoot); err != nil || !st.IsDir() {
-		fatal("error: local root not a directory: %s", localRoot)
+		return exitErr(1, "error: local root not a directory: %s", localRoot)
 	}
 
 	// auto-detect mode
@@ -710,7 +710,7 @@ func cmdSync(args []string, cfg *Config, profileOverride string) int {
 			if o.noGit {
 				reason = "git auto-detect disabled (--no-git)"
 			}
-			fatal("error: %s. Specify --include / --since / --files.", reason)
+			return exitErr(1, "error: %s. Specify --include / --since / --files.", reason)
 		}
 	}
 
@@ -729,7 +729,7 @@ func cmdSync(args []string, cfg *Config, profileOverride string) int {
 
 	files, err := collectSyncFiles(o, localRoot, allExcludes)
 	if err != nil {
-		fatal("error: %v", err)
+		return exitErr(1, "error: %v", err)
 	}
 	var deletes []string
 	if o.delete {
@@ -739,10 +739,10 @@ func cmdSync(args []string, cfg *Config, profileOverride string) int {
 		}
 		deletes, err = collectSyncDeletes(o, localRoot, allExcludes)
 		if err != nil {
-			fatal("error: %v", err)
+			return exitErr(1, "error: %v", err)
 		}
 		if len(deletes) > limit && !o.dryRun && !o.yes {
-			fatal("error: --delete would remove %d files (limit %d). Re-run with --dry-run, --yes, or --delete-limit N.", len(deletes), limit)
+			return exitErr(1, "error: --delete would remove %d files (limit %d). Re-run with --dry-run, --yes, or --delete-limit N.", len(deletes), limit)
 		}
 	}
 
@@ -765,7 +765,7 @@ func cmdSync(args []string, cfg *Config, profileOverride string) int {
 	}
 	if len(files) == 0 && len(deletes) == 0 {
 		fmt.Fprintln(os.Stderr, "(nothing to sync)")
-		return 0
+		return nil
 	}
 	listed := files
 	if len(listed) > 200 {
@@ -782,7 +782,7 @@ func cmdSync(args []string, cfg *Config, profileOverride string) int {
 	}
 	if o.dryRun {
 		fmt.Fprintln(os.Stderr, "(dry-run, not transferred)")
-		return 0
+		return nil
 	}
 	rc, err := tarUploadStream(profile, localRoot, files, remoteRoot)
 	if err != nil {
@@ -791,16 +791,16 @@ func cmdSync(args []string, cfg *Config, profileOverride string) int {
 	if rc == 0 && len(deletes) > 0 {
 		if drc, derr := deleteRemoteFiles(profile, remoteRoot, deletes); derr != nil {
 			printDiagError(derr, profile)
-			return 1
+			return exitCode(1)
 		} else if drc != 0 {
-			return drc
+			return exitCode(drc)
 		}
 	}
 	if o.watch {
 		fmt.Fprintln(os.Stderr)
-		return runSyncWatch(o, profile, localRoot, remoteRoot, allExcludes)
+		return exitCode(runSyncWatch(o, profile, localRoot, remoteRoot, allExcludes))
 	}
-	return rc
+	return exitCode(rc)
 }
 
 func mustCwd() string {

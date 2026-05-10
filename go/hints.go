@@ -166,12 +166,13 @@ func emitTypoHintPre(cfg *Config, opts globalOpts, sub string) {
 // remote command can't be found (exit 127). Used by both the default
 // "fall through to remote" dispatch path and the explicit `srv run`
 // subcommand.
-func cmdRunWithHints(args []string, cfg *Config, opts globalOpts) int {
-	rc := cmdRun(args, cfg, opts.profile, opts.tty)
+func cmdRunWithHints(args []string, cfg *Config, opts globalOpts) error {
+	err := cmdRun(args, cfg, opts.profile, opts.tty)
+	rc := exitCodeOf(err)
 	if rc == 127 && len(args) > 0 {
 		emitTypoHintPostFailure(cfg, opts, strings.Join(args, " "), rc)
 	}
-	return rc
+	return err
 }
 
 // emitTypoHintPostFailure prints a hint after a remote command exited

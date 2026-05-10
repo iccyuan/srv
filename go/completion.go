@@ -37,12 +37,12 @@ _srv() {
         local profs
         profs=$(srv _profiles 2>/dev/null)
         COMPREPLY=( $(compgen -W "$profs" -- "$cur") )
-        return 0
+        return nil
     fi
 
     if [[ -z "$sub" ]]; then
         COMPREPLY=( $(compgen -W "$subs" -- "$cur") )
-        return 0
+        return nil
     fi
 
     # Helper: load remote entries from 'srv _ls' into COMPREPLY (preserves
@@ -393,9 +393,9 @@ Register-ArgumentCompleter -Native -CommandName srv -ScriptBlock {
 }
 `
 
-func cmdCompletion(args []string) int {
+func cmdCompletion(args []string) error {
 	if len(args) == 0 {
-		fatal("usage: srv completion <bash|zsh|powershell>")
+		return exitErr(1, "usage: srv completion <bash|zsh|powershell>")
 	}
 	// The bash and PowerShell scripts get their `subs` list rendered
 	// from the live registry so adding a new subcommand only requires
@@ -430,7 +430,7 @@ func cmdCompletion(args []string) int {
 		fmt.Print(out)
 	default:
 		fmt.Fprintf(os.Stderr, "error: unknown shell %q (expected bash/zsh/powershell)\n", args[0])
-		return 1
+		return exitCode(1)
 	}
-	return 0
+	return nil
 }

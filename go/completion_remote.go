@@ -27,7 +27,7 @@ const lsCacheTTL = 5 * time.Second
 // argument passing silently drops empty string arguments -- without this
 // branch, `srv run <space><TAB>` from PS would invoke the binary as
 // `srv _ls` (no args) and get nothing, leaving completion blank.
-func cmdInternalLs(args []string, cfg *Config, profileOverride string) int {
+func cmdInternalLs(args []string, cfg *Config, profileOverride string) error {
 	prefix := ""
 	if len(args) > 0 {
 		prefix = args[0]
@@ -35,12 +35,12 @@ func cmdInternalLs(args []string, cfg *Config, profileOverride string) int {
 	entries, err := listRemoteEntries(prefix, cfg, profileOverride)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "srv _ls:", err)
-		return 0
+		return nil
 	}
 	for _, e := range entries {
 		fmt.Println(e)
 	}
-	return 0
+	return nil
 }
 
 // listRemoteEntries enumerates remote filesystem entries under `prefix`

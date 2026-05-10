@@ -16,7 +16,7 @@ import "fmt"
 // preserves the cmd* signatures we already have without forcing every
 // command to take an opaque context object.
 
-type cmdHandler func(ctx cmdCtx) int
+type cmdHandler func(ctx cmdCtx) error
 
 // cmdCtx is the uniform input shape every handler receives. Holds the
 // post-flag args and the resolved config (when loaded), plus the
@@ -43,17 +43,17 @@ type subcommand struct {
 // for now the prose help in main.go is still the user-facing source.
 var subcommands = []subcommand{
 	// Help / version / first-run -- need no config.
-	{name: "help", aliases: []string{"--help", "-h"}, noConfig: true, handler: func(c cmdCtx) int {
+	{name: "help", aliases: []string{"--help", "-h"}, noConfig: true, handler: func(c cmdCtx) error {
 		fmt.Print(t("help.full"))
-		return 0
+		return nil
 	}},
-	{name: "version", aliases: []string{"--version"}, noConfig: true, handler: func(c cmdCtx) int {
+	{name: "version", aliases: []string{"--version"}, noConfig: true, handler: func(c cmdCtx) error {
 		fmt.Printf("srv %s\n", Version)
-		return 0
+		return nil
 	}},
-	{name: "completion", noConfig: true, handler: func(c cmdCtx) int { return cmdCompletion(c.args) }},
-	{name: "install", noConfig: true, handler: func(c cmdCtx) int { return cmdInstall(c.args) }},
-	{name: "init", noConfig: true, handler: func(c cmdCtx) int {
+	{name: "completion", noConfig: true, handler: func(c cmdCtx) error { return cmdCompletion(c.args) }},
+	{name: "install", noConfig: true, handler: func(c cmdCtx) error { return cmdInstall(c.args) }},
+	{name: "init", noConfig: true, handler: func(c cmdCtx) error {
 		// init creates config; load empty if missing.
 		cfg, _ := LoadConfig()
 		if cfg == nil {
@@ -63,47 +63,47 @@ var subcommands = []subcommand{
 	}},
 
 	// Profile / cwd / status.
-	{name: "config", handler: func(c cmdCtx) int { return cmdConfig(c.args, c.cfg) }},
-	{name: "use", handler: func(c cmdCtx) int { return cmdUse(c.args, c.cfg) }},
-	{name: "cd", handler: func(c cmdCtx) int {
+	{name: "config", handler: func(c cmdCtx) error { return cmdConfig(c.args, c.cfg) }},
+	{name: "use", handler: func(c cmdCtx) error { return cmdUse(c.args, c.cfg) }},
+	{name: "cd", handler: func(c cmdCtx) error {
 		p := ""
 		if len(c.args) > 0 {
 			p = c.args[0]
 		}
 		return cmdCd(p, c.cfg, c.profileOverride)
 	}},
-	{name: "pwd", handler: func(c cmdCtx) int { return cmdPwd(c.cfg, c.profileOverride) }},
-	{name: "status", handler: func(c cmdCtx) int { return cmdStatus(c.cfg, c.profileOverride) }},
-	{name: "check", handler: func(c cmdCtx) int { return cmdCheck(c.args, c.cfg, c.profileOverride) }},
-	{name: "doctor", handler: func(c cmdCtx) int { return cmdDoctor(c.args, c.cfg, c.profileOverride) }},
-	{name: "shell", handler: func(c cmdCtx) int { return cmdShell(c.cfg, c.profileOverride) }},
-	{name: "env", handler: func(c cmdCtx) int { return cmdEnv(c.args, c.cfg, c.profileOverride) }},
+	{name: "pwd", handler: func(c cmdCtx) error { return cmdPwd(c.cfg, c.profileOverride) }},
+	{name: "status", handler: func(c cmdCtx) error { return cmdStatus(c.cfg, c.profileOverride) }},
+	{name: "check", handler: func(c cmdCtx) error { return cmdCheck(c.args, c.cfg, c.profileOverride) }},
+	{name: "doctor", handler: func(c cmdCtx) error { return cmdDoctor(c.args, c.cfg, c.profileOverride) }},
+	{name: "shell", handler: func(c cmdCtx) error { return cmdShell(c.cfg, c.profileOverride) }},
+	{name: "env", handler: func(c cmdCtx) error { return cmdEnv(c.args, c.cfg, c.profileOverride) }},
 
 	// Transfer / view.
-	{name: "push", handler: func(c cmdCtx) int { return cmdPush(c.args, c.cfg, c.profileOverride) }},
-	{name: "pull", handler: func(c cmdCtx) int { return cmdPull(c.args, c.cfg, c.profileOverride) }},
-	{name: "sync", handler: func(c cmdCtx) int { return cmdSync(c.args, c.cfg, c.profileOverride) }},
-	{name: "edit", handler: func(c cmdCtx) int { return cmdEdit(c.args, c.cfg, c.profileOverride) }},
-	{name: "open", handler: func(c cmdCtx) int { return cmdOpen(c.args, c.cfg, c.profileOverride) }},
-	{name: "code", handler: func(c cmdCtx) int { return cmdCode(c.args, c.cfg, c.profileOverride) }},
-	{name: "diff", handler: func(c cmdCtx) int { return cmdDiff(c.args, c.cfg, c.profileOverride) }},
+	{name: "push", handler: func(c cmdCtx) error { return cmdPush(c.args, c.cfg, c.profileOverride) }},
+	{name: "pull", handler: func(c cmdCtx) error { return cmdPull(c.args, c.cfg, c.profileOverride) }},
+	{name: "sync", handler: func(c cmdCtx) error { return cmdSync(c.args, c.cfg, c.profileOverride) }},
+	{name: "edit", handler: func(c cmdCtx) error { return cmdEdit(c.args, c.cfg, c.profileOverride) }},
+	{name: "open", handler: func(c cmdCtx) error { return cmdOpen(c.args, c.cfg, c.profileOverride) }},
+	{name: "code", handler: func(c cmdCtx) error { return cmdCode(c.args, c.cfg, c.profileOverride) }},
+	{name: "diff", handler: func(c cmdCtx) error { return cmdDiff(c.args, c.cfg, c.profileOverride) }},
 
 	// Tunnel / jobs / sessions.
-	{name: "tunnel", handler: func(c cmdCtx) int { return cmdTunnel(c.args, c.cfg, c.profileOverride) }},
-	{name: "jobs", handler: func(c cmdCtx) int { return cmdJobs(c.cfg, c.profileOverride) }},
-	{name: "logs", handler: func(c cmdCtx) int { return cmdLogs(c.args, c.cfg, c.profileOverride) }},
-	{name: "kill", handler: func(c cmdCtx) int { return cmdKill(c.args, c.cfg, c.profileOverride) }},
-	{name: "sessions", handler: func(c cmdCtx) int { return cmdSessions(c.args) }},
+	{name: "tunnel", handler: func(c cmdCtx) error { return cmdTunnel(c.args, c.cfg, c.profileOverride) }},
+	{name: "jobs", handler: func(c cmdCtx) error { return cmdJobs(c.cfg, c.profileOverride) }},
+	{name: "logs", handler: func(c cmdCtx) error { return cmdLogs(c.args, c.cfg, c.profileOverride) }},
+	{name: "kill", handler: func(c cmdCtx) error { return cmdKill(c.args, c.cfg, c.profileOverride) }},
+	{name: "sessions", handler: func(c cmdCtx) error { return cmdSessions(c.args) }},
 
 	// Integrations / settings.
-	{name: "mcp", handler: func(c cmdCtx) int { return cmdMcp(c.cfg) }},
-	{name: "guard", handler: func(c cmdCtx) int { return cmdGuard(c.args) }},
-	{name: "color", handler: func(c cmdCtx) int { return cmdColor(c.args) }},
-	{name: "daemon", handler: func(c cmdCtx) int { return cmdDaemon(c.args) }},
+	{name: "mcp", handler: func(c cmdCtx) error { return cmdMcp(c.cfg) }},
+	{name: "guard", handler: func(c cmdCtx) error { return cmdGuard(c.args) }},
+	{name: "color", handler: func(c cmdCtx) error { return cmdColor(c.args) }},
+	{name: "daemon", handler: func(c cmdCtx) error { return cmdDaemon(c.args) }},
 
 	// run/exec: -d global flag swaps in cmdDetach; otherwise wrap with
 	// the typo-hint emitter.
-	{name: "run", aliases: []string{"exec"}, handler: func(c cmdCtx) int {
+	{name: "run", aliases: []string{"exec"}, handler: func(c cmdCtx) error {
 		if c.detach {
 			return cmdDetach(c.args, c.cfg, c.profileOverride)
 		}
@@ -117,13 +117,13 @@ var subcommands = []subcommand{
 
 	// Internal helpers for shell completion. Hidden so they don't show
 	// up in `srv help` and aren't candidates for typo-hint matching.
-	{name: "_profiles", hidden: true, handler: func(c cmdCtx) int {
+	{name: "_profiles", hidden: true, handler: func(c cmdCtx) error {
 		for n := range c.cfg.Profiles {
 			fmt.Println(n)
 		}
-		return 0
+		return nil
 	}},
-	{name: "_ls", hidden: true, handler: func(c cmdCtx) int { return cmdInternalLs(c.args, c.cfg, c.profileOverride) }},
+	{name: "_ls", hidden: true, handler: func(c cmdCtx) error { return cmdInternalLs(c.args, c.cfg, c.profileOverride) }},
 }
 
 // subcommandMap and reservedSubcommands are populated by init() rather
