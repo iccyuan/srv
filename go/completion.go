@@ -63,52 +63,7 @@ _srv() {
     }
 
     case "$sub" in
-        config)
-            if [[ -z $sub2 ]]; then
-                COMPREPLY=( $(compgen -W "list default global remove show set edit" -- "$cur") )
-            elif [[ "$sub2" == "default" || "$sub2" == "remove" || "$sub2" == "show" || "$sub2" == "edit" ]]; then
-                local profs
-                profs=$(srv _profiles 2>/dev/null)
-                COMPREPLY=( $(compgen -W "$profs" -- "$cur") )
-            fi
-            ;;
-        use)
-            local profs
-            profs=$(srv _profiles 2>/dev/null)
-            COMPREPLY=( $(compgen -W "$profs --clear" -- "$cur") )
-            ;;
-        sessions)
-            COMPREPLY=( $(compgen -W "list show clear prune" -- "$cur") )
-            ;;
-        completion)
-            COMPREPLY=( $(compgen -W "bash zsh powershell" -- "$cur") )
-            ;;
-        cd)
-            _srv_remote_ls dirs
-            ;;
-        edit)
-            _srv_remote_ls all
-            ;;
-        pull)
-            if [[ -z $sub2 ]]; then _srv_remote_ls all
-            else COMPREPLY=( $(compgen -f -- "$cur") )
-            fi
-            ;;
-        push)
-            if [[ -z $sub2 ]]; then COMPREPLY=( $(compgen -f -- "$cur") )
-            else _srv_remote_ls all
-            fi
-            ;;
-        diff)
-            # srv diff <local> [<remote>] -- first arg is LOCAL, otherwise
-            # the *) catch-all below would route it to remote completion.
-            if [[ -z $sub2 ]]; then COMPREPLY=( $(compgen -f -- "$cur") )
-            else _srv_remote_ls all
-            fi
-            ;;
-        run|exec)
-            _srv_remote_ls all
-            ;;
+__SRV_CASES__
         *)
             # Catch-all: srv treats unrecognized first tokens as remote
             # commands. Args of those (paths, etc.) should complete from
@@ -195,42 +150,7 @@ _srv() {
     }
 
     case "$sub" in
-        config)
-            if [[ -z $sub2 ]]; then
-                _values 'action' list default global remove show set edit
-            elif [[ $sub2 == (default|remove|show|edit) ]]; then
-                local profs
-                profs=("${(@f)$(srv _profiles 2>/dev/null)}")
-                _values 'profile' $profs
-            fi
-            ;;
-        use)
-            local profs
-            profs=("${(@f)$(srv _profiles 2>/dev/null)}")
-            _values 'profile' $profs --clear
-            ;;
-        sessions) _values 'action' list show clear prune ;;
-        completion) _values 'shell' bash zsh powershell ;;
-        cd) _srv_remote_ls dirs ;;
-        edit) _srv_remote_ls all ;;
-        pull)
-            if [[ -z $sub2 ]]; then _srv_remote_ls all
-            else _files
-            fi
-            ;;
-        push)
-            if [[ -z $sub2 ]]; then _files
-            else _srv_remote_ls all
-            fi
-            ;;
-        diff)
-            # srv diff <local> [<remote>] -- first arg is LOCAL, otherwise
-            # the *) catch-all below would route it to remote completion.
-            if [[ -z $sub2 ]]; then _files
-            else _srv_remote_ls all
-            fi
-            ;;
-        run|exec) _srv_remote_ls all ;;
+__SRV_CASES__
         # Catch-all: srv runs unrecognized tokens on the remote, so their
         # args should complete remotely too. Without this, zsh would fall
         # back to _default (local files) and leak local cwd entries.
@@ -327,60 +247,7 @@ Register-ArgumentCompleter -Native -CommandName srv -ScriptBlock {
     }
 
     switch ($sub) {
-        'config' {
-            if (-not $sub2) {
-                & $emit @('list','default','global','remove','show','set','edit')
-            } elseif ($sub2 -in 'default','remove','show','edit') {
-                & $emit (& $profiles)
-            }
-        }
-        'use' {
-            & $emit (@(& $profiles) + '--clear')
-        }
-        'sessions' {
-            & $emit @('list','show','clear','prune')
-        }
-        'completion' {
-            & $emit @('bash','zsh','powershell')
-        }
-        'cd' {
-            # Remote directory completion (only dirs).
-            & $remote_ls $true
-        }
-        'edit' {
-            & $remote_ls $false
-        }
-        'pull' {
-            # First positional = remote path (any entry).
-            if (-not $sub2) {
-                & $remote_ls $false
-            } else {
-                # Second positional = local file.
-                & $local_files
-            }
-        }
-        'push' {
-            if (-not $sub2) {
-                # First positional = local file/dir.
-                & $local_files
-            } else {
-                # Second positional = remote path (any entry).
-                & $remote_ls $false
-            }
-        }
-        'diff' {
-            # srv diff <local> [<remote>] -- first arg is LOCAL, not the
-            # remote-by-default route the catch-all would take.
-            if (-not $sub2) {
-                & $local_files
-            } else {
-                & $remote_ls $false
-            }
-        }
-        { $_ -in 'run','exec' } {
-            # srv run <cmd> <args...>: args are remote (paths usually).
-            & $remote_ls $false
-        }
+__SRV_CASES__
         default {
             # Catch-all: srv routes unrecognized first tokens to the remote.
             # Their args should complete remotely too. Without this branch
@@ -411,9 +278,11 @@ func cmdCompletion(args []string) error {
 		// `srv completion bash` in the first place); leave the inline
 		// `srv _profiles` to use PATH lookup.
 		out := strings.ReplaceAll(bashCompletion, "__SRV_SUBS__", bashSubs)
+		out = strings.ReplaceAll(out, "__SRV_CASES__", emitBashCases())
 		fmt.Print(out)
 	case "zsh":
-		fmt.Print(zshCompletion)
+		out := strings.ReplaceAll(zshCompletion, "__SRV_CASES__", emitZshCases())
+		fmt.Print(out)
 	case "powershell", "pwsh", "ps":
 		// PowerShell argument-completer scopes don't always inherit the
 		// expected PATH for native command lookup. Burn the absolute path
@@ -425,12 +294,12 @@ func cmdCompletion(args []string) error {
 		quoted := "'" + strings.ReplaceAll(self, "'", "''") + "'"
 		out := powershellCompletion
 		out = strings.ReplaceAll(out, "__SRV_SUBS_PS__", psSubs)
+		out = strings.ReplaceAll(out, "__SRV_CASES__", emitPSCases())
 		out = strings.ReplaceAll(out, "& srv _profiles", "& "+quoted+" _profiles")
 		out = strings.ReplaceAll(out, "& srv _ls", "& "+quoted+" _ls")
 		fmt.Print(out)
 	default:
-		fmt.Fprintf(os.Stderr, "error: unknown shell %q (expected bash/zsh/powershell)\n", args[0])
-		return exitCode(1)
+		return exitErr(1, "error: unknown shell %q (expected bash/zsh/powershell)", args[0])
 	}
 	return nil
 }
