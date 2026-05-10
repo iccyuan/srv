@@ -661,15 +661,23 @@ func mcpHandleTool(name string, args map[string]any, cfg *Config) toolResult {
 			recursive = true
 		}
 		rc, perr := pushPath(prof, local, abs, recursive)
-		text := "uploaded"
-		if rc != 0 {
-			text = "upload failed"
+		// Always surface the resolved absolute remote path. SFTP MkdirAll
+		// will silently create missing parent dirs, so a typo / wrong
+		// project root used to land in a phantom location with just an
+		// "uploaded" confirmation -- caller had to inspect StructuredContent
+		// to notice. Putting the path in the text makes the misroute
+		// visible in conversation history at a glance.
+		var text string
+		if rc == 0 {
+			text = fmt.Sprintf("uploaded %s -> %s [exit 0]", local, abs)
+		} else {
+			text = fmt.Sprintf("upload FAILED %s -> %s [exit %d]", local, abs, rc)
 			if perr != nil {
 				text += ": " + perr.Error()
 			}
 		}
 		return toolResult{
-			Content:           []toolContent{{Type: "text", Text: text + fmt.Sprintf("\n[exit %d]", rc)}},
+			Content:           []toolContent{{Type: "text", Text: text}},
 			IsError:           rc != 0,
 			StructuredContent: map[string]any{"exit_code": rc, "remote": abs, "local": local},
 		}
@@ -694,15 +702,19 @@ func mcpHandleTool(name string, args map[string]any, cfg *Config) toolResult {
 			recursive = rb
 		}
 		rc, perr := pullPath(prof, abs, local, recursive)
-		text := "downloaded"
-		if rc != 0 {
-			text = "download failed"
+		// Surface both ends of the transfer so the caller can spot a
+		// wrong-path source or destination without inspecting structured.
+		var text string
+		if rc == 0 {
+			text = fmt.Sprintf("downloaded %s -> %s [exit 0]", abs, local)
+		} else {
+			text = fmt.Sprintf("download FAILED %s -> %s [exit %d]", abs, local, rc)
 			if perr != nil {
 				text += ": " + perr.Error()
 			}
 		}
 		return toolResult{
-			Content:           []toolContent{{Type: "text", Text: text + fmt.Sprintf("\n[exit %d]", rc)}},
+			Content:           []toolContent{{Type: "text", Text: text}},
 			IsError:           rc != 0,
 			StructuredContent: map[string]any{"exit_code": rc, "remote": abs, "local": local},
 		}
@@ -858,7 +870,19 @@ func mcpHandleTool(name string, args map[string]any, cfg *Config) toolResult {
 		if rc == 0 && len(deletes) > 0 {
 			rc, terr = deleteRemoteFiles(prof, remoteRoot, deletes)
 		}
-		text := fmt.Sprintf("synced %d files to %s [exit %d]", len(files), remoteRoot, rc)
+		// Wording must distinguish success from failure -- the prior
+		// "synced %d files" said the same thing on rc=255 (e.g. ssh
+		// handshake timeout post-reconnect, files NOT transferred) as on
+		// rc=0, leading callers to believe a transfer that never happened.
+		// On failure, lead with FAILED and clarify the count is the
+		// attempted set, not what landed.
+		var text string
+		if rc == 0 {
+			text = fmt.Sprintf("synced %d files to %s [exit 0]", len(files), remoteRoot)
+		} else {
+			text = fmt.Sprintf("sync FAILED to %s [exit %d]; %d files were NOT transferred -- verify with `run \"ls -la %s\"` before assuming",
+				remoteRoot, rc, len(files), remoteRoot)
+		}
 		if terr != nil {
 			text += ": " + terr.Error()
 		}
