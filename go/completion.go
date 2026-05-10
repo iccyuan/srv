@@ -99,6 +99,13 @@ _srv() {
             else _srv_remote_ls all
             fi
             ;;
+        diff)
+            # srv diff <local> [<remote>] -- first arg is LOCAL, otherwise
+            # the *) catch-all below would route it to remote completion.
+            if [[ -z $sub2 ]]; then COMPREPLY=( $(compgen -f -- "$cur") )
+            else _srv_remote_ls all
+            fi
+            ;;
         run|exec)
             _srv_remote_ls all
             ;;
@@ -216,6 +223,13 @@ _srv() {
             else _srv_remote_ls all
             fi
             ;;
+        diff)
+            # srv diff <local> [<remote>] -- first arg is LOCAL, otherwise
+            # the *) catch-all below would route it to remote completion.
+            if [[ -z $sub2 ]]; then _files
+            else _srv_remote_ls all
+            fi
+            ;;
         run|exec) _srv_remote_ls all ;;
         # Catch-all: srv runs unrecognized tokens on the remote, so their
         # args should complete remotely too. Without this, zsh would fall
@@ -268,6 +282,17 @@ Register-ArgumentCompleter -Native -CommandName srv -ScriptBlock {
     if (-not $sub) {
         & $emit $subs
         return
+    }
+
+    # Local file/dir completer for push <local>, pull <local>, diff <local>.
+    # Uses PowerShell's built-in CompleteFilename so drive letters (C:),
+    # tilde paths (~/foo), UNC roots (\\server\share), and quoted paths
+    # all work the same as they do for any other PS cmdlet. The previous
+    # Get-ChildItem -Path "$wordToComplete*" approach matched literally,
+    # so "srv push C:<TAB>" just searched cwd for files starting with
+    # "C:" (always nothing) instead of listing the C drive root.
+    $local_files = {
+        [System.Management.Automation.CompletionCompleters]::CompleteFilename($wordToComplete)
     }
 
     # Remote ls helper: invokes 'srv _ls <prefix>' and emits each matching
@@ -331,17 +356,24 @@ Register-ArgumentCompleter -Native -CommandName srv -ScriptBlock {
                 & $remote_ls $false
             } else {
                 # Second positional = local file.
-                Get-ChildItem -Path "$wordToComplete*" -ErrorAction SilentlyContinue |
-                    ForEach-Object { & $mk $_.Name }
+                & $local_files
             }
         }
         'push' {
             if (-not $sub2) {
                 # First positional = local file/dir.
-                Get-ChildItem -Path "$wordToComplete*" -ErrorAction SilentlyContinue |
-                    ForEach-Object { & $mk $_.Name }
+                & $local_files
             } else {
                 # Second positional = remote path (any entry).
+                & $remote_ls $false
+            }
+        }
+        'diff' {
+            # srv diff <local> [<remote>] -- first arg is LOCAL, not the
+            # remote-by-default route the catch-all would take.
+            if (-not $sub2) {
+                & $local_files
+            } else {
                 & $remote_ls $false
             }
         }
