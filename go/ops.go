@@ -1,6 +1,8 @@
 package main
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
@@ -210,11 +212,11 @@ func pushPath(profile *Profile, local, remote string, recursive bool) (int, stri
 		resolved = path.Join(resolved, path.Base(local))
 	}
 	if recursive {
-		if err := uploadDir(s, local, resolved); err != nil {
+		if err := uploadDir(c, local, resolved); err != nil {
 			return 1, resolved, err
 		}
 	} else {
-		if err := uploadFile(s, local, resolved); err != nil {
+		if err := uploadFile(c, local, resolved); err != nil {
 			return 1, resolved, err
 		}
 	}
@@ -255,28 +257,31 @@ func pullPath(profile *Profile, remote, local string, recursive bool) (int, stri
 		finalLocal = filepath.Join(local, path.Base(resolved))
 	}
 	if recursive {
-		if err := downloadDir(s, resolved, finalLocal); err != nil {
+		if err := downloadDir(c, resolved, finalLocal); err != nil {
 			return 1, finalLocal, err
 		}
 		return 0, finalLocal, nil
 	}
-	if err := downloadFile(s, resolved, finalLocal); err != nil {
+	if err := downloadFile(c, resolved, finalLocal); err != nil {
 		return 1, finalLocal, err
 	}
 	return 0, finalLocal, nil
 }
 
 // uploadFile copies local -> remote via SFTP. If a partial remote file
-// exists (size strictly between 0 and the local file's size), seek both
-// sides to the partial offset and append-mode write the remainder. Any
-// other situation (no remote file, equal size, larger remote, error
-// stating) falls back to a fresh full upload.
-//
-// The "remote shorter than local" heuristic is the only one that's safe
-// without extra metadata: a partial write from a previous interrupted
-// transfer is, by construction, smaller than the local source. Same-
-// size means done; larger means we're not pushing what we think we are.
-func uploadFile(s *sftp.Client, local, remote string) error {
+// exists (size strictly between 0 and the local file's size), it first
+// verifies that the remote bytes are an exact prefix of the local file
+// (via remote sha256 of the first N bytes -- ~80 byte network cost,
+// not N bytes). Only then does it append the remainder. Mismatched
+// partials are overwritten from scratch. Same-size remote files trigger
+// the same prefix check; matching content is a no-op skip (with chmod
+// sync so an unrelated permission change still lands).
+func uploadFile(c *Client, local, remote string) error {
+	s, err := c.SFTP()
+	if err != nil {
+		return err
+	}
+
 	src, err := os.Open(local)
 	if err != nil {
 		return err
@@ -296,18 +301,42 @@ func uploadFile(s *sftp.Client, local, remote string) error {
 
 	var dst *sftp.File
 	var startOffset int64
-	if rstat, statErr := s.Stat(remote); statErr == nil && rstat.Size() > 0 && rstat.Size() < localSize {
-		f, openErr := s.OpenFile(remote, os.O_WRONLY|os.O_APPEND)
-		if openErr == nil {
-			if _, seekErr := src.Seek(rstat.Size(), io.SeekStart); seekErr == nil {
-				dst = f
-				startOffset = rstat.Size()
+	if rstat, statErr := s.Stat(remote); statErr == nil && rstat.Size() > 0 {
+		if rstat.Size() == localSize {
+			if same, cmpErr := samePrefix(c, remote, local, localSize); cmpErr == nil && same {
+				// Idempotent skip -- but still mirror local mode in case
+				// the user changed permissions without touching content.
+				if st, err := os.Stat(local); err == nil {
+					_ = s.Chmod(remote, st.Mode().Perm())
+				}
+				return nil
+			} else if cmpErr != nil {
+				warnNotMCP("srv push: existing-file check failed for %s: %v; restarting\n", remote, cmpErr)
 			} else {
-				_ = f.Close()
+				warnNotMCP("srv push: existing %s has same size but different content; restarting\n", remote)
+			}
+		} else if rstat.Size() < localSize {
+			if same, cmpErr := samePrefix(c, remote, local, rstat.Size()); cmpErr == nil && same {
+				f, openErr := s.OpenFile(remote, os.O_WRONLY|os.O_APPEND)
+				if openErr == nil {
+					if _, seekErr := src.Seek(rstat.Size(), io.SeekStart); seekErr == nil {
+						dst = f
+						startOffset = rstat.Size()
+					} else {
+						_ = f.Close()
+					}
+				}
+			} else if cmpErr != nil {
+				warnNotMCP("srv push: resume check failed for %s: %v; restarting\n", remote, cmpErr)
+			} else {
+				warnNotMCP("srv push: partial %s does not match source prefix; restarting\n", remote)
 			}
 		}
 	}
 	if dst == nil {
+		if _, err := src.Seek(0, io.SeekStart); err != nil {
+			return err
+		}
 		dst, err = s.Create(remote)
 		if err != nil {
 			return err
@@ -317,7 +346,7 @@ func uploadFile(s *sftp.Client, local, remote string) error {
 	defer dst.Close()
 
 	if startOffset > 0 {
-		fmt.Fprintf(os.Stderr, "srv push: resuming %s from %d/%d bytes\n", remote, startOffset, localSize)
+		warnNotMCP("srv push: resuming %s from %d/%d bytes\n", remote, startOffset, localSize)
 	}
 	// Progress meter -- silent under MCP and on non-TTY stderr (CI / pipes).
 	// Resume mode pre-fills the counter so the bar shows the *true* total
@@ -335,7 +364,11 @@ func uploadFile(s *sftp.Client, local, remote string) error {
 	return nil
 }
 
-func uploadDir(s *sftp.Client, local, remote string) error {
+func uploadDir(c *Client, local, remote string) error {
+	s, err := c.SFTP()
+	if err != nil {
+		return err
+	}
 	if err := s.MkdirAll(remote); err != nil {
 		return err
 	}
@@ -352,15 +385,19 @@ func uploadDir(s *sftp.Client, local, remote string) error {
 		if info.IsDir() {
 			return s.MkdirAll(dst)
 		}
-		return uploadFile(s, p, dst)
+		return uploadFile(c, p, dst)
 	})
 }
 
 // downloadFile mirrors uploadFile's resume logic in the other direction.
 // If the local file is a strict prefix of the remote (size 0 < L < R),
-// seek the remote source to L and append the rest locally; otherwise
-// download fresh.
-func downloadFile(s *sftp.Client, remote, local string) error {
+// verify the prefix matches via remote sha256 then append the rest.
+// Mismatched partials are overwritten from scratch.
+func downloadFile(c *Client, remote, local string) error {
+	s, err := c.SFTP()
+	if err != nil {
+		return err
+	}
 	if dir := filepath.Dir(local); dir != "" && dir != "." {
 		_ = os.MkdirAll(dir, 0o755)
 	}
@@ -378,18 +415,37 @@ func downloadFile(s *sftp.Client, remote, local string) error {
 
 	var dst *os.File
 	var startOffset int64
-	if lstat, statErr := os.Stat(local); statErr == nil && lstat.Size() > 0 && lstat.Size() < remoteSize {
-		f, openErr := os.OpenFile(local, os.O_WRONLY|os.O_APPEND, 0o644)
-		if openErr == nil {
-			if _, seekErr := src.Seek(lstat.Size(), io.SeekStart); seekErr == nil {
-				dst = f
-				startOffset = lstat.Size()
+	if lstat, statErr := os.Stat(local); statErr == nil && lstat.Size() > 0 {
+		if lstat.Size() == remoteSize {
+			if same, cmpErr := samePrefix(c, remote, local, remoteSize); cmpErr == nil && same {
+				return nil
+			} else if cmpErr != nil {
+				warnNotMCP("srv pull: existing-file check failed for %s: %v; restarting\n", local, cmpErr)
 			} else {
-				_ = f.Close()
+				warnNotMCP("srv pull: existing %s has same size but different content; restarting\n", local)
+			}
+		} else if lstat.Size() < remoteSize {
+			if same, cmpErr := samePrefix(c, remote, local, lstat.Size()); cmpErr == nil && same {
+				f, openErr := os.OpenFile(local, os.O_WRONLY|os.O_APPEND, 0o644)
+				if openErr == nil {
+					if _, seekErr := src.Seek(lstat.Size(), io.SeekStart); seekErr == nil {
+						dst = f
+						startOffset = lstat.Size()
+					} else {
+						_ = f.Close()
+					}
+				}
+			} else if cmpErr != nil {
+				warnNotMCP("srv pull: resume check failed for %s: %v; restarting\n", local, cmpErr)
+			} else {
+				warnNotMCP("srv pull: partial %s does not match remote prefix; restarting\n", local)
 			}
 		}
 	}
 	if dst == nil {
+		if _, err := src.Seek(0, io.SeekStart); err != nil {
+			return err
+		}
 		dst, err = os.Create(local)
 		if err != nil {
 			return err
@@ -399,7 +455,7 @@ func downloadFile(s *sftp.Client, remote, local string) error {
 	defer dst.Close()
 
 	if startOffset > 0 {
-		fmt.Fprintf(os.Stderr, "srv pull: resuming %s from %d/%d bytes\n", local, startOffset, remoteSize)
+		warnNotMCP("srv pull: resuming %s from %d/%d bytes\n", local, startOffset, remoteSize)
 	}
 	meter := newProgressMeter("pull  "+shortLabel(local), remoteSize)
 	meter.Add(startOffset)
@@ -411,7 +467,84 @@ func downloadFile(s *sftp.Client, remote, local string) error {
 	return nil
 }
 
-func downloadDir(s *sftp.Client, remote, local string) error {
+// samePrefix asks the remote to sha256 the first n bytes of `remote`,
+// hashes the same range of `local`, and returns true iff the hex digests
+// match. Cost: ~80 byte network reply (one short SSH command exec) +
+// disk read of n bytes on each side. The byte-stream comparison this
+// replaces had to ship n bytes back across the network just to verify
+// -- a 5GB resume would download 5GB just to confirm the partial was
+// a real prefix. The hash version keeps that on-disk.
+func samePrefix(c *Client, remote, local string, n int64) (bool, error) {
+	rh, err := remoteHashFirstN(c, remote, n)
+	if err != nil {
+		return false, err
+	}
+	lh, err := localHashFirstN(local, n)
+	if err != nil {
+		return false, err
+	}
+	return rh == lh, nil
+}
+
+// sha256EmptyHex is sha256("") -- short-circuit when n=0 so we don't
+// even bother shelling out.
+const sha256EmptyHex = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+
+// remoteHashFirstN runs `head -c n -- path | sha256sum` on the remote
+// and returns the 64-char hex digest. Falls through sha256sum →
+// shasum -a 256 → openssl so it works on Linux, BSD/macOS, and minimal
+// Alpine-style images. The grep filter strips the formatting noise each
+// tool prints alongside the hex (e.g. `<hex>  -` vs `(stdin)= <hex>`).
+func remoteHashFirstN(c *Client, p string, n int64) (string, error) {
+	if n == 0 {
+		return sha256EmptyHex, nil
+	}
+	cmd := fmt.Sprintf(
+		"head -c %d -- %s | { sha256sum 2>/dev/null || shasum -a 256 2>/dev/null || openssl dgst -sha256 -hex 2>/dev/null; } | grep -oE '[0-9a-f]{64}' | head -n1",
+		n, shQuotePath(p),
+	)
+	res, err := c.RunCapture(cmd, "")
+	if err != nil {
+		return "", err
+	}
+	h := strings.TrimSpace(res.Stdout)
+	if h == "" {
+		return "", fmt.Errorf("no usable hash command on remote (need sha256sum / shasum / openssl)")
+	}
+	return h, nil
+}
+
+func localHashFirstN(p string, n int64) (string, error) {
+	if n == 0 {
+		return sha256EmptyHex, nil
+	}
+	f, err := os.Open(p)
+	if err != nil {
+		return "", err
+	}
+	defer f.Close()
+	h := sha256.New()
+	if _, err := io.CopyN(h, f, n); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(h.Sum(nil)), nil
+}
+
+// warnNotMCP prints to stderr, but stays silent when running as MCP --
+// the client there reads stderr as part of the tool result and noisy
+// "restarting" / "resuming" lines pollute the model's context.
+func warnNotMCP(format string, args ...any) {
+	if mcpMode {
+		return
+	}
+	fmt.Fprintf(os.Stderr, format, args...)
+}
+
+func downloadDir(c *Client, remote, local string) error {
+	s, err := c.SFTP()
+	if err != nil {
+		return err
+	}
 	if err := os.MkdirAll(local, 0o755); err != nil {
 		return err
 	}
@@ -434,7 +567,7 @@ func downloadDir(s *sftp.Client, remote, local string) error {
 			}
 			continue
 		}
-		if err := downloadFile(s, p, dst); err != nil {
+		if err := downloadFile(c, p, dst); err != nil {
 			return err
 		}
 	}

@@ -541,7 +541,7 @@ srv check --rtt --interval 50ms  # tighter spacing for jitter view
 
 The trailing `verdict:` line tags the link as `healthy` / `high latency` / `noticeable jitter` / `packet loss is high`, pointing you at the right knob.
 
-**Resumable transfers** — when `srv push` / `srv pull` of a large file is interrupted, 2.6.4+ resumes from the partial offset on the next try (single-file granularity; works inside directory recursion too). Triggered when the destination already exists and is strictly smaller than the source; otherwise it does a full overwrite.
+**Resumable transfers** - when `srv push` / `srv pull` of a large file is interrupted, 2.6.4+ resumes from the partial offset on the next try (single-file granularity; works inside directory recursion too). Before appending, srv verifies that the existing destination bytes exactly match the source prefix; mismatched partials are overwritten from scratch. If source and destination have the same size and match byte-for-byte, the transfer is skipped.
 
 **`srv -d` is the truly disconnect-proof option** — backgrounded jobs run under `nohup` with output to `~/.srv-jobs/<id>.log`, so a local connection drop doesn't kill the remote process. Reattach with `srv logs <id> -f` / `srv kill <id>`.
 
@@ -759,7 +759,7 @@ srv kill <id>                  # SIGTERM
 ## Design tradeoffs / known limitations
 
 - **Non-interactive ssh doesn't source `.bashrc`**: aliases / PATH from rc files aren't visible by default. `srv "bash -ic '<cmd>'"` forces an interactive shell.
-- **Mid-transfer disconnects**: scp may leave a half-written file. Re-running overwrites; we accept that rather than implementing resume.
+- **Mid-transfer disconnects**: `srv push` / `srv pull` resume safely after verifying the partial file prefix. `srv sync` still streams a tar archive and does not resume mid-stream.
 - **Long ssh commands die on disconnect**: only `srv -d` survives a network interruption.
 - **ControlMaster compatibility**: Windows OpenSSH 9.5+ has full support. Older versions may need `multiplex=false`.
 - **Session id can mis-detect under unusual shell nesting**: use `SRV_SESSION` to pin.

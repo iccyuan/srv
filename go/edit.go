@@ -80,7 +80,7 @@ func cmdEdit(args []string, cfg *Config, profileOverride string) error {
 	}
 	localPath := filepath.Join(tmpDir, base)
 
-	if err := downloadFile(s, resolved, localPath); err != nil {
+	if err := downloadFile(c, resolved, localPath); err != nil {
 		fmt.Fprintln(os.Stderr, "srv edit: download:", err)
 		return exitCode(1)
 	}
@@ -129,7 +129,7 @@ func cmdEdit(args []string, cfg *Config, profileOverride string) error {
 		return exitCode(1)
 	}
 
-	if err := uploadFile(s, localPath, resolved); err != nil {
+	if err := uploadFile(c, localPath, resolved); err != nil {
 		fmt.Fprintln(os.Stderr, "srv edit: upload:", err)
 		return exitCode(1)
 	}
