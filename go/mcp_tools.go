@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -98,6 +99,48 @@ func mcpTextErr(s string) toolResult {
 	}
 }
 
+// runLongWaitSleep matches `sleep N` or `sleep N.X` where N > 5. Doesn't
+// catch `sleep 5m` / `sleep 1h` (rare in AI-generated commands; would
+// match if we tried, with false-positive risk on `sleep ${VAR}`).
+var runLongWaitSleep = regexp.MustCompile(`\bsleep\s+(\d+(?:\.\d+)?)\b`)
+
+// runForeverPatterns are commands that don't terminate on their own.
+// `tail -f`, `watch`, and `journalctl -f` are the canonical sins.
+var runForeverPatterns = []*regexp.Regexp{
+	regexp.MustCompile(`\btail\s+(?:-[^|>;&\s]*)?(?:-f|--follow)\b`),
+	regexp.MustCompile(`\bwatch\s+`),
+	regexp.MustCompile(`\bjournalctl\s+(?:-[^|>;&\s]*)?(?:-f|--follow)\b`),
+}
+
+// runRejectSync inspects a command planned for synchronous execution and
+// returns a non-empty hint if it would block the MCP turn for too long.
+// AI clients reach for sleep+poll loops by reflex, but those tie up the
+// MCP per-tool timeout and produce the "tools no longer available" red
+// dot. We catch the patterns here and route the model toward
+// background=true / wait_job. Empty return = command is fine to run sync.
+func runRejectSync(cmd string) string {
+	if m := runLongWaitSleep.FindStringSubmatch(cmd); m != nil {
+		if n, err := strconv.ParseFloat(m[1], 64); err == nil && n > 5 {
+			return fmt.Sprintf("contains `sleep %s` which would block %ss synchronously", m[1], m[1])
+		}
+	}
+	for _, re := range runForeverPatterns {
+		if loc := re.FindStringIndex(cmd); loc != nil {
+			return fmt.Sprintf("contains a never-terminating pattern (%s)", cmd[loc[0]:loc[1]])
+		}
+	}
+	return ""
+}
+
+// runRejectMessage builds the educational error returned when sync run
+// hits a long-blocking pattern. Tells the model exactly what to swap to.
+func runRejectMessage(cmd, why string) string {
+	return fmt.Sprintf(
+		"rejected: %s. Synchronous `run` is bound by the MCP per-tool timeout (default 60s); long blocks tank the connection.\n\nUse the background pattern instead:\n  run { command: %q, background: true }   -> returns job_id immediately\n  wait_job { id: <returned id> }           -> short polls (default 8s, cap 15s)\n\nFor commands that legitimately need their full output streamed back synchronously, restructure them to finish in <60s (e.g. cap with `head`/`timeout 30`).",
+		why, cmd,
+	)
+}
+
 func mcpDetachedResult(rec *JobRecord) toolResult {
 	info := map[string]any{
 		"job_id":    rec.ID,
@@ -161,13 +204,13 @@ var mcpTools = []mcpTool{
 	{
 		def: toolDef{
 			Name:        "run",
-			Description: "Run a remote shell command. By default this blocks until completion. For commands that may take more than ~10s (builds, installs, tests, big greps), set background=true so the command starts as a detached job and returns a job_id immediately; then poll with wait_job in short chunks.",
+			Description: "Run a remote shell command. Synchronous by default (blocks until completion).\n\nREJECTED in synchronous mode (use background=true instead):\n  - `sleep N` where N > 5\n  - `tail -f`, `watch`, `journalctl -f` and similar never-terminating patterns\n\nFor anything expected to take more than ~10s (builds, installs, tests, big greps, sleep+poll loops), set background=true. The command starts as a detached job and returns a job_id immediately; then poll with wait_job in short (<=15s) chunks. Synchronous mode is bound by the client's per-tool timeout (Claude Code default 60s).",
 			InputSchema: map[string]any{
 				"type": "object",
 				"properties": map[string]any{
 					"command":    strSchema("Remote shell command."),
 					"profile":    strSchema(""),
-					"background": boolSchema(false, "Start as a detached job and return immediately. Use for long commands instead of blocking this MCP call."),
+					"background": boolSchema(false, "Start as a detached job and return immediately. Required for long commands and for any sleep/wait/follow pattern."),
 					"confirm":    boolSchema(false, "Required when guard is on AND command hits a high-risk pattern (rm -rf, dd, mkfs, drop ...)."),
 				},
 				"required": []string{"command"},
@@ -196,6 +239,13 @@ var mcpTools = []mcpTool{
 					return mcpTextErr(err.Error())
 				}
 				return mcpDetachedResult(rec)
+			}
+			// Hard-reject sync calls that would block the MCP turn for too
+			// long. Description tells the model what to do instead; this
+			// catches the case where it ignored that and went with the
+			// reflex sleep+poll pattern anyway.
+			if why := runRejectSync(cmd); why != "" {
+				return mcpTextErr(runRejectMessage(cmd, why))
 			}
 			cwd := GetCwd(profName, prof)
 			res, _ := runRemoteCapture(prof, cwd, cmd)
