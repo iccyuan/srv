@@ -14,6 +14,13 @@ func isStdinTTY() bool {
 	return term.IsTerminal(int(os.Stdin.Fd()))
 }
 
+// isStderrTTY returns true when stderr is connected to a terminal.
+// Used to gate human-only chrome (progress bars, refreshing status
+// lines) so it never lands in MCP responses or piped logs.
+func isStderrTTY() bool {
+	return term.IsTerminal(int(os.Stderr.Fd()))
+}
+
 // terminalSize returns (cols, rows) of stdout's terminal, or (0, 0) on
 // failure / non-tty.
 func terminalSize() (int, int) {

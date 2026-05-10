@@ -1126,7 +1126,15 @@ func mcpResponse(id any, result any, errObj *jsonRPCError) jsonRPCResponse {
 	return r
 }
 
+// mcpMode is set true while the process is acting as a stdio MCP server.
+// Other code (progress meters, prompts, anything that would render
+// human-facing chrome to stderr) reads this to stay silent so it never
+// leaks into the JSON-RPC response stream the model parses. Cannot be
+// re-enabled from inside the MCP path -- the entire reason it exists.
+var mcpMode bool
+
 func cmdMcp(cfg *Config) int {
+	mcpMode = true
 	rd := bufio.NewReader(os.Stdin)
 	for {
 		line, err := rd.ReadString('\n')

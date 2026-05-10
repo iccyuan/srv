@@ -295,9 +295,16 @@ func uploadFile(s *sftp.Client, local, remote string) error {
 	if startOffset > 0 {
 		fmt.Fprintf(os.Stderr, "srv push: resuming %s from %d/%d bytes\n", remote, startOffset, localSize)
 	}
-	if _, err := io.Copy(dst, src); err != nil {
+	// Progress meter -- silent under MCP and on non-TTY stderr (CI / pipes).
+	// Resume mode pre-fills the counter so the bar shows the *true* total
+	// progress, not just bytes transferred this call.
+	meter := newProgressMeter("push  "+shortLabel(remote), localSize)
+	meter.Add(startOffset)
+	if _, err := io.Copy(dst, newProgressReader(src, meter)); err != nil {
+		meter.Done()
 		return err
 	}
+	meter.Done()
 	if st, err := os.Stat(local); err == nil {
 		_ = s.Chmod(remote, st.Mode().Perm())
 	}
@@ -370,8 +377,14 @@ func downloadFile(s *sftp.Client, remote, local string) error {
 	if startOffset > 0 {
 		fmt.Fprintf(os.Stderr, "srv pull: resuming %s from %d/%d bytes\n", local, startOffset, remoteSize)
 	}
-	_, err = io.Copy(dst, src)
-	return err
+	meter := newProgressMeter("pull  "+shortLabel(local), remoteSize)
+	meter.Add(startOffset)
+	if _, err := io.Copy(dst, newProgressReader(src, meter)); err != nil {
+		meter.Done()
+		return err
+	}
+	meter.Done()
+	return nil
 }
 
 func downloadDir(s *sftp.Client, remote, local string) error {
