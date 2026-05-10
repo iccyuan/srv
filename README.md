@@ -241,16 +241,16 @@ srv kill <id> --signal=USR1
 
 #### MCP 长任务模式：`detach` + `wait_job`
 
-MCP 是同步 JSON-RPC，`run` 阻塞整个 turn，Claude Code 的 per-tool 超时（默认 60s，`MCP_TOOL_TIMEOUT` 可调）会把超时的 `run` 直接砍掉、UI 上显示红点。**任何预计超过 30s 的命令应改用 `detach` + `wait_job`**：
+MCP 是同步 JSON-RPC，阻塞式 `run` 会占住整个 turn，Claude Code 的 per-tool 超时（默认 60s，`MCP_TOOL_TIMEOUT` 可调）会把超时的 `run` 直接砍掉、UI 上显示红点。**任何预计超过 10s 的命令应使用 `run background=true` 或直接调用 `detach`，再用 `wait_job` 短轮询**：
 
 ```
-detach { command: "npm run build" }    → job_id（亚秒返回）
-wait_job { id, max_wait_seconds: 30 }  → status=running（job 还没完，调下一次）
-wait_job { id, max_wait_seconds: 30 }  → status=completed exit_code=0 + log tail
+run { command: "npm run build", background: true }  -> job_id（亚秒返回）
+wait_job { id, max_wait_seconds: 8 }                -> status=running（job 还没完，调下一次）
+wait_job { id, max_wait_seconds: 8 }                -> status=completed exit_code=0 + log tail
                                          （本地 jobs.json 自动清理）
 ```
 
-`wait_job` 的等待循环跑在远端 bash 里（单次 SSH 往返完成 N 秒等待），`max_wait_seconds` 硬上限 55，确保永远低于 60s MCP timeout。模型可以在两次 wait_job 之间穿插别的工具调用。`status=killed` 表示 PID 在没写 `.exit` 的情况下消失了（被外部 SIGKILL）。
+`wait_job` 的等待循环跑在远端 bash 里（单次 SSH 往返完成 N 秒等待），`max_wait_seconds` 默认 8，硬上限 15，让 Claude Code 保持响应，不会长时间卡在单次工具调用里。模型可以在两次 wait_job 之间穿插别的工具调用。`status=killed` 表示 PID 在没写 `.exit` 的情况下消失了（被外部 SIGKILL）。
 
 ### 端口转发
 

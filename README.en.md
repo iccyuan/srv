@@ -359,16 +359,16 @@ The user command is base64-encoded into the spawn line, sidestepping any nested-
 
 #### MCP long-task pattern: `detach` + `wait_job`
 
-MCP is synchronous JSON-RPC: a `run` call blocks the model's whole turn, and Claude Code's per-tool timeout (default 60000ms / 60s, tunable via `MCP_TOOL_TIMEOUT`) kills any `run` that exceeds it -- the UI shows a red dot and the next call respawns the MCP child. **For any command expected to take longer than ~30s, prefer `detach` + `wait_job`**:
+MCP is synchronous JSON-RPC: a blocking `run` call holds the model's whole turn, and Claude Code's per-tool timeout (default 60000ms / 60s, tunable via `MCP_TOOL_TIMEOUT`) kills any `run` that exceeds it -- the UI shows a red dot and the next call respawns the MCP child. **For any command expected to take longer than ~10s, use `run` with `background=true` or call `detach` directly, then poll with `wait_job`**:
 
 ```
-detach { command: "npm run build" }    → job_id (returns sub-second)
-wait_job { id, max_wait_seconds: 30 }  → status=running   (job still going; call again)
-wait_job { id, max_wait_seconds: 30 }  → status=completed exit_code=0 + log tail
+run { command: "npm run build", background: true }  -> job_id (returns sub-second)
+wait_job { id, max_wait_seconds: 8 }                -> status=running   (job still going; call again)
+wait_job { id, max_wait_seconds: 8 }                -> status=completed exit_code=0 + log tail
                                          (local jobs.json auto-pruned on completion)
 ```
 
-The `wait_job` wait loop runs **on the remote** as a single SSH round-trip -- a small bash for-loop polls the `.exit` marker and the PID, prints `STATUS=...` plus the log tail when it resolves. `max_wait_seconds` is hard-capped at 55 so each call stays safely under the 60s default MCP timeout. Status values:
+The `wait_job` wait loop runs **on the remote** as a single SSH round-trip -- a small bash for-loop polls the `.exit` marker and the PID, prints `STATUS=...` plus the log tail when it resolves. `max_wait_seconds` defaults to 8 and is hard-capped at 15 so Claude Code stays responsive instead of sitting in one long tool call. Status values:
 
 - `completed` — `.exit` file written, `exit_code` populated, local job record removed
 - `running` — still alive after the wait window; call `wait_job` again to keep waiting

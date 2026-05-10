@@ -25,7 +25,11 @@ import (
 // permanently inflates the client's memory by the full payload. 64 KiB is
 // enough for typical command output while drawing a hard line against
 // runaway dumps.
-const mcpRunTextMax = 64 * 1024
+const (
+	mcpRunTextMax            = 64 * 1024
+	mcpWaitJobDefaultSeconds = 8
+	mcpWaitJobMaxSeconds     = 15
+)
 
 type toolDef struct {
 	Name        string         `json:"name"`
@@ -94,6 +98,27 @@ func mcpTextErr(s string) toolResult {
 	}
 }
 
+func mcpDetachedResult(rec *JobRecord) toolResult {
+	info := map[string]any{
+		"job_id":    rec.ID,
+		"status":    "running",
+		"profile":   rec.Profile,
+		"pid":       rec.Pid,
+		"log":       rec.Log,
+		"cwd":       rec.Cwd,
+		"started":   rec.Started,
+		"next_tool": "wait_job",
+	}
+	text := fmt.Sprintf(
+		"started job %s pid=%d profile=%s\npoll with wait_job id=%s max_wait_seconds=%d",
+		rec.ID, rec.Pid, rec.Profile, rec.ID, mcpWaitJobDefaultSeconds,
+	)
+	return toolResult{
+		Content:           []toolContent{{Type: "text", Text: text}},
+		StructuredContent: info,
+	}
+}
+
 // mcpToolHandler is the uniform handler signature. The dispatcher
 // extracts profileOverride from args once and passes it explicitly so
 // each handler doesn't repeat the extraction.
@@ -136,13 +161,14 @@ var mcpTools = []mcpTool{
 	{
 		def: toolDef{
 			Name:        "run",
-			Description: "Run a remote shell command, blocking until it finishes. For commands expected to take more than ~30s (builds, installs, big greps), prefer `detach` + `wait_job` instead -- that pattern keeps each MCP turn short, won't trip the client's per-tool timeout (default 60s), and lets the model interleave other work while the job runs.",
+			Description: "Run a remote shell command. By default this blocks until completion. For commands that may take more than ~10s (builds, installs, tests, big greps), set background=true so the command starts as a detached job and returns a job_id immediately; then poll with wait_job in short chunks.",
 			InputSchema: map[string]any{
 				"type": "object",
 				"properties": map[string]any{
-					"command": strSchema("Remote shell command."),
-					"profile": strSchema(""),
-					"confirm": boolSchema(false, "Required when guard is on AND command hits a high-risk pattern (rm -rf, dd, mkfs, drop ...)."),
+					"command":    strSchema("Remote shell command."),
+					"profile":    strSchema(""),
+					"background": boolSchema(false, "Start as a detached job and return immediately. Use for long commands instead of blocking this MCP call."),
+					"confirm":    boolSchema(false, "Required when guard is on AND command hits a high-risk pattern (rm -rf, dd, mkfs, drop ...)."),
 				},
 				"required": []string{"command"},
 			},
@@ -162,6 +188,14 @@ var mcpTools = []mcpTool{
 			profName, prof, err := ResolveProfile(cfg, profileOverride)
 			if err != nil {
 				return mcpTextErr(err.Error())
+			}
+			background, _ := args["background"].(bool)
+			if background {
+				rec, err := spawnDetached(profName, prof, cmd)
+				if err != nil {
+					return mcpTextErr(err.Error())
+				}
+				return mcpDetachedResult(rec)
 			}
 			cwd := GetCwd(profName, prof)
 			res, _ := runRemoteCapture(prof, cwd, cmd)
@@ -934,7 +968,7 @@ var mcpTools = []mcpTool{
 			if err != nil {
 				return mcpTextErr(err.Error())
 			}
-			return mcpJSONResult(rec)
+			return mcpDetachedResult(rec)
 		},
 	},
 	{
@@ -1003,12 +1037,12 @@ var mcpTools = []mcpTool{
 	{
 		def: toolDef{
 			Name:        "wait_job",
-			Description: "Block up to max_wait_seconds for a detached job to finish, then return its exit code + log tail. Designed to pair with `detach`: long commands run via detach, the model loops wait_job until status=completed. Each call stays under the MCP per-tool timeout (default 60s) by capping the wait at 55s, so even a 10-minute job is just ~12 quick MCP calls. status=running means \"call wait_job again\"; status=completed means it's done and the local job record has been cleaned up.",
+			Description: "Poll a detached job for completion, returning exit code + log tail when done. Designed to pair with `detach` or `run background=true`: long commands run in the background, and the model loops wait_job until status=completed. Defaults to short 8s polls and caps each call at 15s so Claude Code stays responsive. status=running means \"call wait_job again\"; status=completed means it's done and the local job record has been cleaned up.",
 			InputSchema: map[string]any{
 				"type": "object",
 				"properties": map[string]any{
 					"id":               strSchema("Job id from detach."),
-					"max_wait_seconds": intSchema(30, "Upper bound on this call's blocking time. Capped at 55 to stay safely under the default MCP_TOOL_TIMEOUT (60000ms)."),
+					"max_wait_seconds": intSchema(mcpWaitJobDefaultSeconds, "Upper bound on this call's blocking time. Capped at 15 to keep the MCP UI responsive."),
 					"tail_lines":       intSchema(50, "Lines of log to include in the response."),
 				},
 				"required": []string{"id"},
@@ -1016,12 +1050,12 @@ var mcpTools = []mcpTool{
 		},
 		handler: func(args map[string]any, cfg *Config, profileOverride string) toolResult {
 			jid, _ := args["id"].(string)
-			maxWait := 30
+			maxWait := mcpWaitJobDefaultSeconds
 			if v, ok := args["max_wait_seconds"].(float64); ok && v > 0 {
 				maxWait = int(v)
 			}
-			if maxWait > 55 {
-				maxWait = 55
+			if maxWait > mcpWaitJobMaxSeconds {
+				maxWait = mcpWaitJobMaxSeconds
 			}
 			tailLines := 50
 			if v, ok := args["tail_lines"].(float64); ok && v > 0 {
