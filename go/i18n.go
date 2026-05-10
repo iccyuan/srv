@@ -32,7 +32,10 @@ var (
 //  1. Config.Lang ("en" / "zh"; "" or "auto" defers to env)
 //  2. $SRV_LANG ("en" / "zh"; "auto" defers)
 //  3. $LC_ALL / $LC_MESSAGES / $LANG (anything starting with "zh" -> Chinese; else English)
-//  4. English fallback
+//  4. Platform locale (Windows only; querying Win32 GetUserDefaultLocaleName).
+//     POSIX envs are typically empty on Windows, so without this a 中文
+//     Windows install would always fall through to English.
+//  5. English fallback
 func currentLang() lang {
 	detectedLangOnce.Do(func() {
 		detectedLangVal = detectLang()
@@ -60,12 +63,22 @@ func detectLang() lang {
 			return langZH
 		}
 	}
+	// POSIX locale envs. The first non-empty one wins; if it's not zh*
+	// we treat the user as having explicitly opted into a non-Chinese
+	// locale (English fallback) and skip the platform probe.
+	posixSet := false
 	for _, k := range []string{"LC_ALL", "LC_MESSAGES", "LANG"} {
 		if v := os.Getenv(k); v != "" {
+			posixSet = true
 			if strings.HasPrefix(strings.ToLower(v), "zh") {
 				return langZH
 			}
-			break // first non-empty locale env wins; English fallback
+			break
+		}
+	}
+	if !posixSet {
+		if strings.HasPrefix(platformLang(), "zh") {
+			return langZH
 		}
 	}
 	return langEN
