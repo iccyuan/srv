@@ -619,7 +619,7 @@ func cmdPush(args []string, cfg *Config, profileOverride string) int {
 		remote = baseName(local)
 	}
 	abs := resolveRemotePath(remote, cwd)
-	rc, err := pushPath(profile, local, abs, recursive)
+	rc, _, err := pushPath(profile, local, abs, recursive)
 	if err != nil {
 		printDiagError(err, profile)
 	}

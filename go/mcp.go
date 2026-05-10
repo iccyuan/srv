@@ -660,18 +660,19 @@ func mcpHandleTool(name string, args map[string]any, cfg *Config) toolResult {
 		if st != nil && st.IsDir() {
 			recursive = true
 		}
-		rc, perr := pushPath(prof, local, abs, recursive)
-		// Always surface the resolved absolute remote path. SFTP MkdirAll
-		// will silently create missing parent dirs, so a typo / wrong
-		// project root used to land in a phantom location with just an
-		// "uploaded" confirmation -- caller had to inspect StructuredContent
-		// to notice. Putting the path in the text makes the misroute
-		// visible in conversation history at a glance.
+		rc, finalRemote, perr := pushPath(prof, local, abs, recursive)
+		// Always surface the resolved absolute remote path -- and when
+		// pushPath rewrote it (scp-style "remote was a dir, file lands
+		// inside"), surface the *final* path, not the user's input. SFTP
+		// MkdirAll will silently create missing parent dirs, so a typo /
+		// wrong project root used to land in a phantom location with just
+		// an "uploaded" confirmation. Putting the actual landing path in
+		// the text makes both kinds of misroute visible at a glance.
 		var text string
 		if rc == 0 {
-			text = fmt.Sprintf("uploaded %s -> %s [exit 0]", local, abs)
+			text = fmt.Sprintf("uploaded %s -> %s [exit 0]", local, finalRemote)
 		} else {
-			text = fmt.Sprintf("upload FAILED %s -> %s [exit %d]", local, abs, rc)
+			text = fmt.Sprintf("upload FAILED %s -> %s [exit %d]", local, finalRemote, rc)
 			if perr != nil {
 				text += ": " + perr.Error()
 			}
@@ -679,7 +680,7 @@ func mcpHandleTool(name string, args map[string]any, cfg *Config) toolResult {
 		return toolResult{
 			Content:           []toolContent{{Type: "text", Text: text}},
 			IsError:           rc != 0,
-			StructuredContent: map[string]any{"exit_code": rc, "remote": abs, "local": local},
+			StructuredContent: map[string]any{"exit_code": rc, "remote": finalRemote, "local": local},
 		}
 
 	case "pull":

@@ -170,17 +170,21 @@ func (c *Client) expandRemoteHome(p string) (string, error) {
 	return home + p[1:], nil
 }
 
-// pushPath uploads a local file or directory (recursive) to a remote path.
-func pushPath(profile *Profile, local, remote string, recursive bool) (int, error) {
+// pushPath uploads a local file or directory (recursive) to a remote
+// path. Returns (exitCode, finalRemotePath, err); finalRemotePath is the
+// actual landing location after tilde-expansion and scp-style dir
+// adjustment, so callers (CLI confirmation lines, MCP responses) can
+// surface where the file really went rather than the user's raw input.
+func pushPath(profile *Profile, local, remote string, recursive bool) (int, string, error) {
 	c, err := Dial(profile)
 	if err != nil {
-		return 255, err
+		return 255, remote, err
 	}
 	defer c.Close()
 
 	st, err := os.Stat(local)
 	if err != nil {
-		return 1, err
+		return 1, remote, err
 	}
 	if st.IsDir() && !recursive {
 		recursive = true
@@ -188,23 +192,33 @@ func pushPath(profile *Profile, local, remote string, recursive bool) (int, erro
 
 	resolved, err := c.expandRemoteHome(remote)
 	if err != nil {
-		return 1, err
+		return 1, remote, err
 	}
 
 	s, err := c.SFTP()
 	if err != nil {
-		return 1, err
+		return 1, resolved, err
+	}
+	// scp-style: if the remote target is an existing directory, place the
+	// source inside it (file -> dir/basename, dir -> dir/source-name)
+	// rather than trying to use the path verbatim. Without this,
+	// `srv push foo.exe /existing-dir` calls SFTP Create("/existing-dir")
+	// which returns the unhelpful "Failure" (SSH_FX_FAILURE) -- the SFTP
+	// server can't overwrite a directory with a file. Mirrors the
+	// symmetric handling pullPath has had since v1.
+	if rstat, statErr := s.Stat(resolved); statErr == nil && rstat.IsDir() {
+		resolved = path.Join(resolved, path.Base(local))
 	}
 	if recursive {
 		if err := uploadDir(s, local, resolved); err != nil {
-			return 1, err
+			return 1, resolved, err
 		}
 	} else {
 		if err := uploadFile(s, local, resolved); err != nil {
-			return 1, err
+			return 1, resolved, err
 		}
 	}
-	return 0, nil
+	return 0, resolved, nil
 }
 
 // pullPath downloads a remote file or directory to a local path.
