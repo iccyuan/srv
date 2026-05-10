@@ -340,6 +340,19 @@ func mcpToolDefs() []toolDef {
 			},
 		},
 		{
+			Name:        "list_dir",
+			Description: "List remote directory entries (subset of `ls -1Ap`). Use this instead of `run \"ls ...\"` for path discovery -- response is structured, ANSI-clean, and hits the warm daemon cache (sub-100ms on repeat). Pass an empty path for the active cwd. Dirs carry trailing '/'.",
+			InputSchema: map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"path":      str("Remote path prefix. Empty = current cwd. Trailing '/' = list that directory; no trailing '/' = match entries whose name starts with the basename. E.g., '/etc/' lists /etc; '/etc/host' returns host*, hostname, hosts, hosts.allow."),
+					"dirs_only": map[string]any{"type": "boolean", "default": false, "description": "Filter to directories only (entries ending in '/')."},
+					"limit":     map[string]any{"type": "integer", "default": 500, "description": "Maximum entries returned. Anything beyond gets dropped; truncated_count surfaces the cut so you know to query a deeper prefix."},
+					"profile":   str(""),
+				},
+			},
+		},
+		{
 			Name:        "kill_job",
 			Description: "Signal detached job.",
 			InputSchema: map[string]any{
@@ -962,6 +975,49 @@ func mcpHandleTool(name string, args map[string]any, cfg *Config) toolResult {
 			Content:           []toolContent{{Type: "text", Text: text}},
 			IsError:           res.ExitCode != 0,
 			StructuredContent: map[string]any{"job_id": j.ID, "exit_code": res.ExitCode},
+		}
+
+	case "list_dir":
+		path, _ := args["path"].(string)
+		dirsOnly, _ := args["dirs_only"].(bool)
+		// JSON numbers come in as float64; treat <=0 / missing as the
+		// default 500.
+		limit := 500
+		if v, ok := args["limit"].(float64); ok && v > 0 {
+			limit = int(v)
+		}
+		entries, err := listRemoteEntries(path, cfg, profileOverride)
+		if err != nil {
+			return textErr(err.Error())
+		}
+		if dirsOnly {
+			kept := entries[:0]
+			for _, e := range entries {
+				if strings.HasSuffix(e, "/") {
+					kept = append(kept, e)
+				}
+			}
+			entries = kept
+		}
+		truncated := 0
+		if len(entries) > limit {
+			truncated = len(entries) - limit
+			entries = entries[:limit]
+		}
+		text := strings.Join(entries, "\n")
+		if text != "" {
+			text += "\n"
+		}
+		structured := map[string]any{
+			"entries": entries,
+			"count":   len(entries),
+		}
+		if truncated > 0 {
+			structured["truncated_count"] = truncated
+		}
+		return toolResult{
+			Content:           []toolContent{{Type: "text", Text: text}},
+			StructuredContent: structured,
 		}
 
 	case "kill_job":

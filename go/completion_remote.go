@@ -21,56 +21,84 @@ const lsCacheTTL = 5 * time.Second
 // "/" so completers can filter dirs-only when needed (e.g., `srv cd`).
 //
 // Failures are silent: completion mustn't blow up on errors.
+//
+// Calling with no arg is equivalent to passing an empty prefix (lists the
+// current cwd). This matters because PowerShell 5.1's native command
+// argument passing silently drops empty string arguments -- without this
+// branch, `srv run <space><TAB>` from PS would invoke the binary as
+// `srv _ls` (no args) and get nothing, leaving completion blank.
 func cmdInternalLs(args []string, cfg *Config, profileOverride string) int {
-	if len(args) == 0 {
+	prefix := ""
+	if len(args) > 0 {
+		prefix = args[0]
+	}
+	entries, err := listRemoteEntries(prefix, cfg, profileOverride)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "srv _ls:", err)
 		return 0
 	}
-	prefix := args[0]
+	for _, e := range entries {
+		fmt.Println(e)
+	}
+	return 0
+}
 
+// listRemoteEntries enumerates remote filesystem entries under `prefix`
+// (empty = current cwd). Returns full paths in the same form tab
+// completion uses -- absolute prefixes pass through, relative ones resolve
+// against the active session's cwd, dirs carry a trailing "/".
+//
+// Resolution order: file cache (5s TTL) -> daemon (pooled SSH) ->
+// auto-spawn daemon -> direct dial fallback. Same hierarchy cmdInternalLs
+// has always used; pulled out so the MCP `list_dir` tool can reuse it.
+func listRemoteEntries(prefix string, cfg *Config, profileOverride string) ([]string, error) {
 	name, profile, err := ResolveProfile(cfg, profileOverride)
 	if err != nil {
-		return 0
+		return nil, err
 	}
 	cwd := GetCwd(name, profile)
 	dirPart, basePart := splitRemotePrefix(prefix)
 	target := remoteListTarget(dirPart, cwd)
 
-	// 1) File cache (instant, ~60ms even for misses-then-hits sequences).
+	// File cache (instant, ~60ms even for misses-then-hits sequences).
 	key := cacheKey(profile.Host, profile.User, target)
 	if cached, ok := readLsCache(key, lsCacheTTL); ok {
-		emitLsMatches(cached, dirPart, basePart)
-		return 0
+		return matchEntries(cached, dirPart, basePart), nil
 	}
 
-	// 2) Daemon (pooled SSH, ~500ms even when "cold" because no handshake).
-	//    Auto-spawn one in the background if none is running -- next time
-	//    the user tabs, it'll be warm. Send the CLI's cwd so relative
-	//    prefixes resolve against the right directory (the daemon never
-	//    reads its own session).
+	// Daemon (pooled SSH, ~500ms even when "cold" because no handshake).
+	// Auto-spawn one in the background if none is running -- next call will
+	// be warm. Send the CLI's cwd so relative prefixes resolve against the
+	// right directory (the daemon never reads its own session).
 	if entries, ok := tryDaemonLs(name, cwd, prefix); ok {
-		for _, e := range entries {
-			fmt.Println(e)
-		}
-		return 0
+		return entries, nil
 	}
 	if ensureDaemon() {
 		if entries, ok := tryDaemonLs(name, cwd, prefix); ok {
-			for _, e := range entries {
-				fmt.Println(e)
-			}
-			return 0
+			return entries, nil
 		}
 	}
 
-	// 3) Direct dial fallback (~2.7s cold, full handshake).
+	// Direct dial fallback (~2.7s cold, full handshake).
 	listing, err := remoteList(profile, target, 10*time.Second)
 	if err != nil {
-		fmt.Fprintln(os.Stderr, "srv _ls:", err)
-		return 0
+		return nil, err
 	}
 	_ = writeLsCache(key, listing)
-	emitLsMatches(listing, dirPart, basePart)
-	return 0
+	return matchEntries(listing, dirPart, basePart), nil
+}
+
+// matchEntries is emitLsMatches in slice form: filter by basePart prefix,
+// prepend dirPart, return.
+func matchEntries(entries []string, dirPart, basePart string) []string {
+	out := make([]string, 0, len(entries))
+	for _, e := range entries {
+		if !strings.HasPrefix(e, basePart) {
+			continue
+		}
+		out = append(out, dirPart+e)
+	}
+	return out
 }
 
 // splitRemotePrefix divides "/opt/ap" into ("/opt/", "ap"); "/opt/" into
@@ -135,17 +163,6 @@ func remoteList(profile *Profile, target string, timeout time.Duration) ([]strin
 		out = append(out, line)
 	}
 	return out, nil
-}
-
-// emitLsMatches prints entries that have basePart as prefix, prepending
-// dirPart so the printed line is the full path the shell can substitute.
-func emitLsMatches(entries []string, dirPart, basePart string) {
-	for _, e := range entries {
-		if !strings.HasPrefix(e, basePart) {
-			continue
-		}
-		fmt.Println(dirPart + e)
-	}
 }
 
 func cacheKey(host, user, target string) string {
