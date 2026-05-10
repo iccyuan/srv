@@ -484,11 +484,20 @@ func (c *Client) Shell(cwd string) (int, error) {
 // RunDetached spawns `command` on the remote with nohup, redirecting its
 // stdout/stderr to ~/.srv-jobs/<jobID>.log. Returns the remote pid printed
 // by the spawn line.
+//
+// The wrapper additionally writes the user command's exit code to
+// ~/.srv-jobs/<jobID>.exit when it finishes. wait_job polls that file
+// to know "done" without needing to keep an open SSH session for the
+// duration of the user's job.
 func (c *Client) RunDetached(command string, cwd string, jobID string) (int, error) {
 	logPath := fmt.Sprintf("~/.srv-jobs/%s.log", jobID)
-	// base64 the command so quoting can't bite us, identical to the Python
-	// implementation.
-	encoded := base64Encode(command)
+	exitPath := fmt.Sprintf("~/.srv-jobs/%s.exit", jobID)
+	// Wrap the user command in a subshell so we can capture its exit
+	// code regardless of how it terminates. base64 keeps quoting sane:
+	// the user command may contain anything (heredocs, $vars, embedded
+	// quotes) and we still ship it intact through `bash -c`.
+	wrappedCmd := fmt.Sprintf("(%s); echo $? > %s", command, exitPath)
+	encoded := base64Encode(wrappedCmd)
 	wrapped := fmt.Sprintf(
 		"mkdir -p ~/.srv-jobs && cd %s && (nohup bash -c \"$(echo %s | base64 -d)\" </dev/null >%s 2>&1 & echo $!)",
 		shQuotePath(cwdOrTilde(cwd)), encoded, logPath,

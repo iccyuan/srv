@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -135,7 +136,7 @@ var mcpTools = []mcpTool{
 	{
 		def: toolDef{
 			Name:        "run",
-			Description: "Run remote shell command.",
+			Description: "Run a remote shell command, blocking until it finishes. For commands expected to take more than ~30s (builds, installs, big greps), prefer `detach` + `wait_job` instead -- that pattern keeps each MCP turn short, won't trip the client's per-tool timeout (default 60s), and lets the model interleave other work while the job runs.",
 			InputSchema: map[string]any{
 				"type": "object",
 				"properties": map[string]any{
@@ -902,7 +903,7 @@ var mcpTools = []mcpTool{
 	{
 		def: toolDef{
 			Name:        "detach",
-			Description: "Start remote detached job.",
+			Description: "Start a remote command in the background and return its job_id immediately (sub-second). Pair with `wait_job` to block on completion in bounded chunks -- the recommended pattern for any command expected to take more than ~30s. The wrapper writes the user command's exit code to ~/.srv-jobs/<id>.exit when it finishes, which `wait_job` polls without keeping an SSH session open the whole time.",
 			InputSchema: map[string]any{
 				"type": "object",
 				"properties": map[string]any{
@@ -996,6 +997,135 @@ var mcpTools = []mcpTool{
 				Content:           []toolContent{{Type: "text", Text: text}},
 				IsError:           res.ExitCode != 0,
 				StructuredContent: map[string]any{"job_id": j.ID, "exit_code": res.ExitCode},
+			}
+		},
+	},
+	{
+		def: toolDef{
+			Name:        "wait_job",
+			Description: "Block up to max_wait_seconds for a detached job to finish, then return its exit code + log tail. Designed to pair with `detach`: long commands run via detach, the model loops wait_job until status=completed. Each call stays under the MCP per-tool timeout (default 60s) by capping the wait at 55s, so even a 10-minute job is just ~12 quick MCP calls. status=running means \"call wait_job again\"; status=completed means it's done and the local job record has been cleaned up.",
+			InputSchema: map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"id":               strSchema("Job id from detach."),
+					"max_wait_seconds": intSchema(30, "Upper bound on this call's blocking time. Capped at 55 to stay safely under the default MCP_TOOL_TIMEOUT (60000ms)."),
+					"tail_lines":       intSchema(50, "Lines of log to include in the response."),
+				},
+				"required": []string{"id"},
+			},
+		},
+		handler: func(args map[string]any, cfg *Config, profileOverride string) toolResult {
+			jid, _ := args["id"].(string)
+			maxWait := 30
+			if v, ok := args["max_wait_seconds"].(float64); ok && v > 0 {
+				maxWait = int(v)
+			}
+			if maxWait > 55 {
+				maxWait = 55
+			}
+			tailLines := 50
+			if v, ok := args["tail_lines"].(float64); ok && v > 0 {
+				tailLines = int(v)
+			}
+			jobs := loadJobsFile()
+			j := findJob(jobs, jid)
+			if j == nil {
+				return mcpTextErr(fmt.Sprintf("no such job %q", jid))
+			}
+			prof, ok := cfg.Profiles[j.Profile]
+			if !ok {
+				return mcpTextErr(fmt.Sprintf("profile %q not found", j.Profile))
+			}
+			// One remote round-trip drives the whole wait loop. Bash spins
+			// for up to maxWait seconds, checking each second for either
+			// the .exit marker (job finished, capture exit code) or the
+			// PID being gone without an .exit (got killed externally).
+			// Either resolution prints `STATUS=...` on the first line plus
+			// the log tail; if maxWait elapses the same shape is returned
+			// with STATUS=running so the model can loop.
+			exitFile := fmt.Sprintf("~/.srv-jobs/%s.exit", j.ID)
+			script := fmt.Sprintf(`for i in $(seq 1 %d); do
+  if [ -f %s ]; then
+    code=$(cat %s)
+    printf 'STATUS=completed EXIT=%%s\n' "$code"
+    tail -n %d %s
+    exit 0
+  fi
+  if ! kill -0 %d 2>/dev/null; then
+    echo STATUS=killed
+    tail -n %d %s
+    exit 0
+  fi
+  sleep 1
+done
+echo STATUS=running
+tail -n %d %s
+`, maxWait, exitFile, exitFile, tailLines, j.Log, j.Pid, tailLines, j.Log, tailLines, j.Log)
+			start := time.Now()
+			res, _ := runRemoteCapture(prof, "", script)
+			waited := time.Since(start).Seconds()
+
+			lines := strings.SplitN(res.Stdout, "\n", 2)
+			statusLine := ""
+			body := ""
+			if len(lines) > 0 {
+				statusLine = lines[0]
+			}
+			if len(lines) > 1 {
+				body = lines[1]
+			}
+			status := "unknown"
+			exitCode := -1
+			if strings.HasPrefix(statusLine, "STATUS=completed") {
+				status = "completed"
+				if i := strings.Index(statusLine, "EXIT="); i >= 0 {
+					if n, err := strconv.Atoi(strings.TrimSpace(statusLine[i+5:])); err == nil {
+						exitCode = n
+					}
+				}
+				// Job finished -- prune from local registry so list_jobs
+				// doesn't keep advertising it. The .log / .exit files on
+				// the remote stay; users can still tail historical logs
+				// manually if they want.
+				out := jobs.Jobs[:0]
+				for _, x := range jobs.Jobs {
+					if x.ID != j.ID {
+						out = append(out, x)
+					}
+				}
+				jobs.Jobs = out
+				_ = saveJobsFile(jobs)
+			} else if strings.HasPrefix(statusLine, "STATUS=killed") {
+				status = "killed"
+			} else if strings.HasPrefix(statusLine, "STATUS=running") {
+				status = "running"
+			}
+
+			var hint string
+			switch status {
+			case "completed":
+				hint = fmt.Sprintf("[%s exit=%d after %.1fs]", status, exitCode, waited)
+			case "running":
+				hint = fmt.Sprintf("[%s after %.1fs -- call wait_job again to keep waiting, or kill_job to stop]", status, waited)
+			default:
+				hint = fmt.Sprintf("[%s after %.1fs]", status, waited)
+			}
+			text := hint
+			if body != "" {
+				text += "\n" + body
+			}
+			structured := map[string]any{
+				"job_id":         j.ID,
+				"status":         status,
+				"waited_seconds": waited,
+			}
+			if status == "completed" {
+				structured["exit_code"] = exitCode
+			}
+			return toolResult{
+				Content:           []toolContent{{Type: "text", Text: text}},
+				IsError:           status == "killed" || (status == "completed" && exitCode != 0),
+				StructuredContent: structured,
 			}
 		},
 	},
