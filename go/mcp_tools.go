@@ -1,7 +1,6 @@
 package main
 
 import (
-	"bufio"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -9,8 +8,6 @@ import (
 	"strings"
 	"time"
 )
-
-const mcpProtocolVersion = "2024-11-05"
 
 // mcpRunTextMax caps the combined stdout+stderr the `run` tool returns
 // to the MCP client (Claude Code et al.). Beyond this, output is
@@ -22,25 +19,6 @@ const mcpProtocolVersion = "2024-11-05"
 // enough for typical command output while drawing a hard line against
 // runaway dumps.
 const mcpRunTextMax = 64 * 1024
-
-type jsonRPCRequest struct {
-	JSONRPC string          `json:"jsonrpc"`
-	ID      any             `json:"id,omitempty"`
-	Method  string          `json:"method"`
-	Params  json.RawMessage `json:"params,omitempty"`
-}
-
-type jsonRPCResponse struct {
-	JSONRPC string        `json:"jsonrpc"`
-	ID      any           `json:"id"`
-	Result  any           `json:"result,omitempty"`
-	Error   *jsonRPCError `json:"error,omitempty"`
-}
-
-type jsonRPCError struct {
-	Code    int    `json:"code"`
-	Message string `json:"message"`
-}
 
 type toolDef struct {
 	Name        string         `json:"name"`
@@ -97,37 +75,6 @@ func runRiskyMatch(command string) string {
 		}
 	}
 	return ""
-}
-
-// guardBlocked builds a uniform error response when the session guard
-// refuses an operation. The message tells the model both how to
-// proceed (confirm=true) and how to disable the guard entirely (`srv
-// guard off`) so it doesn't have to ask the user back-and-forth.
-func guardBlocked(tool, reason string) toolResult {
-	text := fmt.Sprintf(
-		"guard: %s blocked. %s\nRe-run with confirm=true if intentional, or disable via `srv guard off` (or unset SRV_GUARD).",
-		tool, reason,
-	)
-	return toolResult{
-		IsError: true,
-		Content: []toolContent{{Type: "text", Text: text}},
-		StructuredContent: map[string]any{
-			"guard_blocked": true,
-			"tool":          tool,
-			"reason":        reason,
-		},
-	}
-}
-
-// mcpJSONResult returns a tool result whose Content is a *compact* JSON
-// rendering of `info`, with no separate StructuredContent. Both fields
-// reach the MCP client; duplicating the same JSON in pretty-printed text
-// AND a structured payload doubled the tokens many tools were spending
-// on every call. Compact text is enough -- the model parses it fine and
-// pretty-printing was costing ~30% extra whitespace tokens on top.
-func mcpJSONResult(info any) toolResult {
-	b, _ := json.Marshal(info)
-	return toolResult{Content: []toolContent{{Type: "text", Text: string(b)}}}
 }
 
 func mcpToolDefs() []toolDef {
@@ -1155,140 +1102,4 @@ func buildMCPRunText(res *RunCaptureResult, cwd string) (string, int) {
 	}
 	text += fmt.Sprintf("\n[exit %d cwd %s]", res.ExitCode, cwd)
 	return text, truncated
-}
-
-func mcpSend(obj any) {
-	b, err := json.Marshal(obj)
-	if err != nil {
-		return
-	}
-	defer func() { _ = recover() }() // BrokenPipe
-	os.Stdout.Write(b)
-	os.Stdout.Write([]byte("\n"))
-}
-
-func mcpResponse(id any, result any, errObj *jsonRPCError) jsonRPCResponse {
-	r := jsonRPCResponse{JSONRPC: "2.0", ID: id}
-	if errObj != nil {
-		r.Error = errObj
-	} else {
-		r.Result = result
-	}
-	return r
-}
-
-// mcpMode is set true while the process is acting as a stdio MCP server.
-// Other code (progress meters, prompts, anything that would render
-// human-facing chrome to stderr) reads this to stay silent so it never
-// leaks into the JSON-RPC response stream the model parses. Cannot be
-// re-enabled from inside the MCP path -- the entire reason it exists.
-var mcpMode bool
-
-func cmdMcp(cfg *Config) int {
-	mcpMode = true
-	mcpLogf("start v=%s", Version)
-	rd := bufio.NewReader(os.Stdin)
-	for {
-		line, err := rd.ReadString('\n')
-		if err != nil {
-			// stdin EOF / pipe closed is the normal way Claude Code ends
-			// an MCP session (between conversations, agent restart). The
-			// log line distinguishes this from panic / write-error exits
-			// so users debugging "why did mcp drop" can tell normal
-			// lifecycle apart from real crashes.
-			mcpLogf("exit reason=stdin-%s", classifyReadErr(err))
-			return 0
-		}
-		line = strings.TrimSpace(line)
-		if line == "" {
-			continue
-		}
-		var req jsonRPCRequest
-		if jerr := json.Unmarshal([]byte(line), &req); jerr != nil {
-			mcpSend(mcpResponse(nil, nil, &jsonRPCError{
-				Code:    -32700,
-				Message: "parse error: " + jerr.Error(),
-			}))
-			continue
-		}
-		switch req.Method {
-		case "initialize":
-			mcpSend(mcpResponse(req.ID, map[string]any{
-				"protocolVersion": mcpProtocolVersion,
-				"capabilities":    map[string]any{"tools": map[string]any{"listChanged": false}},
-				"serverInfo":      map[string]any{"name": "srv", "version": Version},
-			}, nil))
-		case "notifications/initialized":
-			// no response for notifications
-		case "ping":
-			mcpSend(mcpResponse(req.ID, map[string]any{}, nil))
-		case "tools/list":
-			mcpSend(mcpResponse(req.ID, map[string]any{"tools": mcpToolDefs()}, nil))
-		case "tools/call":
-			var p struct {
-				Name      string         `json:"name"`
-				Arguments map[string]any `json:"arguments"`
-			}
-			if err := json.Unmarshal(req.Params, &p); err != nil {
-				mcpSend(mcpResponse(req.ID, nil, &jsonRPCError{
-					Code:    -32602,
-					Message: "invalid tools/call params: " + err.Error(),
-				}))
-				continue
-			}
-			args := p.Arguments
-			if args == nil {
-				args = map[string]any{}
-			}
-			cfg2, _ := LoadConfig()
-			if cfg2 == nil {
-				cfg2 = newConfig()
-			}
-			start := time.Now()
-			res := safeMCPHandle(p.Name, args, cfg2)
-			ok := "ok"
-			if res.IsError {
-				ok = "err"
-			}
-			mcpLogf("tool=%s dur=%.2fs %s", p.Name, time.Since(start).Seconds(), ok)
-			mcpSend(mcpResponse(req.ID, res, nil))
-		default:
-			if req.ID != nil {
-				mcpSend(mcpResponse(req.ID, nil, &jsonRPCError{
-					Code:    -32601,
-					Message: "method not found: " + req.Method,
-				}))
-			}
-		}
-	}
-}
-
-func safeMCPHandle(name string, args map[string]any, cfg *Config) (res toolResult) {
-	defer func() {
-		if r := recover(); r != nil {
-			// Log first so a hard crash later (mcpSend BrokenPipe etc.)
-			// still leaves a trail. Stack would be ideal here but it
-			// inflates the log; the (tool, panic) pair is usually enough
-			// to localise via git blame.
-			mcpLogf("tool=%s panic=%v", name, r)
-			res = toolResult{
-				IsError: true,
-				Content: []toolContent{{Type: "text", Text: fmt.Sprintf("panic: %v", r)}},
-			}
-		}
-	}()
-	return mcpHandleTool(name, args, cfg)
-}
-
-// classifyReadErr reduces stdin Read errors to a short tag for the log.
-// io.EOF is the boring "Claude closed stdin" case; anything else might
-// hint at pipe-level breakage worth surfacing to the user.
-func classifyReadErr(err error) string {
-	if err == nil {
-		return "nil"
-	}
-	if err.Error() == "EOF" {
-		return "eof"
-	}
-	return "err:" + err.Error()
 }
