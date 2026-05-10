@@ -355,7 +355,26 @@ srv kill <id> --signal=USR1       # custom signal
 
 Job ids look like `20260506-143052-abc1` (second-precision timestamp + random suffix). Prefix matching is supported — `srv logs 20260506` works if unambiguous.
 
-The user command is base64-encoded into the spawn line, sidestepping any nested-quoting problems.
+The user command is base64-encoded into the spawn line, sidestepping any nested-quoting problems. The wrapper additionally writes the user command's exit code to `~/.srv-jobs/<id>.exit` when it finishes (consumed by the MCP `wait_job` tool below).
+
+#### MCP long-task pattern: `detach` + `wait_job`
+
+MCP is synchronous JSON-RPC: a `run` call blocks the model's whole turn, and Claude Code's per-tool timeout (default 60000ms / 60s, tunable via `MCP_TOOL_TIMEOUT`) kills any `run` that exceeds it -- the UI shows a red dot and the next call respawns the MCP child. **For any command expected to take longer than ~30s, prefer `detach` + `wait_job`**:
+
+```
+detach { command: "npm run build" }    → job_id (returns sub-second)
+wait_job { id, max_wait_seconds: 30 }  → status=running   (job still going; call again)
+wait_job { id, max_wait_seconds: 30 }  → status=completed exit_code=0 + log tail
+                                         (local jobs.json auto-pruned on completion)
+```
+
+The `wait_job` wait loop runs **on the remote** as a single SSH round-trip -- a small bash for-loop polls the `.exit` marker and the PID, prints `STATUS=...` plus the log tail when it resolves. `max_wait_seconds` is hard-capped at 55 so each call stays safely under the 60s default MCP timeout. Status values:
+
+- `completed` — `.exit` file written, `exit_code` populated, local job record removed
+- `running` — still alive after the wait window; call `wait_job` again to keep waiting
+- `killed` — PID gone without an `.exit` marker (someone SIGKILLed it externally)
+
+Between wait_job calls the model can interleave other tool calls.
 
 ### Sessions
 
@@ -541,7 +560,9 @@ srv -d "python long.py"
 
 ### Option 2: MCP server (structured tools)
 
-Claude Code gets 19 tools via stdio MCP (`run`, `cd`, `pwd`, `use`, `status`, `check`, `list_profiles`, `doctor`, `daemon_status`, `env`, `diff`, `push`, `pull`, `sync`, `sync_delete_dry_run`, `detach`, `list_jobs`, `tail_log`, `kill_job`). The MCP server's session id = the Claude Code process PID, so each Claude Code instance is independent.
+Claude Code gets 21 tools via stdio MCP (`run`, `cd`, `pwd`, `use`, `status`, `check`, `list_profiles`, `doctor`, `daemon_status`, `env`, `diff`, `push`, `pull`, `sync`, `sync_delete_dry_run`, `list_dir`, `detach`, `list_jobs`, `tail_log`, `wait_job`, `kill_job`). The MCP server's session id = the Claude Code process PID, so each Claude Code instance is independent.
+
+`detach` + `wait_job` is the recommended pattern for long-running commands -- see [Detached jobs](#detached-jobs) above. `list_dir` lets the model enumerate remote directories structurally without burning tokens on `run "ls ..."` and inheriting its ANSI noise.
 
 **Claude Code** — pick one of three scopes depending on how you want it shared:
 

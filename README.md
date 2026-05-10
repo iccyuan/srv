@@ -237,7 +237,20 @@ srv kill <id> -9
 srv kill <id> --signal=USR1
 ```
 
-任务在远端通过 `nohup` 运行，日志保存在 `~/.srv-jobs/<id>.log`。
+任务在远端通过 `nohup` 运行，日志保存在 `~/.srv-jobs/<id>.log`，完成时退出码写到 `~/.srv-jobs/<id>.exit`（供 MCP `wait_job` 工具读取）。
+
+#### MCP 长任务模式：`detach` + `wait_job`
+
+MCP 是同步 JSON-RPC，`run` 阻塞整个 turn，Claude Code 的 per-tool 超时（默认 60s，`MCP_TOOL_TIMEOUT` 可调）会把超时的 `run` 直接砍掉、UI 上显示红点。**任何预计超过 30s 的命令应改用 `detach` + `wait_job`**：
+
+```
+detach { command: "npm run build" }    → job_id（亚秒返回）
+wait_job { id, max_wait_seconds: 30 }  → status=running（job 还没完，调下一次）
+wait_job { id, max_wait_seconds: 30 }  → status=completed exit_code=0 + log tail
+                                         （本地 jobs.json 自动清理）
+```
+
+`wait_job` 的等待循环跑在远端 bash 里（单次 SSH 往返完成 N 秒等待），`max_wait_seconds` 硬上限 55，确保永远低于 60s MCP timeout。模型可以在两次 wait_job 之间穿插别的工具调用。`status=killed` 表示 PID 在没写 `.exit` 的情况下消失了（被外部 SIGKILL）。
 
 ### 端口转发
 
@@ -372,7 +385,9 @@ command = "D:\\WorkSpace\\server\\srv\\srv.exe"
 args = ["mcp"]
 ```
 
-MCP 工具包括：`run`、`cd`、`pwd`、`use`、`status`、`check`、`list_profiles`、`doctor`、`daemon_status`、`env`、`diff`、`push`、`pull`、`sync`、`sync_delete_dry_run`、`detach`、`list_jobs`、`tail_log`、`kill_job`。
+MCP 工具包括：`run`、`cd`、`pwd`、`use`、`status`、`check`、`list_profiles`、`doctor`、`daemon_status`、`env`、`diff`、`push`、`pull`、`sync`、`sync_delete_dry_run`、`list_dir`、`detach`、`list_jobs`、`tail_log`、`wait_job`、`kill_job`。
+
+`wait_job` 与 `detach` 配合是长任务的推荐模式（见上文「后台任务」章节）。`list_dir` 给模型按结构化方式枚举远端目录，比让它拼 `run "ls ..."` 省 token 且不被 ANSI 颜色污染。
 
 为节省上下文，MCP 的大输出会截断，`sync` 等工具只返回必要摘要。
 
