@@ -567,6 +567,23 @@ func tarUploadStream(profile *Profile, localRoot string, files []string, remoteR
 	pr, pw := io.Pipe()
 	errCh := make(chan error, 1)
 	go func() {
+		// Recover any panic in here -- without this, an OS-level IO
+		// hiccup or malformed file metadata would crash the entire
+		// process. Especially important under MCP, where the parent
+		// process death looks to Claude Code like an unrecoverable
+		// "tools no longer available" event. We pump the panic into
+		// errCh as an error so the caller sees the same channel signal
+		// it would for an ordinary tar/copy failure.
+		defer func() {
+			if r := recover(); r != nil {
+				_ = pw.CloseWithError(fmt.Errorf("tar producer panic: %v", r))
+				select {
+				case errCh <- fmt.Errorf("tar producer panic: %v", r):
+				default:
+				}
+				mcpLogf("tar producer panic: %v", r)
+			}
+		}()
 		defer pw.Close()
 		// Sink chain: tar -> [gzip ->] pw
 		var sink io.WriteCloser = pw

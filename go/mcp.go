@@ -1186,10 +1186,17 @@ var mcpMode bool
 
 func cmdMcp(cfg *Config) int {
 	mcpMode = true
+	mcpLogf("start v=%s", Version)
 	rd := bufio.NewReader(os.Stdin)
 	for {
 		line, err := rd.ReadString('\n')
 		if err != nil {
+			// stdin EOF / pipe closed is the normal way Claude Code ends
+			// an MCP session (between conversations, agent restart). The
+			// log line distinguishes this from panic / write-error exits
+			// so users debugging "why did mcp drop" can tell normal
+			// lifecycle apart from real crashes.
+			mcpLogf("exit reason=stdin-%s", classifyReadErr(err))
 			return 0
 		}
 		line = strings.TrimSpace(line)
@@ -1237,7 +1244,13 @@ func cmdMcp(cfg *Config) int {
 			if cfg2 == nil {
 				cfg2 = newConfig()
 			}
+			start := time.Now()
 			res := safeMCPHandle(p.Name, args, cfg2)
+			ok := "ok"
+			if res.IsError {
+				ok = "err"
+			}
+			mcpLogf("tool=%s dur=%.2fs %s", p.Name, time.Since(start).Seconds(), ok)
 			mcpSend(mcpResponse(req.ID, res, nil))
 		default:
 			if req.ID != nil {
@@ -1253,6 +1266,11 @@ func cmdMcp(cfg *Config) int {
 func safeMCPHandle(name string, args map[string]any, cfg *Config) (res toolResult) {
 	defer func() {
 		if r := recover(); r != nil {
+			// Log first so a hard crash later (mcpSend BrokenPipe etc.)
+			// still leaves a trail. Stack would be ideal here but it
+			// inflates the log; the (tool, panic) pair is usually enough
+			// to localise via git blame.
+			mcpLogf("tool=%s panic=%v", name, r)
 			res = toolResult{
 				IsError: true,
 				Content: []toolContent{{Type: "text", Text: fmt.Sprintf("panic: %v", r)}},
@@ -1260,4 +1278,17 @@ func safeMCPHandle(name string, args map[string]any, cfg *Config) (res toolResul
 		}
 	}()
 	return mcpHandleTool(name, args, cfg)
+}
+
+// classifyReadErr reduces stdin Read errors to a short tag for the log.
+// io.EOF is the boring "Claude closed stdin" case; anything else might
+// hint at pipe-level breakage worth surfacing to the user.
+func classifyReadErr(err error) string {
+	if err == nil {
+		return "nil"
+	}
+	if err.Error() == "EOF" {
+		return "eof"
+	}
+	return "err:" + err.Error()
 }
