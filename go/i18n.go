@@ -29,14 +29,23 @@ var (
 // runs at most once and caches the result.
 //
 // Resolution order (highest first):
-//  1. Config.Lang ("en" / "zh"; "" or "auto" defers to env)
-//  2. $SRV_LANG ("en" / "zh"; "auto" defers)
-//  3. $LC_ALL / $LC_MESSAGES / $LANG (anything starting with "zh" -> Chinese; else English)
-//  4. Platform locale (Windows only; querying Win32 GetUserDefaultLocaleName).
+//  1. mcpMode -> always English. AI clients (Claude Code / Codex) read
+//     tool descriptions and error messages and feed them back into the
+//     model; locale-dependent text creates two problems: (a) the model's
+//     learned patterns for srv-style tools assume English, (b) the same
+//     prompt produces different model behaviour on a 中文 vs en_US
+//     machine. Pin English under MCP so behaviour is reproducible.
+//  2. Config.Lang ("en" / "zh"; "" or "auto" defers to env)
+//  3. $SRV_LANG ("en" / "zh"; "auto" defers)
+//  4. $LC_ALL / $LC_MESSAGES / $LANG (anything starting with "zh" -> Chinese; else English)
+//  5. Platform locale (Windows only; querying Win32 GetUserDefaultLocaleName).
 //     POSIX envs are typically empty on Windows, so without this a 中文
 //     Windows install would always fall through to English.
-//  5. English fallback
+//  6. English fallback
 func currentLang() lang {
+	if mcpMode {
+		return langEN
+	}
 	detectedLangOnce.Do(func() {
 		detectedLangVal = detectLang()
 	})
