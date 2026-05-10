@@ -10,6 +10,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -24,8 +25,9 @@ var installHTML []byte
 //
 // The same UI handles three platforms uniformly:
 //   - "Add to PATH": Windows User env var, ~/.local/bin symlink on Unix
-//     (or rc-file edit), Codex/MCP registration if a CLI is detected.
+//     (or rc-file edit).
 //   - "Register as Claude Code MCP" via `claude mcp add` user scope.
+//   - "Register as Codex MCP" by editing ~/.codex/config.toml.
 //   - "Run srv init" in a new terminal.
 //
 // Bootstrap entry points: ./install.ps1 -Gui and ./install.sh --gui both
@@ -131,6 +133,7 @@ type installStatus struct {
 	Binary    installStatusBinary    `json:"binary"`
 	Path      installStatusPath      `json:"path"`
 	ClaudeMcp installStatusClaudeMcp `json:"claude_mcp"`
+	CodexMcp  installStatusCodexMcp  `json:"codex_mcp"`
 	Profiles  installStatusProfiles  `json:"profiles"`
 }
 
@@ -150,6 +153,12 @@ type installStatusClaudeMcp struct {
 	Scope      string `json:"scope"`
 }
 
+type installStatusCodexMcp struct {
+	ConfigPath string `json:"config_path"`
+	Registered bool   `json:"registered"`
+	Command    string `json:"command,omitempty"`
+}
+
 type installStatusProfiles struct {
 	Count   int    `json:"count"`
 	Default string `json:"default"`
@@ -165,6 +174,7 @@ func buildInstallStatus(bin string) installStatus {
 	}
 	binDir := filepath.Dir(bin)
 	available, registered, scope := detectClaudeMcp()
+	codexRegistered, codexCommand, codexConfigPath := detectCodexMcp()
 	return installStatus{
 		Platform: runtime.GOOS,
 		Binary:   installStatusBinary{Path: bin, Version: Version},
@@ -176,6 +186,11 @@ func buildInstallStatus(bin string) installStatus {
 			Available:  available,
 			Registered: registered,
 			Scope:      scope,
+		},
+		CodexMcp: installStatusCodexMcp{
+			ConfigPath: codexConfigPath,
+			Registered: codexRegistered,
+			Command:    codexCommand,
 		},
 		Profiles: installStatusProfiles{Count: profCount, Default: profDefault},
 	}
@@ -209,6 +224,18 @@ func applyInstallActions(bin string, actions []string) []string {
 				log = append(log, "Claude MCP: error: "+err.Error())
 			} else {
 				log = append(log, "Claude MCP: removed")
+			}
+		case "register_codex_mcp":
+			if err := installRegisterCodexMcp(bin); err != nil {
+				log = append(log, "Codex MCP: error: "+err.Error())
+			} else {
+				log = append(log, "Codex MCP: registered in "+codexConfigPath())
+			}
+		case "unregister_codex_mcp":
+			if err := installUnregisterCodexMcp(); err != nil {
+				log = append(log, "Codex MCP: error: "+err.Error())
+			} else {
+				log = append(log, "Codex MCP: removed from "+codexConfigPath())
 			}
 		case "init_profile":
 			if err := installSpawnInit(bin); err != nil {
@@ -296,6 +323,130 @@ func installUnregisterClaudeMcp() error {
 		return fmt.Errorf("claude mcp remove: %s", strings.TrimSpace(string(out)))
 	}
 	return nil
+}
+
+func codexConfigPath() string {
+	home, err := os.UserHomeDir()
+	if err != nil || home == "" {
+		return filepath.Join(".codex", "config.toml")
+	}
+	return filepath.Join(home, ".codex", "config.toml")
+}
+
+func detectCodexMcp() (registered bool, command string, configPath string) {
+	configPath = codexConfigPath()
+	data, err := os.ReadFile(configPath)
+	if err != nil {
+		return false, "", configPath
+	}
+	section := codexMcpSection(string(data))
+	if section == "" {
+		return false, "", configPath
+	}
+	return true, parseCodexMcpCommand(section), configPath
+}
+
+func installRegisterCodexMcp(bin string) error {
+	path := codexConfigPath()
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		return err
+	}
+	var text string
+	if data, err := os.ReadFile(path); err == nil {
+		text = string(data)
+	} else if !os.IsNotExist(err) {
+		return err
+	}
+	text, _ = removeCodexMcpSection(text)
+	if strings.TrimSpace(text) != "" {
+		text = strings.TrimRight(text, "\r\n") + "\n\n"
+	}
+	text += "[mcp_servers.srv]\n"
+	text += "command = " + strconv.Quote(bin) + "\n"
+	text += "args = [\"mcp\"]\n"
+	return os.WriteFile(path, []byte(text), 0o600)
+}
+
+func installUnregisterCodexMcp() error {
+	path := codexConfigPath()
+	data, err := os.ReadFile(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return err
+	}
+	text, removed := removeCodexMcpSection(string(data))
+	if !removed {
+		return nil
+	}
+	if strings.TrimSpace(text) != "" {
+		text = strings.TrimRight(text, "\r\n") + "\n"
+	}
+	return os.WriteFile(path, []byte(text), 0o600)
+}
+
+func codexMcpSection(text string) string {
+	lines := strings.Split(strings.ReplaceAll(text, "\r\n", "\n"), "\n")
+	start := -1
+	end := len(lines)
+	for i, line := range lines {
+		trimmed := strings.TrimSpace(line)
+		if trimmed == "[mcp_servers.srv]" {
+			start = i
+			continue
+		}
+		if start >= 0 && i > start && strings.HasPrefix(trimmed, "[") && strings.HasSuffix(trimmed, "]") {
+			end = i
+			break
+		}
+	}
+	if start < 0 {
+		return ""
+	}
+	return strings.Join(lines[start:end], "\n")
+}
+
+func removeCodexMcpSection(text string) (string, bool) {
+	lines := strings.Split(strings.ReplaceAll(text, "\r\n", "\n"), "\n")
+	start := -1
+	end := len(lines)
+	for i, line := range lines {
+		trimmed := strings.TrimSpace(line)
+		if trimmed == "[mcp_servers.srv]" {
+			start = i
+			continue
+		}
+		if start >= 0 && i > start && strings.HasPrefix(trimmed, "[") && strings.HasSuffix(trimmed, "]") {
+			end = i
+			break
+		}
+	}
+	if start < 0 {
+		return text, false
+	}
+	out := append([]string{}, lines[:start]...)
+	out = append(out, lines[end:]...)
+	return strings.TrimRight(strings.Join(out, "\n"), "\n") + "\n", true
+}
+
+func parseCodexMcpCommand(section string) string {
+	for _, line := range strings.Split(section, "\n") {
+		line = strings.TrimSpace(line)
+		if !strings.HasPrefix(line, "command") {
+			continue
+		}
+		parts := strings.SplitN(line, "=", 2)
+		if len(parts) != 2 {
+			continue
+		}
+		raw := strings.TrimSpace(parts[1])
+		if s, err := strconv.Unquote(raw); err == nil {
+			return s
+		}
+		return strings.Trim(raw, `"'`)
+	}
+	return ""
 }
 
 // installSpawnInit opens a new terminal window running `srv init` so the

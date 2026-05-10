@@ -115,6 +115,11 @@ function fmtClaude(c) {
   return '<span class="warn">claude available, srv not registered</span>';
 }
 
+function fmtCodex(c) {
+  if (c.registered) return `<span class="ok">registered${c.command ? ' - ' + c.command : ''}</span>`;
+  return '<span class="warn">srv not registered in Codex config</span>';
+}
+
 function fmtPath(p) {
   if (p.on_path) return '<span class="ok">✓ on $PATH</span>';
   return '<span class="warn">not on $PATH</span>';
@@ -135,6 +140,7 @@ async function loadStatus() {
     <div class="row"><div class="row-key">Binary</div><div class="row-val">${s.binary.path}</div></div>
     <div class="row"><div class="row-key">PATH</div><div class="row-val">${fmtPath(s.path)}</div></div>
     <div class="row"><div class="row-key">Claude Code</div><div class="row-val">${fmtClaude(s.claude_mcp)}</div></div>
+    <div class="row"><div class="row-key">Codex</div><div class="row-val">${fmtCodex(s.codex_mcp)}</div></div>
     <div class="row"><div class="row-key">Profiles</div><div class="row-val">${fmtProfiles(s.profiles)}</div></div>
   `;
 
@@ -163,11 +169,25 @@ async function loadStatus() {
       disabled: !s.claude_mcp.available,
     },
     {
+      key: 'register_codex_mcp',
+      label: 'Register as Codex MCP',
+      desc: `Adds srv to ${s.codex_mcp.config_path} so MCP tools are available in new Codex sessions.`,
+      defaultChecked: !s.codex_mcp.registered,
+      disabled: false,
+    },
+    {
       key: 'unregister_claude_mcp',
       label: 'Unregister from Claude Code',
       desc: 'Remove srv from Claude Code\'s MCP servers.',
       defaultChecked: false,
       disabled: !s.claude_mcp.available || !s.claude_mcp.registered,
+    },
+    {
+      key: 'unregister_codex_mcp',
+      label: 'Unregister from Codex',
+      desc: 'Remove srv from Codex MCP servers.',
+      defaultChecked: false,
+      disabled: !s.codex_mcp.registered,
     },
     {
       key: 'init_profile',
