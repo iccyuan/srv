@@ -77,7 +77,7 @@ func prompt(rd *bufio.Reader, q, def string) string {
 
 func cmdConfig(args []string, cfg *Config) int {
 	if len(args) == 0 {
-		fatal(t("usage.config"))
+		fatal("%s", t("usage.config"))
 	}
 	action := args[0]
 	rest := args[1:]
@@ -147,7 +147,7 @@ func cmdConfig(args []string, cfg *Config) int {
 			return 0
 		}
 		if _, ok := cfg.Profiles[rest[0]]; !ok {
-			fatal(t("err.profile_not_found", rest[0]))
+			fatal("%s", t("err.profile_not_found", rest[0]))
 		}
 		cfg.DefaultProfile = rest[0]
 		if err := SaveConfig(cfg); err != nil {
@@ -157,10 +157,10 @@ func cmdConfig(args []string, cfg *Config) int {
 		return 0
 	case "remove":
 		if len(rest) == 0 {
-			fatal(t("usage.config_rm"))
+			fatal("%s", t("usage.config_rm"))
 		}
 		if _, ok := cfg.Profiles[rest[0]]; !ok {
-			fatal(t("err.profile_not_found", rest[0]))
+			fatal("%s", t("err.profile_not_found", rest[0]))
 		}
 		delete(cfg.Profiles, rest[0])
 		if cfg.DefaultProfile == rest[0] {
@@ -182,7 +182,7 @@ func cmdConfig(args []string, cfg *Config) int {
 		}
 		p, ok := cfg.Profiles[target]
 		if !ok {
-			fatal(t("err.profile_not_found", target))
+			fatal("%s", t("err.profile_not_found", target))
 		}
 		out := map[string]*Profile{target: p}
 		b, _ := json.MarshalIndent(out, "", "  ")
@@ -190,14 +190,14 @@ func cmdConfig(args []string, cfg *Config) int {
 		return 0
 	case "set":
 		if len(rest) < 3 {
-			fatal(t("usage.config_set"))
+			fatal("%s", t("usage.config_set"))
 		}
 		prof := rest[0]
 		key := rest[1]
 		value := strings.Join(rest[2:], " ")
 		p, ok := cfg.Profiles[prof]
 		if !ok {
-			fatal(t("err.profile_not_found", prof))
+			fatal("%s", t("err.profile_not_found", prof))
 		}
 		applyProfileSet(p, key, value)
 		if err := SaveConfig(cfg); err != nil {
@@ -211,11 +211,11 @@ func cmdConfig(args []string, cfg *Config) int {
 			target = rest[0]
 		}
 		if target == "" {
-			fatal(t("usage.config_edit"))
+			fatal("%s", t("usage.config_edit"))
 		}
 		p, ok := cfg.Profiles[target]
 		if !ok {
-			fatal(t("err.profile_not_found", target))
+			fatal("%s", t("err.profile_not_found", target))
 		}
 		edited, err := editJSONValue(p, "srv-profile-*.json")
 		if err != nil {
@@ -232,7 +232,7 @@ func cmdConfig(args []string, cfg *Config) int {
 		fmt.Printf("updated profile %s\n", target)
 		return 0
 	}
-	fatal(t("err.config_action", action))
+	fatal("%s", t("err.config_action", action))
 	return 1
 }
 
@@ -269,7 +269,7 @@ func cmdConfigGlobal(args []string, cfg *Config) int {
 		} else {
 			v := strings.ToLower(value)
 			if v != "en" && v != "zh" {
-				fatal(t("err.global_lang_value", value))
+				fatal("%s", t("err.global_lang_value", value))
 			}
 			cfg.Lang = v
 		}
@@ -278,12 +278,12 @@ func cmdConfigGlobal(args []string, cfg *Config) int {
 			cfg.DefaultProfile = ""
 		} else {
 			if _, ok := cfg.Profiles[value]; !ok {
-				fatal(t("err.profile_not_found", value))
+				fatal("%s", t("err.profile_not_found", value))
 			}
 			cfg.DefaultProfile = value
 		}
 	default:
-		fatal(t("err.global_unknown_key", key))
+		fatal("%s", t("err.global_unknown_key", key))
 	}
 	if err := SaveConfig(cfg); err != nil {
 		fatal("error: %v", err)
@@ -323,7 +323,7 @@ func printOneGlobal(cfg *Config, key string) {
 		}
 		fmt.Printf("default_profile = %s\n", v)
 	default:
-		fatal(t("err.global_unknown_key", key))
+		fatal("%s", t("err.global_unknown_key", key))
 	}
 }
 
@@ -486,7 +486,7 @@ func cmdUse(args []string, cfg *Config) int {
 		return 0
 	}
 	if _, ok := cfg.Profiles[a]; !ok {
-		fatal(t("err.profile_not_found", a))
+		fatal("%s", t("err.profile_not_found", a))
 	}
 	sid, err := SetSessionProfile(a)
 	if err != nil {
@@ -601,11 +601,11 @@ func cmdRun(args []string, cfg *Config, profileOverride string, tty bool) int {
 func cmdPush(args []string, cfg *Config, profileOverride string) int {
 	args, recursive := stripRecursive(args)
 	if len(args) == 0 {
-		fatal(t("usage.push"))
+		fatal("%s", t("usage.push"))
 	}
 	local := args[0]
 	if _, err := os.Stat(local); err != nil {
-		fatal(t("err.local_path_missing", local))
+		fatal("%s", t("err.local_path_missing", local))
 	}
 	name, profile, err := ResolveProfile(cfg, profileOverride)
 	if err != nil {
@@ -629,7 +629,7 @@ func cmdPush(args []string, cfg *Config, profileOverride string) int {
 func cmdPull(args []string, cfg *Config, profileOverride string) int {
 	args, recursive := stripRecursive(args)
 	if len(args) == 0 {
-		fatal(t("usage.pull"))
+		fatal("%s", t("usage.pull"))
 	}
 	remote := args[0]
 	local := "."

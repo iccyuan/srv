@@ -1,0 +1,158 @@
+package main
+
+import "fmt"
+
+// Subcommand registry. ONE source of truth: dispatch, the
+// reservedSubcommands set used by the typo-hint engine, and -- once the
+// completion DSL lands -- the shell completion specs all read from this
+// slice. Adding a new subcommand means appending one entry here, no
+// other file edits required (apart from the actual cmdXxx implementation
+// and an optional one-line update to the prose help text).
+//
+// The handler shape is uniform (cmdHandler over cmdCtx) so the registry
+// stays a flat data table rather than a series of irregular function
+// signatures. Each entry's handler is a tiny adapter that pulls the
+// fields it needs out of cmdCtx and calls the underlying cmd* impl --
+// preserves the cmd* signatures we already have without forcing every
+// command to take an opaque context object.
+
+type cmdHandler func(ctx cmdCtx) int
+
+// cmdCtx is the uniform input shape every handler receives. Holds the
+// post-flag args and the resolved config (when loaded), plus the
+// global-flag values that some handlers care about.
+type cmdCtx struct {
+	args            []string
+	cfg             *Config
+	profileOverride string
+	detach          bool
+	tty             bool
+	noHints         bool
+}
+
+type subcommand struct {
+	name     string   // primary name -- shown in help, drives dispatch
+	aliases  []string // alternate names that hit the same handler (e.g. exec → run)
+	handler  cmdHandler
+	noConfig bool // skip LoadConfig before dispatch (help/version/install/completion/init load lazily)
+	hidden   bool // internal helper -- excluded from help and from typo-hint candidates
+}
+
+// subcommands is the full registry. Order is preserved for
+// `srv help`-style enumeration once we drive help text from this too;
+// for now the prose help in main.go is still the user-facing source.
+var subcommands = []subcommand{
+	// Help / version / first-run -- need no config.
+	{name: "help", aliases: []string{"--help", "-h"}, noConfig: true, handler: func(c cmdCtx) int {
+		fmt.Print(t("help.full"))
+		return 0
+	}},
+	{name: "version", aliases: []string{"--version"}, noConfig: true, handler: func(c cmdCtx) int {
+		fmt.Printf("srv %s\n", Version)
+		return 0
+	}},
+	{name: "completion", noConfig: true, handler: func(c cmdCtx) int { return cmdCompletion(c.args) }},
+	{name: "install", noConfig: true, handler: func(c cmdCtx) int { return cmdInstall(c.args) }},
+	{name: "init", noConfig: true, handler: func(c cmdCtx) int {
+		// init creates config; load empty if missing.
+		cfg, _ := LoadConfig()
+		if cfg == nil {
+			cfg = newConfig()
+		}
+		return cmdInit(cfg)
+	}},
+
+	// Profile / cwd / status.
+	{name: "config", handler: func(c cmdCtx) int { return cmdConfig(c.args, c.cfg) }},
+	{name: "use", handler: func(c cmdCtx) int { return cmdUse(c.args, c.cfg) }},
+	{name: "cd", handler: func(c cmdCtx) int {
+		p := ""
+		if len(c.args) > 0 {
+			p = c.args[0]
+		}
+		return cmdCd(p, c.cfg, c.profileOverride)
+	}},
+	{name: "pwd", handler: func(c cmdCtx) int { return cmdPwd(c.cfg, c.profileOverride) }},
+	{name: "status", handler: func(c cmdCtx) int { return cmdStatus(c.cfg, c.profileOverride) }},
+	{name: "check", handler: func(c cmdCtx) int { return cmdCheck(c.args, c.cfg, c.profileOverride) }},
+	{name: "doctor", handler: func(c cmdCtx) int { return cmdDoctor(c.args, c.cfg, c.profileOverride) }},
+	{name: "shell", handler: func(c cmdCtx) int { return cmdShell(c.cfg, c.profileOverride) }},
+	{name: "env", handler: func(c cmdCtx) int { return cmdEnv(c.args, c.cfg, c.profileOverride) }},
+
+	// Transfer / view.
+	{name: "push", handler: func(c cmdCtx) int { return cmdPush(c.args, c.cfg, c.profileOverride) }},
+	{name: "pull", handler: func(c cmdCtx) int { return cmdPull(c.args, c.cfg, c.profileOverride) }},
+	{name: "sync", handler: func(c cmdCtx) int { return cmdSync(c.args, c.cfg, c.profileOverride) }},
+	{name: "edit", handler: func(c cmdCtx) int { return cmdEdit(c.args, c.cfg, c.profileOverride) }},
+	{name: "open", handler: func(c cmdCtx) int { return cmdOpen(c.args, c.cfg, c.profileOverride) }},
+	{name: "code", handler: func(c cmdCtx) int { return cmdCode(c.args, c.cfg, c.profileOverride) }},
+	{name: "diff", handler: func(c cmdCtx) int { return cmdDiff(c.args, c.cfg, c.profileOverride) }},
+
+	// Tunnel / jobs / sessions.
+	{name: "tunnel", handler: func(c cmdCtx) int { return cmdTunnel(c.args, c.cfg, c.profileOverride) }},
+	{name: "jobs", handler: func(c cmdCtx) int { return cmdJobs(c.cfg, c.profileOverride) }},
+	{name: "logs", handler: func(c cmdCtx) int { return cmdLogs(c.args, c.cfg, c.profileOverride) }},
+	{name: "kill", handler: func(c cmdCtx) int { return cmdKill(c.args, c.cfg, c.profileOverride) }},
+	{name: "sessions", handler: func(c cmdCtx) int { return cmdSessions(c.args) }},
+
+	// Integrations / settings.
+	{name: "mcp", handler: func(c cmdCtx) int { return cmdMcp(c.cfg) }},
+	{name: "guard", handler: func(c cmdCtx) int { return cmdGuard(c.args) }},
+	{name: "color", handler: func(c cmdCtx) int { return cmdColor(c.args) }},
+	{name: "daemon", handler: func(c cmdCtx) int { return cmdDaemon(c.args) }},
+
+	// run/exec: -d global flag swaps in cmdDetach; otherwise wrap with
+	// the typo-hint emitter.
+	{name: "run", aliases: []string{"exec"}, handler: func(c cmdCtx) int {
+		if c.detach {
+			return cmdDetach(c.args, c.cfg, c.profileOverride)
+		}
+		return cmdRunWithHints(c.args, c.cfg, globalOpts{
+			profile: c.profileOverride,
+			tty:     c.tty,
+			detach:  c.detach,
+			noHints: c.noHints,
+		})
+	}},
+
+	// Internal helpers for shell completion. Hidden so they don't show
+	// up in `srv help` and aren't candidates for typo-hint matching.
+	{name: "_profiles", hidden: true, handler: func(c cmdCtx) int {
+		for n := range c.cfg.Profiles {
+			fmt.Println(n)
+		}
+		return 0
+	}},
+	{name: "_ls", hidden: true, handler: func(c cmdCtx) int { return cmdInternalLs(c.args, c.cfg, c.profileOverride) }},
+}
+
+// subcommandMap and reservedSubcommands are populated by init() rather
+// than var initializers because the registry's closures transitively
+// reference cmdRunWithHints → suggestSubcommand → reservedSubcommands,
+// which Go's compiler flags as an initialization cycle when the maps
+// are themselves var initializers. init() runs after all package vars
+// are constructed, so by then `subcommands` is fully laid down and we
+// can derive both lookup tables in one pass.
+var (
+	subcommandMap       map[string]*subcommand
+	reservedSubcommands map[string]bool
+)
+
+func init() {
+	subcommandMap = make(map[string]*subcommand, len(subcommands)*2)
+	reservedSubcommands = make(map[string]bool, len(subcommands)*2)
+	for i := range subcommands {
+		s := &subcommands[i]
+		subcommandMap[s.name] = s
+		reservedSubcommands[s.name] = true
+		for _, a := range s.aliases {
+			subcommandMap[a] = s
+			reservedSubcommands[a] = true
+		}
+	}
+}
+
+func lookupSub(name string) (*subcommand, bool) {
+	s, ok := subcommandMap[name]
+	return s, ok
+}

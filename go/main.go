@@ -198,19 +198,10 @@ Session 检测:
 后台作业:~/.srv/jobs.json
 `
 
-// reservedSubcommands are names that won't be interpreted as remote commands.
-// Any first-arg outside this set is run on the remote.
-var reservedSubcommands = map[string]bool{
-	"init": true, "config": true, "use": true, "cd": true, "pwd": true,
-	"status": true, "check": true, "shell": true, "run": true, "exec": true,
-	"push": true, "pull": true, "sync": true, "tunnel": true, "edit": true,
-	"open": true, "code": true, "diff": true, "doctor": true,
-	"env": true, "install": true, "completion": true, "mcp": true, "daemon": true, "guard": true, "color": true,
-	"_profiles": true, "_ls": true,
-	"jobs": true, "logs": true, "kill": true, "sessions": true,
-	"help": true, "--help": true, "-h": true,
-	"version": true, "--version": true,
-}
+// reservedSubcommands lives in commands.go now -- derived from the
+// subcommand registry so it can never drift from the dispatcher. Adding
+// a name there automatically excludes it from being interpreted as a
+// remote command.
 
 type globalOpts struct {
 	profile string
@@ -227,7 +218,7 @@ func parseGlobalFlags(args []string) (globalOpts, []string) {
 		switch {
 		case a == "-P" || a == "--profile":
 			if i+1 >= len(args) {
-				fatal(t("err.flag_requires_value", a))
+				fatal("%s", t("err.flag_requires_value", a))
 			}
 			opts.profile = args[i+1]
 			i += 2
@@ -254,8 +245,21 @@ func parseGlobalFlags(args []string) (globalOpts, []string) {
 	return opts, args[i:]
 }
 
+// fatal prints to stderr and exits 1 -- the standard CLI failure path.
+// Never call from a code path that might also be reached under MCP, since
+// os.Exit terminates the entire stdio server and Claude Code surfaces
+// that to the user as the unhelpful "tools no longer available". As a
+// belt-and-suspenders guard, when mcpMode is true we panic instead so
+// safeMCPHandle catches the failure and reports it as an isError tool
+// result -- the MCP loop survives. New code should still prefer
+// returning an error over fatal(); this trap exists so a misplaced
+// fatal in a shared helper can't take down the MCP server silently.
 func fatal(format string, args ...any) {
-	fmt.Fprintf(os.Stderr, format+"\n", args...)
+	msg := fmt.Sprintf(format, args...)
+	if mcpMode {
+		panic("fatal: " + msg)
+	}
+	fmt.Fprintln(os.Stderr, msg)
 	os.Exit(1)
 }
 
@@ -275,113 +279,40 @@ func run(args []string) int {
 	}
 
 	sub := rest[0]
+	cmd, known := lookupSub(sub)
 
-	// Help / version are pure local, no config needed.
-	switch sub {
-	case "help", "--help", "-h":
-		fmt.Print(t("help.full"))
-		return 0
-	case "version", "--version":
-		fmt.Printf("srv %s\n", Version)
-		return 0
-	case "completion":
-		return cmdCompletion(rest[1:])
-	case "install":
-		// install opens a localhost web UI to wire srv up: PATH, MCP
-		// registration, and a first-profile prompt. No config needed.
-		return cmdInstall(rest[1:])
-	case "init":
-		// init creates config; load empty if missing.
-		cfg, _ := LoadConfig()
+	// Build the uniform context. cfg is loaded only when at least one
+	// path needs it: a known subcommand without noConfig, or the
+	// remote-fallthrough (cmdRunWithHints / cmdDetach both need cfg).
+	ctx := cmdCtx{
+		args:            rest[1:],
+		profileOverride: opts.profile,
+		detach:          opts.detach,
+		tty:             opts.tty,
+		noHints:         opts.noHints,
+	}
+	needCfg := !known || !cmd.noConfig
+	if needCfg {
+		cfg, err := LoadConfig()
+		if err != nil {
+			fatal("%v", err)
+		}
 		if cfg == nil {
 			cfg = newConfig()
 		}
-		return cmdInit(cfg)
+		ctx.cfg = cfg
 	}
 
-	cfg, err := LoadConfig()
-	if err != nil {
-		fatal("%v", err)
-	}
-	if cfg == nil {
-		cfg = newConfig()
+	if known {
+		return cmd.handler(ctx)
 	}
 
-	switch sub {
-	case "config":
-		return cmdConfig(rest[1:], cfg)
-	case "use":
-		return cmdUse(rest[1:], cfg)
-	case "cd":
-		path := ""
-		if len(rest) > 1 {
-			path = rest[1]
-		}
-		return cmdCd(path, cfg, opts.profile)
-	case "pwd":
-		return cmdPwd(cfg, opts.profile)
-	case "status":
-		return cmdStatus(cfg, opts.profile)
-	case "check":
-		return cmdCheck(rest[1:], cfg, opts.profile)
-	case "doctor":
-		return cmdDoctor(rest[1:], cfg, opts.profile)
-	case "shell":
-		return cmdShell(cfg, opts.profile)
-	case "push":
-		return cmdPush(rest[1:], cfg, opts.profile)
-	case "pull":
-		return cmdPull(rest[1:], cfg, opts.profile)
-	case "sync":
-		return cmdSync(rest[1:], cfg, opts.profile)
-	case "tunnel":
-		return cmdTunnel(rest[1:], cfg, opts.profile)
-	case "edit":
-		return cmdEdit(rest[1:], cfg, opts.profile)
-	case "open":
-		return cmdOpen(rest[1:], cfg, opts.profile)
-	case "code":
-		return cmdCode(rest[1:], cfg, opts.profile)
-	case "diff":
-		return cmdDiff(rest[1:], cfg, opts.profile)
-	case "env":
-		return cmdEnv(rest[1:], cfg, opts.profile)
-	case "jobs":
-		return cmdJobs(cfg, opts.profile)
-	case "logs":
-		return cmdLogs(rest[1:], cfg, opts.profile)
-	case "kill":
-		return cmdKill(rest[1:], cfg, opts.profile)
-	case "sessions":
-		return cmdSessions(rest[1:])
-	case "mcp":
-		return cmdMcp(cfg)
-	case "guard":
-		return cmdGuard(rest[1:])
-	case "color":
-		return cmdColor(rest[1:])
-	case "daemon":
-		return cmdDaemon(rest[1:])
-	case "_profiles":
-		for n := range cfg.Profiles {
-			fmt.Println(n)
-		}
-		return 0
-	case "_ls":
-		return cmdInternalLs(rest[1:], cfg, opts.profile)
-	case "run", "exec":
-		if opts.detach {
-			return cmdDetach(rest[1:], cfg, opts.profile)
-		}
-		return cmdRunWithHints(rest[1:], cfg, opts)
-	}
-
-	// Default: treat as remote command. First, nudge the user if the
-	// first token is suspiciously close to a known local subcommand --
-	// the run still proceeds (their command might be the right one).
-	emitTypoHintPre(cfg, opts, sub)
+	// Default: treat as a remote command. Nudge the user if the first
+	// token is suspiciously close to a known local subcommand -- the
+	// run still proceeds (their command might be the right one).
+	emitTypoHintPre(ctx.cfg, opts, sub)
 	if opts.detach {
-		return cmdDetach(rest, cfg, opts.profile)
+		return cmdDetach(rest, ctx.cfg, opts.profile)
 	}
-	return cmdRunWithHints(rest, cfg, opts)
+	return cmdRunWithHints(rest, ctx.cfg, opts)
 }
