@@ -9,9 +9,15 @@ import (
 	"time"
 )
 
+// MCP tool registry. ONE source of truth: mcpToolDefs() (advertised to
+// the client via tools/list) and mcpHandleTool() (dispatch on
+// tools/call) both read from `mcpTools`. Adding a tool means appending
+// a single entry below; the def-list and the dispatch switch can never
+// drift. Same OCP pattern as the CLI subcommand registry in commands.go.
+
 // mcpRunTextMax caps the combined stdout+stderr the `run` tool returns
-// to the MCP client (Claude Code et al.). Beyond this, output is
-// truncated with a marker pointing the caller at remote-side filtering.
+// to the MCP client. Beyond this, output is truncated with a marker
+// pointing the caller at remote-side filtering.
 //
 // Rationale: the MCP client keeps every tool result in its conversation
 // history, so a single `cat /var/log/...` or `journalctl -n 100000`
@@ -77,1008 +83,1060 @@ func runRiskyMatch(command string) string {
 	return ""
 }
 
-func mcpToolDefs() []toolDef {
-	// Empty descriptions are dropped so the loaded-once tools/list response
-	// doesn't carry `,"description":""` on every passthrough field.
-	str := func(desc string) map[string]any {
-		if desc == "" {
-			return map[string]any{"type": "string"}
-		}
-		return map[string]any{"type": "string", "description": desc}
+// mcpTextErr wraps a plain string as an isError tool result. Used by
+// every handler for pre-flight validation failures (missing args,
+// profile not found, etc.).
+func mcpTextErr(s string) toolResult {
+	return toolResult{
+		IsError: true,
+		Content: []toolContent{{Type: "text", Text: s}},
 	}
-	return []toolDef{
-		{
+}
+
+// mcpToolHandler is the uniform handler signature. The dispatcher
+// extracts profileOverride from args once and passes it explicitly so
+// each handler doesn't repeat the extraction.
+type mcpToolHandler func(args map[string]any, cfg *Config, profileOverride string) toolResult
+
+type mcpTool struct {
+	def     toolDef
+	handler mcpToolHandler
+}
+
+// strSchema builds a string-type JSON schema fragment. Empty desc maps
+// to a bare {"type": "string"} -- shaving "description":"" off every
+// passthrough field keeps the tools/list payload compact.
+func strSchema(desc string) map[string]any {
+	if desc == "" {
+		return map[string]any{"type": "string"}
+	}
+	return map[string]any{"type": "string", "description": desc}
+}
+
+// boolSchema with default value.
+func boolSchema(def bool, desc string) map[string]any {
+	out := map[string]any{"type": "boolean", "default": def}
+	if desc != "" {
+		out["description"] = desc
+	}
+	return out
+}
+
+// intSchema with default + description.
+func intSchema(def int, desc string) map[string]any {
+	out := map[string]any{"type": "integer", "default": def}
+	if desc != "" {
+		out["description"] = desc
+	}
+	return out
+}
+
+var mcpTools = []mcpTool{
+	{
+		def: toolDef{
 			Name:        "run",
 			Description: "Run remote shell command.",
 			InputSchema: map[string]any{
 				"type": "object",
 				"properties": map[string]any{
-					"command": str("Remote shell command."),
-					"profile": str(""),
-					"confirm": map[string]any{"type": "boolean", "default": false, "description": "Required when guard is on AND command hits a high-risk pattern (rm -rf, dd, mkfs, drop ...)."},
+					"command": strSchema("Remote shell command."),
+					"profile": strSchema(""),
+					"confirm": boolSchema(false, "Required when guard is on AND command hits a high-risk pattern (rm -rf, dd, mkfs, drop ...)."),
 				},
 				"required": []string{"command"},
 			},
 		},
-		{
+		handler: func(args map[string]any, cfg *Config, profileOverride string) toolResult {
+			cmd, _ := args["command"].(string)
+			if cmd == "" {
+				return mcpTextErr("error: command is required")
+			}
+			confirm, _ := args["confirm"].(bool)
+			if GuardOn() && !confirm {
+				if pat := runRiskyMatch(cmd); pat != "" {
+					return guardBlocked("run",
+						fmt.Sprintf("command contains a high-risk pattern %q", pat))
+				}
+			}
+			profName, prof, err := ResolveProfile(cfg, profileOverride)
+			if err != nil {
+				return mcpTextErr(err.Error())
+			}
+			cwd := GetCwd(profName, prof)
+			res, _ := runRemoteCapture(prof, cwd, cmd)
+			text, truncatedBytes := buildMCPRunText(res, cwd)
+			structured := map[string]any{
+				"exit_code": res.ExitCode,
+				"cwd":       cwd,
+			}
+			if truncatedBytes > 0 {
+				structured["truncated_bytes"] = truncatedBytes
+			}
+			return toolResult{
+				Content:           []toolContent{{Type: "text", Text: text}},
+				IsError:           res.ExitCode != 0,
+				StructuredContent: structured,
+			}
+		},
+	},
+	{
+		def: toolDef{
 			Name:        "cd",
 			Description: "Set remote cwd.",
 			InputSchema: map[string]any{
 				"type": "object",
 				"properties": map[string]any{
-					"path":    str("Path."),
-					"profile": str(""),
+					"path":    strSchema("Path."),
+					"profile": strSchema(""),
 				},
 				"required": []string{"path"},
 			},
 		},
-		{
+		handler: func(args map[string]any, cfg *Config, profileOverride string) toolResult {
+			path, _ := args["path"].(string)
+			profName, prof, err := ResolveProfile(cfg, profileOverride)
+			if err != nil {
+				return mcpTextErr(err.Error())
+			}
+			newCwd, err := changeRemoteCwd(profName, prof, path)
+			if err != nil {
+				return mcpTextErr(err.Error())
+			}
+			return toolResult{
+				Content:           []toolContent{{Type: "text", Text: newCwd}},
+				StructuredContent: map[string]any{"cwd": newCwd, "profile": profName},
+			}
+		},
+	},
+	{
+		def: toolDef{
 			Name:        "pwd",
 			Description: "Get remote cwd.",
 			InputSchema: map[string]any{
 				"type":       "object",
-				"properties": map[string]any{"profile": str("")},
+				"properties": map[string]any{"profile": strSchema("")},
 			},
 		},
-		{
+		handler: func(args map[string]any, cfg *Config, profileOverride string) toolResult {
+			profName, prof, err := ResolveProfile(cfg, profileOverride)
+			if err != nil {
+				return mcpTextErr(err.Error())
+			}
+			cwd := GetCwd(profName, prof)
+			return toolResult{
+				Content:           []toolContent{{Type: "text", Text: cwd}},
+				StructuredContent: map[string]any{"cwd": cwd, "profile": profName},
+			}
+		},
+	},
+	{
+		def: toolDef{
 			Name:        "use",
 			Description: "Pin or clear profile.",
 			InputSchema: map[string]any{
 				"type": "object",
 				"properties": map[string]any{
-					"profile": str(""),
-					"clear":   map[string]any{"type": "boolean", "default": false},
+					"profile": strSchema(""),
+					"clear":   boolSchema(false, ""),
 				},
 			},
 		},
-		{
+		handler: func(args map[string]any, cfg *Config, profileOverride string) toolResult {
+			clear, _ := args["clear"].(bool)
+			if clear {
+				sid, _ := SetSessionProfile("")
+				return toolResult{
+					Content:           []toolContent{{Type: "text", Text: fmt.Sprintf("session %s: unpinned", sid)}},
+					StructuredContent: map[string]any{"session": sid, "profile": nil},
+				}
+			}
+			target, _ := args["profile"].(string)
+			if target == "" {
+				sid, rec := TouchSession()
+				info := map[string]any{
+					"session": sid,
+					"pinned":  nil,
+					"default": cfg.DefaultProfile,
+				}
+				if rec.Profile != nil {
+					info["pinned"] = *rec.Profile
+				}
+				b, _ := json.MarshalIndent(info, "", "  ")
+				return toolResult{
+					Content:           []toolContent{{Type: "text", Text: string(b)}},
+					StructuredContent: info,
+				}
+			}
+			if _, ok := cfg.Profiles[target]; !ok {
+				return mcpTextErr(fmt.Sprintf("profile %q not found", target))
+			}
+			sid, _ := SetSessionProfile(target)
+			return toolResult{
+				Content:           []toolContent{{Type: "text", Text: fmt.Sprintf("session %s: pinned to %q", sid, target)}},
+				StructuredContent: map[string]any{"session": sid, "profile": target},
+			}
+		},
+	},
+	{
+		def: toolDef{
 			Name:        "status",
 			Description: "Show active profile.",
 			InputSchema: map[string]any{
 				"type":       "object",
-				"properties": map[string]any{"profile": str("")},
+				"properties": map[string]any{"profile": strSchema("")},
 			},
 		},
-		{
+		handler: func(args map[string]any, cfg *Config, profileOverride string) toolResult {
+			profName, prof, err := ResolveProfile(cfg, profileOverride)
+			if err != nil {
+				return mcpTextErr(err.Error())
+			}
+			sid, rec := TouchSession()
+			var pinned any
+			if rec.Profile != nil {
+				pinned = *rec.Profile
+			}
+			multiplex := prof.Multiplex == nil || *prof.Multiplex
+			return mcpJSONResult(map[string]any{
+				"profile":       profName,
+				"pinned":        pinned,
+				"host":          prof.Host,
+				"user":          prof.User,
+				"port":          prof.GetPort(),
+				"identity_file": prof.IdentityFile,
+				"cwd":           GetCwd(profName, prof),
+				"session":       sid,
+				"multiplex":     multiplex,
+				"compression":   prof.GetCompression(),
+				"guard":         GuardOn(),
+			})
+		},
+	},
+	{
+		def: toolDef{
 			Name:        "list_profiles",
 			Description: "List profiles.",
 			InputSchema: map[string]any{"type": "object", "properties": map[string]any{}},
 		},
-		{
+		handler: func(args map[string]any, cfg *Config, profileOverride string) toolResult {
+			sid, rec := TouchSession()
+			var pinned any
+			if rec.Profile != nil {
+				pinned = *rec.Profile
+			}
+			names := make([]string, 0, len(cfg.Profiles))
+			for n := range cfg.Profiles {
+				names = append(names, n)
+			}
+			return mcpJSONResult(map[string]any{
+				"default":  cfg.DefaultProfile,
+				"pinned":   pinned,
+				"session":  sid,
+				"profiles": names,
+			})
+		},
+	},
+	{
+		def: toolDef{
 			Name:        "check",
 			Description: "Probe SSH connectivity.",
 			InputSchema: map[string]any{
 				"type":       "object",
-				"properties": map[string]any{"profile": str("")},
+				"properties": map[string]any{"profile": strSchema("")},
 			},
 		},
-		{
+		handler: func(args map[string]any, cfg *Config, profileOverride string) toolResult {
+			profName, prof, err := ResolveProfile(cfg, profileOverride)
+			if err != nil {
+				return mcpTextErr(err.Error())
+			}
+			res := runCheck(prof)
+			var advice []string
+			if !res.OK {
+				advice = checkAdvice(res.Diagnosis, prof, profName)
+			}
+			info := map[string]any{
+				"profile":   profName,
+				"host":      prof.Host,
+				"user":      prof.User,
+				"port":      prof.GetPort(),
+				"ok":        res.OK,
+				"diagnosis": res.Diagnosis,
+				"exit_code": res.ExitCode,
+			}
+			var text string
+			if res.OK {
+				target := prof.Host
+				if prof.User != "" {
+					target = prof.User + "@" + prof.Host
+				}
+				text = fmt.Sprintf("OK -- %s: %s key auth works.", profName, target)
+			} else {
+				text = fmt.Sprintf("FAIL (%s): %s\n\n%s", res.Diagnosis,
+					strings.TrimSpace(res.Stderr), strings.Join(advice, "\n"))
+			}
+			return toolResult{
+				Content:           []toolContent{{Type: "text", Text: text}},
+				IsError:           !res.OK,
+				StructuredContent: info,
+			}
+		},
+	},
+	{
+		def: toolDef{
 			Name:        "doctor",
 			Description: "Run local diagnostics.",
 			InputSchema: map[string]any{
 				"type":       "object",
-				"properties": map[string]any{"profile": str("")},
+				"properties": map[string]any{"profile": strSchema("")},
 			},
 		},
-		{
+		handler: func(args map[string]any, cfg *Config, profileOverride string) toolResult {
+			checks, ok := doctorChecks(cfg, profileOverride)
+			res := mcpJSONResult(map[string]any{"ok": ok, "checks": checks})
+			res.IsError = !ok
+			return res
+		},
+	},
+	{
+		def: toolDef{
 			Name:        "daemon_status",
 			Description: "Show daemon status.",
 			InputSchema: map[string]any{"type": "object", "properties": map[string]any{}},
 		},
-		{
+		handler: func(args map[string]any, cfg *Config, profileOverride string) toolResult {
+			conn := daemonDial(time.Second)
+			if conn == nil {
+				return mcpJSONResult(map[string]any{"running": false})
+			}
+			defer conn.Close()
+			resp, err := daemonCall(conn, daemonRequest{Op: "status"}, 2*time.Second)
+			if err != nil || resp == nil {
+				return mcpTextErr(fmt.Sprintf("daemon status failed: %v", err))
+			}
+			return mcpJSONResult(map[string]any{
+				"running":         true,
+				"uptime_sec":      resp.Uptime,
+				"profiles_pooled": resp.Profiles,
+				"protocol":        resp.V,
+			})
+		},
+	},
+	{
+		def: toolDef{
 			Name:        "env",
 			Description: "Manage remote env.",
 			InputSchema: map[string]any{
 				"type": "object",
 				"properties": map[string]any{
 					"action":  map[string]any{"type": "string", "enum": []string{"list", "set", "unset", "clear"}, "default": "list"},
-					"key":     str("Env var name."),
-					"value":   str("Env var value."),
-					"profile": str(""),
+					"key":     strSchema("Env var name."),
+					"value":   strSchema("Env var value."),
+					"profile": strSchema(""),
 				},
 			},
 		},
-		{
+		handler: func(args map[string]any, cfg *Config, profileOverride string) toolResult {
+			action, _ := args["action"].(string)
+			if action == "" {
+				action = "list"
+			}
+			profName, prof, err := ResolveProfile(cfg, profileOverride)
+			if err != nil {
+				return mcpTextErr(err.Error())
+			}
+			key, _ := args["key"].(string)
+			value, _ := args["value"].(string)
+			switch action {
+			case "list":
+			case "set":
+				if key == "" {
+					return mcpTextErr("key is required")
+				}
+				if prof.Env == nil {
+					prof.Env = map[string]string{}
+				}
+				prof.Env[key] = value
+				if err := SaveConfig(cfg); err != nil {
+					return mcpTextErr(err.Error())
+				}
+			case "unset":
+				if key == "" {
+					return mcpTextErr("key is required")
+				}
+				delete(prof.Env, key)
+				if err := SaveConfig(cfg); err != nil {
+					return mcpTextErr(err.Error())
+				}
+			case "clear":
+				prof.Env = nil
+				if err := SaveConfig(cfg); err != nil {
+					return mcpTextErr(err.Error())
+				}
+			default:
+				return mcpTextErr("unknown env action")
+			}
+			return mcpJSONResult(map[string]any{"profile": profName, "env": prof.Env})
+		},
+	},
+	{
+		def: toolDef{
 			Name:        "diff",
 			Description: "Diff local vs remote file.",
 			InputSchema: map[string]any{
 				"type": "object",
 				"properties": map[string]any{
-					"local":   str("Local file."),
-					"remote":  str("Remote file."),
-					"profile": str(""),
+					"local":   strSchema("Local file."),
+					"remote":  strSchema("Remote file."),
+					"profile": strSchema(""),
 				},
 				"required": []string{"local"},
 			},
 		},
-		{
+		handler: func(args map[string]any, cfg *Config, profileOverride string) toolResult {
+			local, _ := args["local"].(string)
+			if local == "" {
+				return mcpTextErr("local is required")
+			}
+			remote, _ := args["remote"].(string)
+			text, rc, err := diffLocalRemote(cfg, profileOverride, local, remote)
+			if err != nil {
+				return mcpTextErr(err.Error())
+			}
+			return toolResult{
+				Content:           []toolContent{{Type: "text", Text: text}},
+				IsError:           rc != 0,
+				StructuredContent: map[string]any{"exit_code": rc, "local": local, "remote": remote},
+			}
+		},
+	},
+	{
+		def: toolDef{
 			Name:        "push",
 			Description: "Upload file or directory.",
 			InputSchema: map[string]any{
 				"type": "object",
 				"properties": map[string]any{
-					"local":   str(""),
-					"remote":  str("Remote path."),
-					"profile": str(""),
+					"local":   strSchema(""),
+					"remote":  strSchema("Remote path."),
+					"profile": strSchema(""),
 				},
 				"required": []string{"local"},
 			},
 		},
-		{
+		handler: func(args map[string]any, cfg *Config, profileOverride string) toolResult {
+			local, _ := args["local"].(string)
+			if local == "" {
+				return mcpTextErr("local is required")
+			}
+			if _, err := os.Stat(local); err != nil {
+				return mcpTextErr(fmt.Sprintf("local path missing: %q", local))
+			}
+			profName, prof, err := ResolveProfile(cfg, profileOverride)
+			if err != nil {
+				return mcpTextErr(err.Error())
+			}
+			cwd := GetCwd(profName, prof)
+			remote, _ := args["remote"].(string)
+			if remote == "" {
+				remote = filepath.Base(local)
+			}
+			abs := resolveRemotePath(remote, cwd)
+			st, _ := os.Stat(local)
+			recursive := false
+			if rb, ok := args["recursive"].(bool); ok {
+				recursive = rb
+			}
+			if st != nil && st.IsDir() {
+				recursive = true
+			}
+			start := time.Now()
+			rc, finalRemote, perr := pushPath(prof, local, abs, recursive)
+			duration := time.Since(start)
+			var bytes int64
+			if rc == 0 {
+				bytes = sumLocalSize(local)
+			}
+			var text string
+			if rc == 0 {
+				text = fmt.Sprintf("uploaded %s -> %s [exit 0]%s", local, finalRemote, fmtRate(bytes, duration))
+			} else {
+				text = fmt.Sprintf("upload FAILED %s -> %s [exit %d]", local, finalRemote, rc)
+				if perr != nil {
+					text += ": " + perr.Error()
+				}
+			}
+			structured := map[string]any{
+				"exit_code":        rc,
+				"remote":           finalRemote,
+				"local":            local,
+				"duration_seconds": duration.Seconds(),
+			}
+			if rc == 0 {
+				structured["bytes_transferred"] = bytes
+			}
+			return toolResult{
+				Content:           []toolContent{{Type: "text", Text: text}},
+				IsError:           rc != 0,
+				StructuredContent: structured,
+			}
+		},
+	},
+	{
+		def: toolDef{
 			Name:        "pull",
 			Description: "Download file or directory.",
 			InputSchema: map[string]any{
 				"type": "object",
 				"properties": map[string]any{
-					"remote":    str(""),
-					"local":     str("Local path."),
-					"recursive": map[string]any{"type": "boolean", "default": false},
-					"profile":   str(""),
+					"remote":    strSchema(""),
+					"local":     strSchema("Local path."),
+					"recursive": boolSchema(false, ""),
+					"profile":   strSchema(""),
 				},
 				"required": []string{"remote"},
 			},
 		},
-		{
+		handler: func(args map[string]any, cfg *Config, profileOverride string) toolResult {
+			remote, _ := args["remote"].(string)
+			if remote == "" {
+				return mcpTextErr("remote is required")
+			}
+			profName, prof, err := ResolveProfile(cfg, profileOverride)
+			if err != nil {
+				return mcpTextErr(err.Error())
+			}
+			cwd := GetCwd(profName, prof)
+			local, _ := args["local"].(string)
+			if local == "" {
+				local = "."
+			}
+			abs := resolveRemotePath(remote, cwd)
+			recursive := false
+			if rb, ok := args["recursive"].(bool); ok {
+				recursive = rb
+			}
+			start := time.Now()
+			rc, finalLocal, perr := pullPath(prof, abs, local, recursive)
+			duration := time.Since(start)
+			var bytes int64
+			if rc == 0 {
+				bytes = sumLocalSize(finalLocal)
+			}
+			var text string
+			if rc == 0 {
+				text = fmt.Sprintf("downloaded %s -> %s [exit 0]%s", abs, finalLocal, fmtRate(bytes, duration))
+			} else {
+				text = fmt.Sprintf("download FAILED %s -> %s [exit %d]", abs, finalLocal, rc)
+				if perr != nil {
+					text += ": " + perr.Error()
+				}
+			}
+			structured := map[string]any{
+				"exit_code":        rc,
+				"remote":           abs,
+				"local":            finalLocal,
+				"duration_seconds": duration.Seconds(),
+			}
+			if rc == 0 {
+				structured["bytes_transferred"] = bytes
+			}
+			return toolResult{
+				Content:           []toolContent{{Type: "text", Text: text}},
+				IsError:           rc != 0,
+				StructuredContent: structured,
+			}
+		},
+	},
+	{
+		def: toolDef{
 			Name:        "sync",
 			Description: "Sync local changes to remote.",
 			InputSchema: map[string]any{
 				"type": "object",
 				"properties": map[string]any{
-					"remote_root": str("Remote root."),
-					"mode":        map[string]any{"type": "string", "enum": []string{"git", "mtime", "glob", "list"}},
-					"git_scope":   map[string]any{"type": "string", "enum": []string{"all", "staged", "modified", "untracked"}, "default": "all"},
-					"since":       str("Duration, e.g. 2h."),
-					"include":     map[string]any{"type": "array", "items": map[string]any{"type": "string"}},
-					"exclude":     map[string]any{"type": "array", "items": map[string]any{"type": "string"}},
-					"files":       map[string]any{"type": "array", "items": map[string]any{"type": "string"}},
-					"root":        str(""),
-					"dry_run":     map[string]any{"type": "boolean", "default": false},
-					"delete":      map[string]any{"type": "boolean", "default": false},
-					"yes":         map[string]any{"type": "boolean", "default": false},
-					"delete_limit": map[string]any{
-						"type":        "integer",
-						"default":     20,
-						"description": "Max deletes without yes=true.",
-					},
-					"profile": str(""),
-					"confirm": map[string]any{"type": "boolean", "default": false, "description": "Required when guard is on AND delete=true (non-dry-run)."},
+					"remote_root":  strSchema("Remote root."),
+					"mode":         map[string]any{"type": "string", "enum": []string{"git", "mtime", "glob", "list"}},
+					"git_scope":    map[string]any{"type": "string", "enum": []string{"all", "staged", "modified", "untracked"}, "default": "all"},
+					"since":        strSchema("Duration, e.g. 2h."),
+					"include":      map[string]any{"type": "array", "items": map[string]any{"type": "string"}},
+					"exclude":      map[string]any{"type": "array", "items": map[string]any{"type": "string"}},
+					"files":        map[string]any{"type": "array", "items": map[string]any{"type": "string"}},
+					"root":         strSchema(""),
+					"dry_run":      boolSchema(false, ""),
+					"delete":       boolSchema(false, ""),
+					"yes":          boolSchema(false, ""),
+					"delete_limit": intSchema(20, "Max deletes without yes=true."),
+					"profile":      strSchema(""),
+					"confirm":      boolSchema(false, "Required when guard is on AND delete=true (non-dry-run)."),
 				},
 			},
 		},
-		{
+		handler: func(args map[string]any, cfg *Config, profileOverride string) toolResult {
+			profName, prof, err := ResolveProfile(cfg, profileOverride)
+			if err != nil {
+				return mcpTextErr(err.Error())
+			}
+			o := &syncOpts{gitScope: "all"}
+			if v, ok := args["remote_root"].(string); ok {
+				o.remoteRoot = v
+			}
+			if v, ok := args["mode"].(string); ok {
+				o.mode = v
+			}
+			if v, ok := args["git_scope"].(string); ok {
+				o.gitScope = v
+			}
+			if v, ok := args["since"].(string); ok {
+				o.since = v
+			}
+			if v, ok := args["root"].(string); ok {
+				o.root = v
+			}
+			if v, ok := args["dry_run"].(bool); ok {
+				o.dryRun = v
+			}
+			if v, ok := args["delete"].(bool); ok {
+				o.delete = v
+			}
+			if v, ok := args["yes"].(bool); ok {
+				o.yes = v
+			}
+			if o.delete && !o.dryRun && GuardOn() {
+				confirm, _ := args["confirm"].(bool)
+				if !confirm {
+					return guardBlocked("sync",
+						"delete=true would remove remote files")
+				}
+			}
+			if v, ok := args["delete_limit"].(float64); ok {
+				o.deleteLimit = int(v)
+			}
+			if v, ok := args["include"].([]any); ok {
+				for _, x := range v {
+					if s, ok := x.(string); ok {
+						o.include = append(o.include, s)
+					}
+				}
+			}
+			if v, ok := args["exclude"].([]any); ok {
+				for _, x := range v {
+					if s, ok := x.(string); ok {
+						o.exclude = append(o.exclude, s)
+					}
+				}
+			}
+			if v, ok := args["files"].([]any); ok {
+				for _, x := range v {
+					if s, ok := x.(string); ok {
+						o.files = append(o.files, s)
+					}
+				}
+			}
+			localRoot := o.root
+			if localRoot == "" {
+				localRoot = findGitRoot(mustCwd())
+				if localRoot == "" {
+					localRoot = mustCwd()
+				}
+			}
+			if o.mode == "" {
+				if findGitRoot(localRoot) != "" {
+					o.mode = "git"
+				} else if len(o.include) > 0 {
+					o.mode = "glob"
+				} else if o.since != "" {
+					o.mode = "mtime"
+				} else if len(o.files) > 0 {
+					o.mode = "list"
+				} else {
+					return mcpTextErr("no mode resolved (not a git repo and no include/since/files)")
+				}
+			}
+			cwd := GetCwd(profName, prof)
+			remoteRoot := cwd
+			if o.remoteRoot != "" {
+				remoteRoot = resolveRemotePath(o.remoteRoot, cwd)
+			} else if prof.SyncRoot != "" {
+				remoteRoot = resolveRemotePath(prof.SyncRoot, cwd)
+			}
+			allExcludes := append([]string{}, o.exclude...)
+			allExcludes = append(allExcludes, prof.SyncExclude...)
+			allExcludes = append(allExcludes, defaultSyncExcludes...)
+			files, err := collectSyncFiles(o, localRoot, allExcludes)
+			if err != nil {
+				return mcpTextErr(err.Error())
+			}
+			deletes, err := collectSyncDeletes(o, localRoot, allExcludes)
+			if err != nil {
+				return mcpTextErr(err.Error())
+			}
+			limit := o.deleteLimit
+			if limit == 0 {
+				limit = 20
+			}
+			if len(deletes) > limit && !o.dryRun && !o.yes {
+				return mcpTextErr(fmt.Sprintf("sync delete would remove %d files (limit %d). Re-run dry_run=true, yes=true, or set delete_limit.", len(deletes), limit))
+			}
+			if len(files) == 0 && len(deletes) == 0 {
+				return toolResult{
+					Content:           []toolContent{{Type: "text", Text: "(nothing to sync)"}},
+					StructuredContent: map[string]any{"files": []string{}, "deletes": deletes, "remote_root": remoteRoot, "exit_code": 0},
+				}
+			}
+			if o.dryRun {
+				text := fmt.Sprintf("would sync %d files to %s\n", len(files), remoteRoot)
+				lim := len(files)
+				if lim > 200 {
+					lim = 200
+				}
+				text += strings.Join(files[:lim], "\n")
+				if len(files) > 200 {
+					text += fmt.Sprintf("\n... (%d more)", len(files)-200)
+				}
+				if len(deletes) > 0 {
+					text += "\nwould delete:\n" + strings.Join(deletes, "\n")
+				}
+				return toolResult{
+					Content: []toolContent{{Type: "text", Text: text}},
+					StructuredContent: map[string]any{
+						"files_count":   len(files),
+						"deletes_count": len(deletes),
+						"remote_root":   remoteRoot,
+						"dry_run":       true,
+					},
+				}
+			}
+			rc := 0
+			var terr error
+			start := time.Now()
+			if len(files) > 0 {
+				rc, terr = tarUploadStream(prof, localRoot, files, remoteRoot)
+			}
+			if rc == 0 && len(deletes) > 0 {
+				rc, terr = deleteRemoteFiles(prof, remoteRoot, deletes)
+			}
+			duration := time.Since(start)
+			var bytes int64
+			if rc == 0 {
+				for _, f := range files {
+					if st, err := os.Stat(filepath.Join(localRoot, f)); err == nil {
+						bytes += st.Size()
+					}
+				}
+			}
+			var text string
+			if rc == 0 {
+				text = fmt.Sprintf("synced %d files to %s [exit 0]%s", len(files), remoteRoot, fmtRate(bytes, duration))
+			} else {
+				text = fmt.Sprintf("sync FAILED to %s [exit %d]; %d files were NOT transferred -- verify with `run \"ls -la %s\"` before assuming",
+					remoteRoot, rc, len(files), remoteRoot)
+			}
+			if terr != nil {
+				text += ": " + terr.Error()
+			}
+			structured := map[string]any{
+				"files_count":      len(files),
+				"deletes_count":    len(deletes),
+				"remote_root":      remoteRoot,
+				"exit_code":        rc,
+				"duration_seconds": duration.Seconds(),
+			}
+			if rc == 0 {
+				structured["bytes_transferred"] = bytes
+			}
+			return toolResult{
+				Content:           []toolContent{{Type: "text", Text: text}},
+				IsError:           rc != 0,
+				StructuredContent: structured,
+			}
+		},
+	},
+	{
+		def: toolDef{
 			Name:        "sync_delete_dry_run",
 			Description: "Preview sync deletes.",
 			InputSchema: map[string]any{
 				"type":       "object",
-				"properties": map[string]any{"root": str("Local root."), "remote_root": str("Remote root."), "profile": str("")},
+				"properties": map[string]any{"root": strSchema("Local root."), "remote_root": strSchema("Remote root."), "profile": strSchema("")},
 			},
 		},
-		{
-			Name:        "detach",
-			Description: "Start remote detached job.",
-			InputSchema: map[string]any{
-				"type": "object",
-				"properties": map[string]any{
-					"command": str(""),
-					"profile": str(""),
-					"confirm": map[string]any{"type": "boolean", "default": false, "description": "Required when guard is on AND command hits a high-risk pattern."},
-				},
-				"required": []string{"command"},
-			},
-		},
-		{
-			Name:        "list_jobs",
-			Description: "List detached jobs.",
-			InputSchema: map[string]any{
-				"type":       "object",
-				"properties": map[string]any{"profile": str("")},
-			},
-		},
-		{
-			Name:        "tail_log",
-			Description: "Tail job log.",
-			InputSchema: map[string]any{
-				"type": "object",
-				"properties": map[string]any{
-					"id":    str(""),
-					"lines": map[string]any{"type": "integer", "default": 200},
-				},
-				"required": []string{"id"},
-			},
-		},
-		{
-			Name:        "list_dir",
-			Description: "List remote directory entries (subset of `ls -1Ap`). Use this instead of `run \"ls ...\"` for path discovery -- response is structured, ANSI-clean, and hits the warm daemon cache (sub-100ms on repeat). Pass an empty path for the active cwd. Dirs carry trailing '/'.",
-			InputSchema: map[string]any{
-				"type": "object",
-				"properties": map[string]any{
-					"path":      str("Remote path prefix. Empty = current cwd. Trailing '/' = list that directory; no trailing '/' = match entries whose name starts with the basename. E.g., '/etc/' lists /etc; '/etc/host' returns host*, hostname, hosts, hosts.allow."),
-					"dirs_only": map[string]any{"type": "boolean", "default": false, "description": "Filter to directories only (entries ending in '/')."},
-					"limit":     map[string]any{"type": "integer", "default": 500, "description": "Maximum entries returned. Anything beyond gets dropped; truncated_count surfaces the cut so you know to query a deeper prefix."},
-					"profile":   str(""),
-				},
-			},
-		},
-		{
-			Name:        "kill_job",
-			Description: "Signal detached job.",
-			InputSchema: map[string]any{
-				"type": "object",
-				"properties": map[string]any{
-					"id":     str(""),
-					"signal": map[string]any{"type": "string", "default": "TERM"},
-				},
-				"required": []string{"id"},
-			},
-		},
-	}
-}
-
-func mcpHandleTool(name string, args map[string]any, cfg *Config) toolResult {
-	profileOverride, _ := args["profile"].(string)
-
-	textErr := func(s string) toolResult {
-		return toolResult{
-			IsError: true,
-			Content: []toolContent{{Type: "text", Text: s}},
-		}
-	}
-
-	switch name {
-	case "run":
-		cmd, _ := args["command"].(string)
-		if cmd == "" {
-			return textErr("error: command is required")
-		}
-		confirm, _ := args["confirm"].(bool)
-		if GuardOn() && !confirm {
-			if pat := runRiskyMatch(cmd); pat != "" {
-				return guardBlocked("run",
-					fmt.Sprintf("command contains a high-risk pattern %q", pat))
+		handler: func(args map[string]any, cfg *Config, profileOverride string) toolResult {
+			profName, prof, err := ResolveProfile(cfg, profileOverride)
+			if err != nil {
+				return mcpTextErr(err.Error())
 			}
-		}
-		profName, prof, err := ResolveProfile(cfg, profileOverride)
-		if err != nil {
-			return textErr(err.Error())
-		}
-		cwd := GetCwd(profName, prof)
-		res, _ := runRemoteCapture(prof, cwd, cmd)
-		text, truncatedBytes := buildMCPRunText(res, cwd)
-		// Stdout/Stderr live in the text Content; don't duplicate them
-		// into StructuredContent -- the MCP client (Claude Code) keeps
-		// both in its conversation history, doubling memory for large
-		// command outputs.
-		structured := map[string]any{
-			"exit_code": res.ExitCode,
-			"cwd":       cwd,
-		}
-		if truncatedBytes > 0 {
-			structured["truncated_bytes"] = truncatedBytes
-		}
-		return toolResult{
-			Content:           []toolContent{{Type: "text", Text: text}},
-			IsError:           res.ExitCode != 0,
-			StructuredContent: structured,
-		}
-
-	case "cd":
-		path, _ := args["path"].(string)
-		profName, prof, err := ResolveProfile(cfg, profileOverride)
-		if err != nil {
-			return textErr(err.Error())
-		}
-		newCwd, err := changeRemoteCwd(profName, prof, path)
-		if err != nil {
-			return textErr(err.Error())
-		}
-		return toolResult{
-			Content:           []toolContent{{Type: "text", Text: newCwd}},
-			StructuredContent: map[string]any{"cwd": newCwd, "profile": profName},
-		}
-
-	case "pwd":
-		profName, prof, err := ResolveProfile(cfg, profileOverride)
-		if err != nil {
-			return textErr(err.Error())
-		}
-		cwd := GetCwd(profName, prof)
-		return toolResult{
-			Content:           []toolContent{{Type: "text", Text: cwd}},
-			StructuredContent: map[string]any{"cwd": cwd, "profile": profName},
-		}
-
-	case "use":
-		clear, _ := args["clear"].(bool)
-		if clear {
-			sid, _ := SetSessionProfile("")
-			return toolResult{
-				Content:           []toolContent{{Type: "text", Text: fmt.Sprintf("session %s: unpinned", sid)}},
-				StructuredContent: map[string]any{"session": sid, "profile": nil},
+			root, _ := args["root"].(string)
+			if root == "" {
+				root = findGitRoot(mustCwd())
 			}
-		}
-		target, _ := args["profile"].(string)
-		if target == "" {
-			sid, rec := TouchSession()
-			info := map[string]any{
-				"session": sid,
-				"pinned":  nil,
-				"default": cfg.DefaultProfile,
+			if root == "" {
+				return mcpTextErr("not in a git repo")
 			}
-			if rec.Profile != nil {
-				info["pinned"] = *rec.Profile
+			root, _ = filepath.Abs(root)
+			o := &syncOpts{mode: "git", gitScope: "all", delete: true, dryRun: true}
+			allExcludes := append([]string{}, prof.SyncExclude...)
+			allExcludes = append(allExcludes, defaultSyncExcludes...)
+			deletes, err := collectSyncDeletes(o, root, allExcludes)
+			if err != nil {
+				return mcpTextErr(err.Error())
 			}
-			b, _ := json.MarshalIndent(info, "", "  ")
-			return toolResult{
-				Content:           []toolContent{{Type: "text", Text: string(b)}},
-				StructuredContent: info,
+			cwd := GetCwd(profName, prof)
+			remoteRoot := cwd
+			if v, _ := args["remote_root"].(string); v != "" {
+				remoteRoot = resolveRemotePath(v, cwd)
+			} else if prof.SyncRoot != "" {
+				remoteRoot = resolveRemotePath(prof.SyncRoot, cwd)
 			}
-		}
-		if _, ok := cfg.Profiles[target]; !ok {
-			return textErr(fmt.Sprintf("profile %q not found", target))
-		}
-		sid, _ := SetSessionProfile(target)
-		return toolResult{
-			Content:           []toolContent{{Type: "text", Text: fmt.Sprintf("session %s: pinned to %q", sid, target)}},
-			StructuredContent: map[string]any{"session": sid, "profile": target},
-		}
-
-	case "status":
-		profName, prof, err := ResolveProfile(cfg, profileOverride)
-		if err != nil {
-			return textErr(err.Error())
-		}
-		sid, rec := TouchSession()
-		var pinned any
-		if rec.Profile != nil {
-			pinned = *rec.Profile
-		}
-		multiplex := prof.Multiplex == nil || *prof.Multiplex
-		return mcpJSONResult(map[string]any{
-			"profile":       profName,
-			"pinned":        pinned,
-			"host":          prof.Host,
-			"user":          prof.User,
-			"port":          prof.GetPort(),
-			"identity_file": prof.IdentityFile,
-			"cwd":           GetCwd(profName, prof),
-			"session":       sid,
-			"multiplex":     multiplex,
-			"compression":   prof.GetCompression(),
-			"guard":         GuardOn(),
-		})
-
-	case "list_profiles":
-		sid, rec := TouchSession()
-		var pinned any
-		if rec.Profile != nil {
-			pinned = *rec.Profile
-		}
-		names := make([]string, 0, len(cfg.Profiles))
-		for n := range cfg.Profiles {
-			names = append(names, n)
-		}
-		return mcpJSONResult(map[string]any{
-			"default":  cfg.DefaultProfile,
-			"pinned":   pinned,
-			"session":  sid,
-			"profiles": names,
-		})
-
-	case "check":
-		profName, prof, err := ResolveProfile(cfg, profileOverride)
-		if err != nil {
-			return textErr(err.Error())
-		}
-		res := runCheck(prof)
-		var advice []string
-		if !res.OK {
-			advice = checkAdvice(res.Diagnosis, prof, profName)
-		}
-		info := map[string]any{
-			"profile":   profName,
-			"host":      prof.Host,
-			"user":      prof.User,
-			"port":      prof.GetPort(),
-			"ok":        res.OK,
-			"diagnosis": res.Diagnosis,
-			"exit_code": res.ExitCode,
-		}
-		var text string
-		if res.OK {
-			target := prof.Host
-			if prof.User != "" {
-				target = prof.User + "@" + prof.Host
-			}
-			text = fmt.Sprintf("OK -- %s: %s key auth works.", profName, target)
-		} else {
-			text = fmt.Sprintf("FAIL (%s): %s\n\n%s", res.Diagnosis,
-				strings.TrimSpace(res.Stderr), strings.Join(advice, "\n"))
-		}
-		return toolResult{
-			Content:           []toolContent{{Type: "text", Text: text}},
-			IsError:           !res.OK,
-			StructuredContent: info,
-		}
-
-	case "doctor":
-		checks, ok := doctorChecks(cfg, profileOverride)
-		res := mcpJSONResult(map[string]any{"ok": ok, "checks": checks})
-		res.IsError = !ok
-		return res
-
-	case "daemon_status":
-		conn := daemonDial(time.Second)
-		if conn == nil {
-			return mcpJSONResult(map[string]any{"running": false})
-		}
-		defer conn.Close()
-		resp, err := daemonCall(conn, daemonRequest{Op: "status"}, 2*time.Second)
-		if err != nil || resp == nil {
-			return textErr(fmt.Sprintf("daemon status failed: %v", err))
-		}
-		return mcpJSONResult(map[string]any{
-			"running":         true,
-			"uptime_sec":      resp.Uptime,
-			"profiles_pooled": resp.Profiles,
-			"protocol":        resp.V,
-		})
-
-	case "env":
-		action, _ := args["action"].(string)
-		if action == "" {
-			action = "list"
-		}
-		profName, prof, err := ResolveProfile(cfg, profileOverride)
-		if err != nil {
-			return textErr(err.Error())
-		}
-		key, _ := args["key"].(string)
-		value, _ := args["value"].(string)
-		switch action {
-		case "list":
-		case "set":
-			if key == "" {
-				return textErr("key is required")
-			}
-			if prof.Env == nil {
-				prof.Env = map[string]string{}
-			}
-			prof.Env[key] = value
-			if err := SaveConfig(cfg); err != nil {
-				return textErr(err.Error())
-			}
-		case "unset":
-			if key == "" {
-				return textErr("key is required")
-			}
-			delete(prof.Env, key)
-			if err := SaveConfig(cfg); err != nil {
-				return textErr(err.Error())
-			}
-		case "clear":
-			prof.Env = nil
-			if err := SaveConfig(cfg); err != nil {
-				return textErr(err.Error())
-			}
-		default:
-			return textErr("unknown env action")
-		}
-		return mcpJSONResult(map[string]any{"profile": profName, "env": prof.Env})
-
-	case "diff":
-		local, _ := args["local"].(string)
-		if local == "" {
-			return textErr("local is required")
-		}
-		remote, _ := args["remote"].(string)
-		text, rc, err := diffLocalRemote(cfg, profileOverride, local, remote)
-		if err != nil {
-			return textErr(err.Error())
-		}
-		return toolResult{
-			Content:           []toolContent{{Type: "text", Text: text}},
-			IsError:           rc != 0,
-			StructuredContent: map[string]any{"exit_code": rc, "local": local, "remote": remote},
-		}
-
-	case "push":
-		local, _ := args["local"].(string)
-		if local == "" {
-			return textErr("local is required")
-		}
-		if _, err := os.Stat(local); err != nil {
-			return textErr(fmt.Sprintf("local path missing: %q", local))
-		}
-		profName, prof, err := ResolveProfile(cfg, profileOverride)
-		if err != nil {
-			return textErr(err.Error())
-		}
-		cwd := GetCwd(profName, prof)
-		remote, _ := args["remote"].(string)
-		if remote == "" {
-			remote = filepath.Base(local)
-		}
-		abs := resolveRemotePath(remote, cwd)
-		st, _ := os.Stat(local)
-		recursive := false
-		if rb, ok := args["recursive"].(bool); ok {
-			recursive = rb
-		}
-		if st != nil && st.IsDir() {
-			recursive = true
-		}
-		start := time.Now()
-		rc, finalRemote, perr := pushPath(prof, local, abs, recursive)
-		duration := time.Since(start)
-		var bytes int64
-		if rc == 0 {
-			bytes = sumLocalSize(local)
-		}
-		// Always surface the resolved absolute remote path -- and when
-		// pushPath rewrote it (scp-style "remote was a dir, file lands
-		// inside"), surface the *final* path, not the user's input. SFTP
-		// MkdirAll will silently create missing parent dirs, so a typo /
-		// wrong project root used to land in a phantom location with just
-		// an "uploaded" confirmation. Putting the actual landing path in
-		// the text makes both kinds of misroute visible at a glance.
-		var text string
-		if rc == 0 {
-			text = fmt.Sprintf("uploaded %s -> %s [exit 0]%s", local, finalRemote, fmtRate(bytes, duration))
-		} else {
-			text = fmt.Sprintf("upload FAILED %s -> %s [exit %d]", local, finalRemote, rc)
-			if perr != nil {
-				text += ": " + perr.Error()
-			}
-		}
-		structured := map[string]any{
-			"exit_code":        rc,
-			"remote":           finalRemote,
-			"local":            local,
-			"duration_seconds": duration.Seconds(),
-		}
-		if rc == 0 {
-			structured["bytes_transferred"] = bytes
-		}
-		return toolResult{
-			Content:           []toolContent{{Type: "text", Text: text}},
-			IsError:           rc != 0,
-			StructuredContent: structured,
-		}
-
-	case "pull":
-		remote, _ := args["remote"].(string)
-		if remote == "" {
-			return textErr("remote is required")
-		}
-		profName, prof, err := ResolveProfile(cfg, profileOverride)
-		if err != nil {
-			return textErr(err.Error())
-		}
-		cwd := GetCwd(profName, prof)
-		local, _ := args["local"].(string)
-		if local == "" {
-			local = "."
-		}
-		abs := resolveRemotePath(remote, cwd)
-		recursive := false
-		if rb, ok := args["recursive"].(bool); ok {
-			recursive = rb
-		}
-		start := time.Now()
-		rc, finalLocal, perr := pullPath(prof, abs, local, recursive)
-		duration := time.Since(start)
-		var bytes int64
-		if rc == 0 {
-			bytes = sumLocalSize(finalLocal)
-		}
-		// Surface both ends of the transfer so the caller can spot a
-		// wrong-path source or destination without inspecting structured.
-		var text string
-		if rc == 0 {
-			text = fmt.Sprintf("downloaded %s -> %s [exit 0]%s", abs, finalLocal, fmtRate(bytes, duration))
-		} else {
-			text = fmt.Sprintf("download FAILED %s -> %s [exit %d]", abs, finalLocal, rc)
-			if perr != nil {
-				text += ": " + perr.Error()
-			}
-		}
-		structured := map[string]any{
-			"exit_code":        rc,
-			"remote":           abs,
-			"local":            finalLocal,
-			"duration_seconds": duration.Seconds(),
-		}
-		if rc == 0 {
-			structured["bytes_transferred"] = bytes
-		}
-		return toolResult{
-			Content:           []toolContent{{Type: "text", Text: text}},
-			IsError:           rc != 0,
-			StructuredContent: structured,
-		}
-
-	case "sync":
-		profName, prof, err := ResolveProfile(cfg, profileOverride)
-		if err != nil {
-			return textErr(err.Error())
-		}
-		o := &syncOpts{gitScope: "all"}
-		if v, ok := args["remote_root"].(string); ok {
-			o.remoteRoot = v
-		}
-		if v, ok := args["mode"].(string); ok {
-			o.mode = v
-		}
-		if v, ok := args["git_scope"].(string); ok {
-			o.gitScope = v
-		}
-		if v, ok := args["since"].(string); ok {
-			o.since = v
-		}
-		if v, ok := args["root"].(string); ok {
-			o.root = v
-		}
-		if v, ok := args["dry_run"].(bool); ok {
-			o.dryRun = v
-		}
-		if v, ok := args["delete"].(bool); ok {
-			o.delete = v
-		}
-		if v, ok := args["yes"].(bool); ok {
-			o.yes = v
-		}
-		// Block sync-with-delete under the guard unless confirmed. Done
-		// here so we short-circuit before doing the file walk and remote
-		// dial. Pure dry_run is allowed -- it doesn't mutate state.
-		if o.delete && !o.dryRun && GuardOn() {
-			confirm, _ := args["confirm"].(bool)
-			if !confirm {
-				return guardBlocked("sync",
-					"delete=true would remove remote files")
-			}
-		}
-		if v, ok := args["delete_limit"].(float64); ok {
-			o.deleteLimit = int(v)
-		}
-		if v, ok := args["include"].([]any); ok {
-			for _, x := range v {
-				if s, ok := x.(string); ok {
-					o.include = append(o.include, s)
-				}
-			}
-		}
-		if v, ok := args["exclude"].([]any); ok {
-			for _, x := range v {
-				if s, ok := x.(string); ok {
-					o.exclude = append(o.exclude, s)
-				}
-			}
-		}
-		if v, ok := args["files"].([]any); ok {
-			for _, x := range v {
-				if s, ok := x.(string); ok {
-					o.files = append(o.files, s)
-				}
-			}
-		}
-		localRoot := o.root
-		if localRoot == "" {
-			localRoot = findGitRoot(mustCwd())
-			if localRoot == "" {
-				localRoot = mustCwd()
-			}
-		}
-		if o.mode == "" {
-			if findGitRoot(localRoot) != "" {
-				o.mode = "git"
-			} else if len(o.include) > 0 {
-				o.mode = "glob"
-			} else if o.since != "" {
-				o.mode = "mtime"
-			} else if len(o.files) > 0 {
-				o.mode = "list"
-			} else {
-				return textErr("no mode resolved (not a git repo and no include/since/files)")
-			}
-		}
-		cwd := GetCwd(profName, prof)
-		remoteRoot := cwd
-		if o.remoteRoot != "" {
-			remoteRoot = resolveRemotePath(o.remoteRoot, cwd)
-		} else if prof.SyncRoot != "" {
-			remoteRoot = resolveRemotePath(prof.SyncRoot, cwd)
-		}
-		allExcludes := append([]string{}, o.exclude...)
-		allExcludes = append(allExcludes, prof.SyncExclude...)
-		allExcludes = append(allExcludes, defaultSyncExcludes...)
-		files, err := collectSyncFiles(o, localRoot, allExcludes)
-		if err != nil {
-			return textErr(err.Error())
-		}
-		deletes, err := collectSyncDeletes(o, localRoot, allExcludes)
-		if err != nil {
-			return textErr(err.Error())
-		}
-		limit := o.deleteLimit
-		if limit == 0 {
-			limit = 20
-		}
-		if len(deletes) > limit && !o.dryRun && !o.yes {
-			return textErr(fmt.Sprintf("sync delete would remove %d files (limit %d). Re-run dry_run=true, yes=true, or set delete_limit.", len(deletes), limit))
-		}
-		if len(files) == 0 && len(deletes) == 0 {
-			return toolResult{
-				Content:           []toolContent{{Type: "text", Text: "(nothing to sync)"}},
-				StructuredContent: map[string]any{"files": []string{}, "deletes": deletes, "remote_root": remoteRoot, "exit_code": 0},
-			}
-		}
-		if o.dryRun {
-			text := fmt.Sprintf("would sync %d files to %s\n", len(files), remoteRoot)
-			limit := len(files)
-			if limit > 200 {
-				limit = 200
-			}
-			text += strings.Join(files[:limit], "\n")
-			if len(files) > 200 {
-				text += fmt.Sprintf("\n... (%d more)", len(files)-200)
-			}
-			if len(deletes) > 0 {
-				text += "\nwould delete:\n" + strings.Join(deletes, "\n")
-			}
-			// Don't re-emit the full files list in structured -- text
-			// already shows the first 200 with a "(N more)" marker, and a
-			// 5000-file repo otherwise puts ~150KB of duplicated paths
-			// into the MCP client's context. Counts are enough for the
-			// model to decide whether to dig deeper via `srv sync` directly.
+			text := fmt.Sprintf("would delete %d files from %s\n%s", len(deletes), remoteRoot, strings.Join(deletes, "\n"))
 			return toolResult{
 				Content: []toolContent{{Type: "text", Text: text}},
 				StructuredContent: map[string]any{
-					"files_count":   len(files),
 					"deletes_count": len(deletes),
 					"remote_root":   remoteRoot,
 					"dry_run":       true,
 				},
 			}
-		}
-		rc := 0
-		var terr error
-		start := time.Now()
-		if len(files) > 0 {
-			rc, terr = tarUploadStream(prof, localRoot, files, remoteRoot)
-		}
-		if rc == 0 && len(deletes) > 0 {
-			rc, terr = deleteRemoteFiles(prof, remoteRoot, deletes)
-		}
-		duration := time.Since(start)
-		// Sum sizes of the files that were tarred. Pre-transfer stat is
-		// fine here: tarUploadStream reads them itself, and even if a
-		// concurrent local edit shifted the size between our stat and the
-		// tar read, the difference is at most a few KB on the metric --
-		// not worth a second walk.
-		var bytes int64
-		if rc == 0 {
-			for _, f := range files {
-				if st, err := os.Stat(filepath.Join(localRoot, f)); err == nil {
-					bytes += st.Size()
-				}
-			}
-		}
-		// Wording must distinguish success from failure -- the prior
-		// "synced %d files" said the same thing on rc=255 (e.g. ssh
-		// handshake timeout post-reconnect, files NOT transferred) as on
-		// rc=0, leading callers to believe a transfer that never happened.
-		// On failure, lead with FAILED and clarify the count is the
-		// attempted set, not what landed.
-		var text string
-		if rc == 0 {
-			text = fmt.Sprintf("synced %d files to %s [exit 0]%s", len(files), remoteRoot, fmtRate(bytes, duration))
-		} else {
-			text = fmt.Sprintf("sync FAILED to %s [exit %d]; %d files were NOT transferred -- verify with `run \"ls -la %s\"` before assuming",
-				remoteRoot, rc, len(files), remoteRoot)
-		}
-		if terr != nil {
-			text += ": " + terr.Error()
-		}
-		structured := map[string]any{
-			"files_count":      len(files),
-			"deletes_count":    len(deletes),
-			"remote_root":      remoteRoot,
-			"exit_code":        rc,
-			"duration_seconds": duration.Seconds(),
-		}
-		if rc == 0 {
-			structured["bytes_transferred"] = bytes
-		}
-		return toolResult{
-			Content:           []toolContent{{Type: "text", Text: text}},
-			IsError:           rc != 0,
-			StructuredContent: structured,
-		}
-
-	case "sync_delete_dry_run":
-		profName, prof, err := ResolveProfile(cfg, profileOverride)
-		if err != nil {
-			return textErr(err.Error())
-		}
-		root, _ := args["root"].(string)
-		if root == "" {
-			root = findGitRoot(mustCwd())
-		}
-		if root == "" {
-			return textErr("not in a git repo")
-		}
-		root, _ = filepath.Abs(root)
-		o := &syncOpts{mode: "git", gitScope: "all", delete: true, dryRun: true}
-		allExcludes := append([]string{}, prof.SyncExclude...)
-		allExcludes = append(allExcludes, defaultSyncExcludes...)
-		deletes, err := collectSyncDeletes(o, root, allExcludes)
-		if err != nil {
-			return textErr(err.Error())
-		}
-		cwd := GetCwd(profName, prof)
-		remoteRoot := cwd
-		if v, _ := args["remote_root"].(string); v != "" {
-			remoteRoot = resolveRemotePath(v, cwd)
-		} else if prof.SyncRoot != "" {
-			remoteRoot = resolveRemotePath(prof.SyncRoot, cwd)
-		}
-		text := fmt.Sprintf("would delete %d files from %s\n%s", len(deletes), remoteRoot, strings.Join(deletes, "\n"))
-		// Text already contains the full deletes list -- don't double it
-		// in structured. Count is enough to verify scope.
-		return toolResult{
-			Content: []toolContent{{Type: "text", Text: text}},
-			StructuredContent: map[string]any{
-				"deletes_count": len(deletes),
-				"remote_root":   remoteRoot,
-				"dry_run":       true,
+		},
+	},
+	{
+		def: toolDef{
+			Name:        "detach",
+			Description: "Start remote detached job.",
+			InputSchema: map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"command": strSchema(""),
+					"profile": strSchema(""),
+					"confirm": boolSchema(false, "Required when guard is on AND command hits a high-risk pattern."),
+				},
+				"required": []string{"command"},
 			},
-		}
-
-	case "detach":
-		cmd, _ := args["command"].(string)
-		if cmd == "" {
-			return textErr("command is required")
-		}
-		confirm, _ := args["confirm"].(bool)
-		if GuardOn() && !confirm {
-			if pat := runRiskyMatch(cmd); pat != "" {
-				return guardBlocked("detach",
-					fmt.Sprintf("command contains a high-risk pattern %q", pat))
+		},
+		handler: func(args map[string]any, cfg *Config, profileOverride string) toolResult {
+			cmd, _ := args["command"].(string)
+			if cmd == "" {
+				return mcpTextErr("command is required")
 			}
-		}
-		profName, prof, err := ResolveProfile(cfg, profileOverride)
-		if err != nil {
-			return textErr(err.Error())
-		}
-		rec, err := spawnDetached(profName, prof, cmd)
-		if err != nil {
-			return textErr(err.Error())
-		}
-		return mcpJSONResult(rec)
-
-	case "list_jobs":
-		jobs := loadJobsFile().Jobs
-		if profileOverride != "" {
-			out := jobs[:0]
-			for _, j := range jobs {
-				if j.Profile == profileOverride {
-					out = append(out, j)
+			confirm, _ := args["confirm"].(bool)
+			if GuardOn() && !confirm {
+				if pat := runRiskyMatch(cmd); pat != "" {
+					return guardBlocked("detach",
+						fmt.Sprintf("command contains a high-risk pattern %q", pat))
 				}
 			}
-			jobs = out
-		}
-		return mcpJSONResult(map[string]any{"jobs": jobs})
-
-	case "tail_log":
-		jid, _ := args["id"].(string)
-		lines := 200
-		if v, ok := args["lines"].(float64); ok {
-			lines = int(v)
-		}
-		jobs := loadJobsFile()
-		j := findJob(jobs, jid)
-		if j == nil {
-			return textErr(fmt.Sprintf("no such job %q", jid))
-		}
-		prof, ok := cfg.Profiles[j.Profile]
-		if !ok {
-			return textErr(fmt.Sprintf("profile %q not found", j.Profile))
-		}
-		res, _ := runRemoteCapture(prof, "", fmt.Sprintf("tail -n %d %s", lines, j.Log))
-		text := res.Stdout
-		if text == "" {
-			text = res.Stderr
-		}
-		// The tail content lives in Content; don't re-emit it as
-		// structured.tail. With lines=5000 the duplication doubles the
-		// tokens this tool spends per call. The job record is already
-		// available via list_jobs if the model needs metadata.
-		return toolResult{
-			Content:           []toolContent{{Type: "text", Text: text}},
-			IsError:           res.ExitCode != 0,
-			StructuredContent: map[string]any{"job_id": j.ID, "exit_code": res.ExitCode},
-		}
-
-	case "list_dir":
-		path, _ := args["path"].(string)
-		dirsOnly, _ := args["dirs_only"].(bool)
-		// JSON numbers come in as float64; treat <=0 / missing as the
-		// default 500.
-		limit := 500
-		if v, ok := args["limit"].(float64); ok && v > 0 {
-			limit = int(v)
-		}
-		entries, err := listRemoteEntries(path, cfg, profileOverride)
-		if err != nil {
-			return textErr(err.Error())
-		}
-		if dirsOnly {
-			kept := entries[:0]
-			for _, e := range entries {
-				if strings.HasSuffix(e, "/") {
-					kept = append(kept, e)
+			profName, prof, err := ResolveProfile(cfg, profileOverride)
+			if err != nil {
+				return mcpTextErr(err.Error())
+			}
+			rec, err := spawnDetached(profName, prof, cmd)
+			if err != nil {
+				return mcpTextErr(err.Error())
+			}
+			return mcpJSONResult(rec)
+		},
+	},
+	{
+		def: toolDef{
+			Name:        "list_jobs",
+			Description: "List detached jobs.",
+			InputSchema: map[string]any{
+				"type":       "object",
+				"properties": map[string]any{"profile": strSchema("")},
+			},
+		},
+		handler: func(args map[string]any, cfg *Config, profileOverride string) toolResult {
+			jobs := loadJobsFile().Jobs
+			if profileOverride != "" {
+				out := jobs[:0]
+				for _, j := range jobs {
+					if j.Profile == profileOverride {
+						out = append(out, j)
+					}
+				}
+				jobs = out
+			}
+			return mcpJSONResult(map[string]any{"jobs": jobs})
+		},
+	},
+	{
+		def: toolDef{
+			Name:        "tail_log",
+			Description: "Tail job log.",
+			InputSchema: map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"id":    strSchema(""),
+					"lines": intSchema(200, ""),
+				},
+				"required": []string{"id"},
+			},
+		},
+		handler: func(args map[string]any, cfg *Config, profileOverride string) toolResult {
+			jid, _ := args["id"].(string)
+			lines := 200
+			if v, ok := args["lines"].(float64); ok {
+				lines = int(v)
+			}
+			jobs := loadJobsFile()
+			j := findJob(jobs, jid)
+			if j == nil {
+				return mcpTextErr(fmt.Sprintf("no such job %q", jid))
+			}
+			prof, ok := cfg.Profiles[j.Profile]
+			if !ok {
+				return mcpTextErr(fmt.Sprintf("profile %q not found", j.Profile))
+			}
+			res, _ := runRemoteCapture(prof, "", fmt.Sprintf("tail -n %d %s", lines, j.Log))
+			text := res.Stdout
+			if text == "" {
+				text = res.Stderr
+			}
+			return toolResult{
+				Content:           []toolContent{{Type: "text", Text: text}},
+				IsError:           res.ExitCode != 0,
+				StructuredContent: map[string]any{"job_id": j.ID, "exit_code": res.ExitCode},
+			}
+		},
+	},
+	{
+		def: toolDef{
+			Name:        "list_dir",
+			Description: "List remote directory entries (subset of `ls -1Ap`). Use this instead of `run \"ls ...\"` for path discovery -- response is structured, ANSI-clean, and hits the warm daemon cache (sub-100ms on repeat). Pass an empty path for the active cwd. Dirs carry trailing '/'.",
+			InputSchema: map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"path":      strSchema("Remote path prefix. Empty = current cwd. Trailing '/' = list that directory; no trailing '/' = match entries whose name starts with the basename. E.g., '/etc/' lists /etc; '/etc/host' returns host*, hostname, hosts, hosts.allow."),
+					"dirs_only": boolSchema(false, "Filter to directories only (entries ending in '/')."),
+					"limit":     intSchema(500, "Maximum entries returned. Anything beyond gets dropped; truncated_count surfaces the cut so you know to query a deeper prefix."),
+					"profile":   strSchema(""),
+				},
+			},
+		},
+		handler: func(args map[string]any, cfg *Config, profileOverride string) toolResult {
+			path, _ := args["path"].(string)
+			dirsOnly, _ := args["dirs_only"].(bool)
+			limit := 500
+			if v, ok := args["limit"].(float64); ok && v > 0 {
+				limit = int(v)
+			}
+			entries, err := listRemoteEntries(path, cfg, profileOverride)
+			if err != nil {
+				return mcpTextErr(err.Error())
+			}
+			if dirsOnly {
+				kept := entries[:0]
+				for _, e := range entries {
+					if strings.HasSuffix(e, "/") {
+						kept = append(kept, e)
+					}
+				}
+				entries = kept
+			}
+			truncated := 0
+			if len(entries) > limit {
+				truncated = len(entries) - limit
+				entries = entries[:limit]
+			}
+			text := strings.Join(entries, "\n")
+			if text != "" {
+				text += "\n"
+			}
+			structured := map[string]any{
+				"entries": entries,
+				"count":   len(entries),
+			}
+			if truncated > 0 {
+				structured["truncated_count"] = truncated
+			}
+			return toolResult{
+				Content:           []toolContent{{Type: "text", Text: text}},
+				StructuredContent: structured,
+			}
+		},
+	},
+	{
+		def: toolDef{
+			Name:        "kill_job",
+			Description: "Signal detached job.",
+			InputSchema: map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"id":     strSchema(""),
+					"signal": map[string]any{"type": "string", "default": "TERM"},
+				},
+				"required": []string{"id"},
+			},
+		},
+		handler: func(args map[string]any, cfg *Config, profileOverride string) toolResult {
+			jid, _ := args["id"].(string)
+			sig, _ := args["signal"].(string)
+			if sig == "" {
+				sig = "TERM"
+			}
+			jobs := loadJobsFile()
+			j := findJob(jobs, jid)
+			if j == nil {
+				return mcpTextErr(fmt.Sprintf("no such job %q", jid))
+			}
+			prof, ok := cfg.Profiles[j.Profile]
+			if !ok {
+				return mcpTextErr(fmt.Sprintf("profile %q not found", j.Profile))
+			}
+			cmd := fmt.Sprintf("kill -%s %d 2>/dev/null && echo killed || echo 'no such pid'", sig, j.Pid)
+			res, _ := runRemoteCapture(prof, "", cmd)
+			out := jobs.Jobs[:0]
+			for _, x := range jobs.Jobs {
+				if x.ID != j.ID {
+					out = append(out, x)
 				}
 			}
-			entries = kept
-		}
-		truncated := 0
-		if len(entries) > limit {
-			truncated = len(entries) - limit
-			entries = entries[:limit]
-		}
-		text := strings.Join(entries, "\n")
-		if text != "" {
-			text += "\n"
-		}
-		structured := map[string]any{
-			"entries": entries,
-			"count":   len(entries),
-		}
-		if truncated > 0 {
-			structured["truncated_count"] = truncated
-		}
-		return toolResult{
-			Content:           []toolContent{{Type: "text", Text: text}},
-			StructuredContent: structured,
-		}
-
-	case "kill_job":
-		jid, _ := args["id"].(string)
-		sig, _ := args["signal"].(string)
-		if sig == "" {
-			sig = "TERM"
-		}
-		jobs := loadJobsFile()
-		j := findJob(jobs, jid)
-		if j == nil {
-			return textErr(fmt.Sprintf("no such job %q", jid))
-		}
-		prof, ok := cfg.Profiles[j.Profile]
-		if !ok {
-			return textErr(fmt.Sprintf("profile %q not found", j.Profile))
-		}
-		cmd := fmt.Sprintf("kill -%s %d 2>/dev/null && echo killed || echo 'no such pid'", sig, j.Pid)
-		res, _ := runRemoteCapture(prof, "", cmd)
-		out := jobs.Jobs[:0]
-		for _, x := range jobs.Jobs {
-			if x.ID != j.ID {
-				out = append(out, x)
+			jobs.Jobs = out
+			_ = saveJobsFile(jobs)
+			text := strings.TrimSpace(res.Stdout)
+			if text == "" {
+				text = strings.TrimSpace(res.Stderr)
 			}
-		}
-		jobs.Jobs = out
-		_ = saveJobsFile(jobs)
-		text := strings.TrimSpace(res.Stdout)
-		if text == "" {
-			text = strings.TrimSpace(res.Stderr)
-		}
-		return toolResult{
-			Content:           []toolContent{{Type: "text", Text: text}},
-			IsError:           res.ExitCode != 0,
-			StructuredContent: map[string]any{"job_id": j.ID, "signal": sig, "exit_code": res.ExitCode},
-		}
+			return toolResult{
+				Content:           []toolContent{{Type: "text", Text: text}},
+				IsError:           res.ExitCode != 0,
+				StructuredContent: map[string]any{"job_id": j.ID, "signal": sig, "exit_code": res.ExitCode},
+			}
+		},
+	},
+}
+
+// mcpToolMap is built once from the registry so dispatch is O(1).
+var mcpToolMap map[string]*mcpTool
+
+func init() {
+	mcpToolMap = make(map[string]*mcpTool, len(mcpTools))
+	for i := range mcpTools {
+		t := &mcpTools[i]
+		mcpToolMap[t.def.Name] = t
 	}
+}
 
-	return textErr(fmt.Sprintf("unknown tool %q", name))
+// mcpToolDefs returns the slice of toolDef advertised on tools/list.
+// Derived from the registry so the def-list and the dispatcher cannot
+// drift -- both come from the same source.
+func mcpToolDefs() []toolDef {
+	defs := make([]toolDef, 0, len(mcpTools))
+	for i := range mcpTools {
+		defs = append(defs, mcpTools[i].def)
+	}
+	return defs
+}
+
+// mcpHandleTool dispatches a tools/call request through the registry.
+// Unknown names return a textual error -- spec doesn't require a more
+// structured "tool not found" form for that case.
+func mcpHandleTool(name string, args map[string]any, cfg *Config) toolResult {
+	profileOverride, _ := args["profile"].(string)
+	if t, ok := mcpToolMap[name]; ok {
+		return t.handler(args, cfg, profileOverride)
+	}
+	return mcpTextErr(fmt.Sprintf("unknown tool %q", name))
 }
 
 // buildMCPRunText assembles the textual payload returned by the `run`
