@@ -186,7 +186,7 @@ func cmdOpen(args []string, cfg *Config, profileOverride string) int {
 		return 1
 	}
 	local := filepath.Join(tmpDir, path.Base(strings.TrimRight(remote, "/")))
-	if rc, err := pullPath(profile, remote, local, false); err != nil || rc != 0 {
+	if rc, _, err := pullPath(profile, remote, local, false); err != nil || rc != 0 {
 		if err != nil {
 			fmt.Fprintln(os.Stderr, "srv open:", err)
 		}
@@ -284,7 +284,7 @@ func diffLocalRemote(cfg *Config, profileOverride, local, remoteArg string) (str
 	}
 	defer os.RemoveAll(tmpDir)
 	remoteLocal := filepath.Join(tmpDir, filepath.Base(local)+".remote")
-	if rc, err := pullPath(profile, remote, remoteLocal, false); err != nil || rc != 0 {
+	if rc, _, err := pullPath(profile, remote, remoteLocal, false); err != nil || rc != 0 {
 		if err != nil {
 			return "", 1, err
 		}

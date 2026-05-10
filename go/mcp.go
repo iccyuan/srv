@@ -660,7 +660,13 @@ func mcpHandleTool(name string, args map[string]any, cfg *Config) toolResult {
 		if st != nil && st.IsDir() {
 			recursive = true
 		}
+		start := time.Now()
 		rc, finalRemote, perr := pushPath(prof, local, abs, recursive)
+		duration := time.Since(start)
+		var bytes int64
+		if rc == 0 {
+			bytes = sumLocalSize(local)
+		}
 		// Always surface the resolved absolute remote path -- and when
 		// pushPath rewrote it (scp-style "remote was a dir, file lands
 		// inside"), surface the *final* path, not the user's input. SFTP
@@ -670,17 +676,26 @@ func mcpHandleTool(name string, args map[string]any, cfg *Config) toolResult {
 		// the text makes both kinds of misroute visible at a glance.
 		var text string
 		if rc == 0 {
-			text = fmt.Sprintf("uploaded %s -> %s [exit 0]", local, finalRemote)
+			text = fmt.Sprintf("uploaded %s -> %s [exit 0]%s", local, finalRemote, fmtRate(bytes, duration))
 		} else {
 			text = fmt.Sprintf("upload FAILED %s -> %s [exit %d]", local, finalRemote, rc)
 			if perr != nil {
 				text += ": " + perr.Error()
 			}
 		}
+		structured := map[string]any{
+			"exit_code":        rc,
+			"remote":           finalRemote,
+			"local":            local,
+			"duration_seconds": duration.Seconds(),
+		}
+		if rc == 0 {
+			structured["bytes_transferred"] = bytes
+		}
 		return toolResult{
 			Content:           []toolContent{{Type: "text", Text: text}},
 			IsError:           rc != 0,
-			StructuredContent: map[string]any{"exit_code": rc, "remote": finalRemote, "local": local},
+			StructuredContent: structured,
 		}
 
 	case "pull":
@@ -702,22 +717,37 @@ func mcpHandleTool(name string, args map[string]any, cfg *Config) toolResult {
 		if rb, ok := args["recursive"].(bool); ok {
 			recursive = rb
 		}
-		rc, perr := pullPath(prof, abs, local, recursive)
+		start := time.Now()
+		rc, finalLocal, perr := pullPath(prof, abs, local, recursive)
+		duration := time.Since(start)
+		var bytes int64
+		if rc == 0 {
+			bytes = sumLocalSize(finalLocal)
+		}
 		// Surface both ends of the transfer so the caller can spot a
 		// wrong-path source or destination without inspecting structured.
 		var text string
 		if rc == 0 {
-			text = fmt.Sprintf("downloaded %s -> %s [exit 0]", abs, local)
+			text = fmt.Sprintf("downloaded %s -> %s [exit 0]%s", abs, finalLocal, fmtRate(bytes, duration))
 		} else {
-			text = fmt.Sprintf("download FAILED %s -> %s [exit %d]", abs, local, rc)
+			text = fmt.Sprintf("download FAILED %s -> %s [exit %d]", abs, finalLocal, rc)
 			if perr != nil {
 				text += ": " + perr.Error()
 			}
 		}
+		structured := map[string]any{
+			"exit_code":        rc,
+			"remote":           abs,
+			"local":            finalLocal,
+			"duration_seconds": duration.Seconds(),
+		}
+		if rc == 0 {
+			structured["bytes_transferred"] = bytes
+		}
 		return toolResult{
 			Content:           []toolContent{{Type: "text", Text: text}},
 			IsError:           rc != 0,
-			StructuredContent: map[string]any{"exit_code": rc, "remote": abs, "local": local},
+			StructuredContent: structured,
 		}
 
 	case "sync":
@@ -865,11 +895,26 @@ func mcpHandleTool(name string, args map[string]any, cfg *Config) toolResult {
 		}
 		rc := 0
 		var terr error
+		start := time.Now()
 		if len(files) > 0 {
 			rc, terr = tarUploadStream(prof, localRoot, files, remoteRoot)
 		}
 		if rc == 0 && len(deletes) > 0 {
 			rc, terr = deleteRemoteFiles(prof, remoteRoot, deletes)
+		}
+		duration := time.Since(start)
+		// Sum sizes of the files that were tarred. Pre-transfer stat is
+		// fine here: tarUploadStream reads them itself, and even if a
+		// concurrent local edit shifted the size between our stat and the
+		// tar read, the difference is at most a few KB on the metric --
+		// not worth a second walk.
+		var bytes int64
+		if rc == 0 {
+			for _, f := range files {
+				if st, err := os.Stat(filepath.Join(localRoot, f)); err == nil {
+					bytes += st.Size()
+				}
+			}
 		}
 		// Wording must distinguish success from failure -- the prior
 		// "synced %d files" said the same thing on rc=255 (e.g. ssh
@@ -879,7 +924,7 @@ func mcpHandleTool(name string, args map[string]any, cfg *Config) toolResult {
 		// attempted set, not what landed.
 		var text string
 		if rc == 0 {
-			text = fmt.Sprintf("synced %d files to %s [exit 0]", len(files), remoteRoot)
+			text = fmt.Sprintf("synced %d files to %s [exit 0]%s", len(files), remoteRoot, fmtRate(bytes, duration))
 		} else {
 			text = fmt.Sprintf("sync FAILED to %s [exit %d]; %d files were NOT transferred -- verify with `run \"ls -la %s\"` before assuming",
 				remoteRoot, rc, len(files), remoteRoot)
@@ -887,15 +932,20 @@ func mcpHandleTool(name string, args map[string]any, cfg *Config) toolResult {
 		if terr != nil {
 			text += ": " + terr.Error()
 		}
+		structured := map[string]any{
+			"files_count":      len(files),
+			"deletes_count":    len(deletes),
+			"remote_root":      remoteRoot,
+			"exit_code":        rc,
+			"duration_seconds": duration.Seconds(),
+		}
+		if rc == 0 {
+			structured["bytes_transferred"] = bytes
+		}
 		return toolResult{
-			Content: []toolContent{{Type: "text", Text: text}},
-			IsError: rc != 0,
-			StructuredContent: map[string]any{
-				"files_count":   len(files),
-				"deletes_count": len(deletes),
-				"remote_root":   remoteRoot,
-				"exit_code":     rc,
-			},
+			Content:           []toolContent{{Type: "text", Text: text}},
+			IsError:           rc != 0,
+			StructuredContent: structured,
 		}
 
 	case "sync_delete_dry_run":

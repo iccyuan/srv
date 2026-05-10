@@ -221,25 +221,29 @@ func pushPath(profile *Profile, local, remote string, recursive bool) (int, stri
 	return 0, resolved, nil
 }
 
-// pullPath downloads a remote file or directory to a local path.
-func pullPath(profile *Profile, remote, local string, recursive bool) (int, error) {
+// pullPath downloads a remote file or directory to a local path. Returns
+// (exitCode, finalLocalPath, err); finalLocalPath is the actual landing
+// location after the "remote-source-name appended when local is an
+// existing dir" rule fires, so callers can stat it to report transfer
+// size or surface to the user where bytes really ended up.
+func pullPath(profile *Profile, remote, local string, recursive bool) (int, string, error) {
 	c, err := Dial(profile)
 	if err != nil {
-		return 255, err
+		return 255, local, err
 	}
 	defer c.Close()
 
 	resolved, err := c.expandRemoteHome(remote)
 	if err != nil {
-		return 1, err
+		return 1, local, err
 	}
 	s, err := c.SFTP()
 	if err != nil {
-		return 1, err
+		return 1, local, err
 	}
 	st, err := s.Stat(resolved)
 	if err != nil {
-		return 1, err
+		return 1, local, err
 	}
 	if st.IsDir() {
 		recursive = true
@@ -251,9 +255,15 @@ func pullPath(profile *Profile, remote, local string, recursive bool) (int, erro
 		finalLocal = filepath.Join(local, path.Base(resolved))
 	}
 	if recursive {
-		return 0, downloadDir(s, resolved, finalLocal)
+		if err := downloadDir(s, resolved, finalLocal); err != nil {
+			return 1, finalLocal, err
+		}
+		return 0, finalLocal, nil
 	}
-	return 0, downloadFile(s, resolved, finalLocal)
+	if err := downloadFile(s, resolved, finalLocal); err != nil {
+		return 1, finalLocal, err
+	}
+	return 0, finalLocal, nil
 }
 
 // uploadFile copies local -> remote via SFTP. If a partial remote file

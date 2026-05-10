@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync/atomic"
 	"time"
@@ -147,4 +148,40 @@ func shortLabel(p string) string {
 		return parts[len(parts)-2] + "/" + parts[len(parts)-1]
 	}
 	return parts[len(parts)-1]
+}
+
+// sumLocalSize returns the total byte size of `path` -- single file size
+// for a regular file, recursive sum for a directory. Errors collapse to
+// 0 because the metric is informational (post-transfer "you sent X
+// bytes"); a missing-file failure already surfaced through the transfer
+// rc, no point doubling up here.
+func sumLocalSize(path string) int64 {
+	st, err := os.Stat(path)
+	if err != nil {
+		return 0
+	}
+	if !st.IsDir() {
+		return st.Size()
+	}
+	var total int64
+	_ = filepath.Walk(path, func(_ string, info os.FileInfo, werr error) error {
+		if werr != nil || info == nil {
+			return nil
+		}
+		if !info.IsDir() {
+			total += info.Size()
+		}
+		return nil
+	})
+	return total
+}
+
+// fmtRate formats a transfer summary suffix: "(152.3 MiB in 24.7s, 6.2 MiB/s)".
+// Returns "" when bytes is 0 or duration is zero -- nothing useful to say.
+func fmtRate(bytes int64, d time.Duration) string {
+	if bytes <= 0 || d <= 0 {
+		return ""
+	}
+	rate := int64(float64(bytes) / d.Seconds())
+	return fmt.Sprintf(" (%s in %.1fs, %s/s)", fmtBytes(bytes), d.Seconds(), fmtBytes(rate))
 }

@@ -642,7 +642,7 @@ func cmdPull(args []string, cfg *Config, profileOverride string) int {
 	}
 	cwd := GetCwd(name, profile)
 	abs := resolveRemotePath(remote, cwd)
-	rc, err := pullPath(profile, abs, local, recursive)
+	rc, _, err := pullPath(profile, abs, local, recursive)
 	if err != nil {
 		printDiagError(err, profile)
 	}
