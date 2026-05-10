@@ -134,13 +134,15 @@ var subcommands = []subcommand{
 // are constructed, so by then `subcommands` is fully laid down and we
 // can derive both lookup tables in one pass.
 var (
-	subcommandMap       map[string]*subcommand
-	reservedSubcommands map[string]bool
+	subcommandMap         map[string]*subcommand
+	reservedSubcommands   map[string]bool
+	visibleSubcommandList []string
 )
 
 func init() {
 	subcommandMap = make(map[string]*subcommand, len(subcommands)*2)
 	reservedSubcommands = make(map[string]bool, len(subcommands)*2)
+	visibleSubcommandList = make([]string, 0, len(subcommands))
 	for i := range subcommands {
 		s := &subcommands[i]
 		subcommandMap[s.name] = s
@@ -149,10 +151,36 @@ func init() {
 			subcommandMap[a] = s
 			reservedSubcommands[a] = true
 		}
+		if !s.hidden {
+			visibleSubcommandList = append(visibleSubcommandList, s.name)
+			// Include aliases so e.g. `srv exe<TAB>` still completes to
+			// `exec`, but skip the dash-flag ones (`--help`/`-h`/
+			// `--version`) -- they're not natural completion targets, the
+			// user knows to type those out.
+			for _, a := range s.aliases {
+				if len(a) > 0 && a[0] != '-' {
+					visibleSubcommandList = append(visibleSubcommandList, a)
+				}
+			}
+		}
 	}
 }
 
 func lookupSub(name string) (*subcommand, bool) {
 	s, ok := subcommandMap[name]
 	return s, ok
+}
+
+// userVisibleSubcommands returns the primary names of every non-hidden
+// subcommand, in registration order. Used by the completion templates
+// (bash/zsh/PS) so their `subs` lists derive from the registry rather
+// than being copy-pasted into three shell scripts that historically
+// drifted apart whenever a new command was added.
+//
+// Reads from a cache populated by init() instead of iterating
+// `subcommands` directly: doing the latter would form an
+// initialization cycle (subcommands' closure for `completion` calls
+// cmdCompletion, which calls back here).
+func userVisibleSubcommands() []string {
+	return visibleSubcommandList
 }

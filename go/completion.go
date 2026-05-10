@@ -12,7 +12,7 @@ _srv() {
     COMPREPLY=()
     cur="${COMP_WORDS[COMP_CWORD]}"
     prev="${COMP_WORDS[COMP_CWORD-1]:-}"
-    local subs="init config use cd pwd status check doctor shell run exec push pull sync tunnel edit open code diff env jobs logs kill sessions completion mcp daemon help version"
+    local subs="__SRV_SUBS__"
 
     # Track first and second positional args, skipping global flags. The
     # AST-style tokens give us context for nested completion (e.g. for
@@ -278,7 +278,7 @@ Register-ArgumentCompleter -Native -CommandName srv -ScriptBlock {
         return
     }
 
-    $subs = 'init','config','use','cd','pwd','status','check','doctor','shell','run','exec','push','pull','sync','tunnel','edit','open','code','diff','env','jobs','logs','kill','sessions','completion','mcp','daemon','help','version'
+    $subs = @(__SRV_SUBS_PS__)
     if (-not $sub) {
         & $emit $subs
         return
@@ -397,12 +397,21 @@ func cmdCompletion(args []string) int {
 	if len(args) == 0 {
 		fatal("usage: srv completion <bash|zsh|powershell>")
 	}
+	// The bash and PowerShell scripts get their `subs` list rendered
+	// from the live registry so adding a new subcommand only requires
+	// a commands.go entry, not three parallel hand-edits. zsh keeps its
+	// hand-curated array because each entry carries a description shown
+	// in the `_describe` menu -- worth preserving over OCP purity.
+	bashSubs := strings.Join(userVisibleSubcommands(), " ")
+	psSubs := "'" + strings.Join(userVisibleSubcommands(), "','") + "'"
+
 	switch args[0] {
 	case "bash":
 		// bash users have srv on PATH (otherwise they couldn't run
 		// `srv completion bash` in the first place); leave the inline
 		// `srv _profiles` to use PATH lookup.
-		fmt.Print(bashCompletion)
+		out := strings.ReplaceAll(bashCompletion, "__SRV_SUBS__", bashSubs)
+		fmt.Print(out)
 	case "zsh":
 		fmt.Print(zshCompletion)
 	case "powershell", "pwsh", "ps":
@@ -415,6 +424,7 @@ func cmdCompletion(args []string) int {
 		}
 		quoted := "'" + strings.ReplaceAll(self, "'", "''") + "'"
 		out := powershellCompletion
+		out = strings.ReplaceAll(out, "__SRV_SUBS_PS__", psSubs)
 		out = strings.ReplaceAll(out, "& srv _profiles", "& "+quoted+" _profiles")
 		out = strings.ReplaceAll(out, "& srv _ls", "& "+quoted+" _ls")
 		fmt.Print(out)
