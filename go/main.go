@@ -81,11 +81,13 @@ Integrations:
   srv completion <bash|zsh|powershell>   emit shell completion script
   srv mcp                                run as a stdio MCP server
   srv guard [on|off|status]              MCP confirmation guard for high-risk ops (default off)
-  srv color [on|off|use <name>|list|status]
+  srv color [on|off|use [name]|list|status]
                                          CLI run colour, on by default (any platform).
                                          srv color off to disable per-shell. drop *.sh
                                          into ~/.srv/init/ for custom presets, then
-                                         srv color use <name>. MCP runs stay plain text.
+                                         srv color use <name>; on a TTY, srv color use
+                                         with no arg opens the arrow-key picker.
+                                         MCP runs stay plain text.
   srv daemon                             keep ssh sessions warm (foreground)
   srv daemon status                      show running daemon's pool
   srv daemon status --json               machine-readable daemon status
@@ -172,10 +174,11 @@ const helpZH = `srv - 跨平台 SSH 远端命令工具,持久 cwd / 连接复用
   srv completion <bash|zsh|powershell>   输出 shell 补全脚本
   srv mcp                                以 stdio MCP server 跑
   srv guard [on|off|status]              MCP 高危操作确认开关(默认关闭,可针对当前 shell 开启)
-  srv color [on|off|use <name>|list|status]
+  srv color [on|off|use [name]|list|status]
                                          CLI 远端命令彩色,默认开启(所有平台)。
                                          srv color off 关掉当前 shell;预设放
-                                         ~/.srv/init/*.sh 后 srv color use <name>。
+                                         ~/.srv/init/*.sh 后 srv color use <name>;
+                                         TTY 下省略 name 进 ↑↓ 选择器。
                                          MCP run 始终保持纯文本。
   srv daemon                             连接池前台运行(主要给调试)
   srv daemon status [--json]             看池里的 profile / uptime

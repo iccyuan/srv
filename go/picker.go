@@ -11,19 +11,21 @@ import (
 	"golang.org/x/term"
 )
 
-// Interactive profile picker. Triggered by `srv use` (no arg, TTY) and
-// `srv config default` (no arg, TTY). Pure stdlib + golang.org/x/term --
-// no TUI library, no extra deps. Output goes to stderr so the picker
-// works even when stdout is redirected.
+// Interactive picker. Triggered by `srv use` (no arg, TTY),
+// `srv config default` (no arg, TTY), and `srv color use` (no arg, TTY).
+// Pure stdlib + golang.org/x/term -- no TUI library, no extra deps.
+// Output goes to stderr so the picker works even when stdout is
+// redirected.
 //
 // Visual contract:
-//   * "this shell" pin -- yellow `[this shell]` marker (transient,
-//     scoped to the current shell session)
-//   * "default" -- cyan `[default]` marker (persists across shells)
+//   * isPinned -- yellow marker, label supplied by caller (e.g.
+//     "[this shell]" for profiles, "[active]" for colour presets)
+//   * isDefault -- cyan marker, label supplied by caller (e.g.
+//     "[default]" for both)
 //   * highlighted row uses reverse video plus a `>` cursor
 //   * footer hint line dims out the keybindings
 //
-// Both markers can apply to the same profile.
+// Both markers can apply to the same row.
 
 const (
 	ansiReset   = "\x1b[0m"
@@ -38,10 +40,21 @@ const (
 
 type pickerItem struct {
 	name      string
-	conn      string // "user@host[:port]"
-	isPinned  bool   // pinned to current shell session
-	isDefault bool   // global default profile
+	meta      string // free-form right-column descriptor (host:port, "built-in", etc.)
+	isPinned  bool   // current selection (e.g. session pin, active colour preset)
+	isDefault bool   // baseline default (global default profile, default theme)
 }
+
+// pickerLabels lets the caller customise the marker text rendered for
+// isPinned (yellow) and isDefault (cyan) rows. Both fields are the inner
+// text without the surrounding [] brackets.
+type pickerLabels struct {
+	pin string
+	def string
+}
+
+// profilePickerLabels matches the original profile-picker visual.
+var profilePickerLabels = pickerLabels{pin: "this shell", def: "default"}
 
 // buildPickerItems translates the config + current session into picker rows.
 func buildPickerItems(cfg *Config) []*pickerItem {
@@ -61,7 +74,7 @@ func buildPickerItems(cfg *Config) []*pickerItem {
 		}
 		out = append(out, &pickerItem{
 			name:      name,
-			conn:      conn,
+			meta:      conn,
 			isPinned:  name == pinned,
 			isDefault: name == cfg.DefaultProfile,
 		})
@@ -70,9 +83,16 @@ func buildPickerItems(cfg *Config) []*pickerItem {
 	return out
 }
 
-// runProfilePicker runs the interactive picker. Returns ("", false) on
-// cancel, (name, true) on selection. Caller must ensure stdin is a TTY.
+// runProfilePicker is a thin wrapper preserving the original API for the
+// profile-selection use sites.
 func runProfilePicker(items []*pickerItem, prompt string) (string, bool) {
+	return runItemPicker(items, prompt, profilePickerLabels)
+}
+
+// runItemPicker runs the interactive picker with caller-supplied marker
+// labels. Returns ("", false) on cancel, (name, true) on selection.
+// Caller must ensure stdin is a TTY.
+func runItemPicker(items []*pickerItem, prompt string, labels pickerLabels) (string, bool) {
 	if len(items) == 0 {
 		fmt.Fprintln(os.Stderr, "(no profiles configured -- run `srv init`)")
 		return "", false
@@ -124,7 +144,7 @@ func runProfilePicker(items []*pickerItem, prompt string) (string, bool) {
 		if prevLines > 0 {
 			fmt.Fprintf(os.Stderr, "\x1b[%dA\x1b[J", prevLines)
 		}
-		prevLines = drawPicker(prompt, view, cursor, filter, filterMode)
+		prevLines = drawPicker(prompt, view, cursor, filter, filterMode, labels)
 
 		b, ok := kr.read()
 		if !ok {
@@ -226,7 +246,7 @@ func filterItems(items []*pickerItem, filter string) []*pickerItem {
 	out := make([]*pickerItem, 0, len(items))
 	for _, it := range items {
 		if strings.Contains(strings.ToLower(it.name), q) ||
-			strings.Contains(strings.ToLower(it.conn), q) {
+			strings.Contains(strings.ToLower(it.meta), q) {
 			out = append(out, it)
 		}
 	}
@@ -235,7 +255,7 @@ func filterItems(items []*pickerItem, filter string) []*pickerItem {
 
 // drawPicker emits the full picker UI to stderr and returns the line
 // count it produced (so the next pass knows how far to scroll up).
-func drawPicker(prompt string, items []*pickerItem, cursor int, filter string, filterMode bool) int {
+func drawPicker(prompt string, items []*pickerItem, cursor int, filter string, filterMode bool, labels pickerLabels) int {
 	w := os.Stderr
 	lines := 0
 
@@ -267,12 +287,12 @@ func drawPicker(prompt string, items []*pickerItem, cursor int, filter string, f
 		if i == cursor {
 			marker = ansiBold + "> " + ansiReset
 		}
-		row := fmt.Sprintf("%-*s  %s", maxName, it.name, it.conn)
+		row := fmt.Sprintf("%-*s  %s", maxName, it.name, it.meta)
 		if it.isPinned {
-			row += " " + ansiYellow + ansiBold + "[this shell]" + ansiReset
+			row += " " + ansiYellow + ansiBold + "[" + labels.pin + "]" + ansiReset
 		}
 		if it.isDefault {
-			row += " " + ansiCyan + ansiBold + "[default]" + ansiReset
+			row += " " + ansiCyan + ansiBold + "[" + labels.def + "]" + ansiReset
 		}
 		if i == cursor {
 			fmt.Fprintf(w, "%s%s%s%s\r\n", marker, ansiReverse, row, ansiReset)

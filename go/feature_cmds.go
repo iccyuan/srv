@@ -617,6 +617,72 @@ func loadColorPresetBody(name string) string {
 	return ""
 }
 
+// applyColorPreset validates `name` against user presets + built-ins,
+// persists it as the active colour preset for this shell, and prints
+// the same one-line confirmation `srv color use <name>` always has.
+// Shared between the explicit `srv color use <name>` form and the TTY
+// picker fallback.
+func applyColorPreset(name string) int {
+	if colorReservedNames[name] {
+		fmt.Fprintf(os.Stderr, "color use: %q is a reserved mode name; use `srv color %s` directly.\n", name, name)
+		return 2
+	}
+	userExt := userPresetExt(name)
+	_, builtin := builtinThemeContent(name)
+	if userExt == "" && !builtin {
+		fmt.Fprintf(os.Stderr, "color use: %q not found in %s (looked for *.sh / *.itermcolors / *.toml) and no built-in theme matches.\n", name, ColorPresetsDir())
+		fmt.Fprintln(os.Stderr, "list available with `srv color list`.")
+		return 1
+	}
+	sid, err := SetColorPreset(name)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "color use:", err)
+		return 1
+	}
+	origin := "built-in"
+	if userExt != "" {
+		origin = "user " + userExt
+	}
+	fmt.Printf("color: using %s preset %q (session=%s)\n", origin, name, sid)
+	return 0
+}
+
+// buildColorPickerItems lists every selectable colour preset for the TTY
+// picker: user files in ~/.srv/init/ first (extension shown in the meta
+// column), then built-ins (skipping any whose name is shadowed by a user
+// file -- the user version wins, just like loadColorPresetBody). isPinned
+// marks the currently active preset (if any). isDefault marks the
+// shipped default theme (dracula).
+func buildColorPickerItems() []*pickerItem {
+	active := GetColorPreset()
+	userPresets, _ := ListColorPresets()
+	out := make([]*pickerItem, 0, len(userPresets)+8)
+	overridden := map[string]bool{}
+	for _, p := range userPresets {
+		overridden[p] = true
+		ext := userPresetExt(p)
+		out = append(out, &pickerItem{
+			name:      p,
+			meta:      "user " + ext,
+			isPinned:  p == active,
+			isDefault: false,
+		})
+	}
+	for _, p := range builtinThemeNames() {
+		if overridden[p] {
+			continue
+		}
+		out = append(out, &pickerItem{
+			name:      p,
+			meta:      "built-in",
+			isPinned:  p == active,
+			isDefault: p == builtinDefaultTheme,
+		})
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].name < out[j].name })
+	return out
+}
+
 // cmdColor implements `srv color [on|off|auto|use <name>|list|status]`.
 //
 //   - on / off / auto: simple toggles -- no preset file needed.
@@ -699,33 +765,27 @@ func cmdColor(args []string) int {
 		return 0
 	case "use":
 		if len(args) < 2 || args[1] == "" {
+			// TTY: open the same picker `srv use` uses, populated with
+			// every named preset (user files first, then built-ins,
+			// user wins on name collision). Off-TTY keeps the old usage
+			// error so scripts still get a clean signal.
+			if isStdinTTY() {
+				items := buildColorPickerItems()
+				if len(items) == 0 {
+					fmt.Fprintln(os.Stderr, "(no colour presets available)")
+					return 1
+				}
+				sel, ok := runItemPicker(items, "Select a colour preset for this shell:", pickerLabels{pin: "active", def: "default"})
+				if !ok {
+					return 0
+				}
+				return applyColorPreset(sel)
+			}
 			fmt.Fprintln(os.Stderr, "usage: srv color use <name>")
 			fmt.Fprintln(os.Stderr, "list available with `srv color list`.")
 			return 2
 		}
-		name := args[1]
-		if colorReservedNames[name] {
-			fmt.Fprintf(os.Stderr, "color use: %q is a reserved mode name; use `srv color %s` directly.\n", name, name)
-			return 2
-		}
-		userExt := userPresetExt(name)
-		_, builtin := builtinThemeContent(name)
-		if userExt == "" && !builtin {
-			fmt.Fprintf(os.Stderr, "color use: %q not found in %s (looked for *.sh / *.itermcolors / *.toml) and no built-in theme matches.\n", name, ColorPresetsDir())
-			fmt.Fprintln(os.Stderr, "list available with `srv color list`.")
-			return 1
-		}
-		sid, err := SetColorPreset(name)
-		if err != nil {
-			fmt.Fprintln(os.Stderr, "color use:", err)
-			return 1
-		}
-		origin := "built-in"
-		if userExt != "" {
-			origin = "user " + userExt
-		}
-		fmt.Printf("color: using %s preset %q (session=%s)\n", origin, name, sid)
-		return 0
+		return applyColorPreset(args[1])
 	case "status", "":
 		sid := SessionID()
 		mode := GetColorPreset()
