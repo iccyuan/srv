@@ -99,6 +99,16 @@ _srv() {
             else _srv_remote_ls all
             fi
             ;;
+        run|exec)
+            _srv_remote_ls all
+            ;;
+        *)
+            # Catch-all: srv treats unrecognized first tokens as remote
+            # commands. Args of those (paths, etc.) should complete from
+            # remote, not from the local cwd. Without this, bash-completion
+            # users would see local filenames leak in via -o bashdefault.
+            _srv_remote_ls all
+            ;;
     esac
 }
 complete -F _srv srv
@@ -206,6 +216,11 @@ _srv() {
             else _srv_remote_ls all
             fi
             ;;
+        run|exec) _srv_remote_ls all ;;
+        # Catch-all: srv runs unrecognized tokens on the remote, so their
+        # args should complete remotely too. Without this, zsh would fall
+        # back to _default (local files) and leak local cwd entries.
+        *) _srv_remote_ls all ;;
     esac
 }
 _srv "$@"
@@ -256,14 +271,33 @@ Register-ArgumentCompleter -Native -CommandName srv -ScriptBlock {
     }
 
     # Remote ls helper: invokes 'srv _ls <prefix>' and emits each matching
-    # full path (dirs get a trailing /). Used for cd / pull / push-remote.
+    # full path (dirs get a trailing /). Used for cd / pull / push-remote /
+    # run / exec / catch-all.
+    #
+    # When 0 remote entries match we MUST still emit something, otherwise
+    # PowerShell 5.1's native completer falls back to local file completion
+    # (ProviderItem results from cwd) and leaks local content into srv
+    # commands. Emitting the input word unchanged is the standard "claim
+    # this slot, no-op the keypress" trick: TAB visibly does nothing, but
+    # it doesn't drag in local files either.
     $remote_ls = {
         param($onlyDirs)
         $rs = & srv _ls $wordToComplete 2>$null
+        $emitted = 0
         foreach ($line in $rs -split "` + "`" + `n") {
             if (-not $line) { continue }
             if ($onlyDirs -and -not $line.EndsWith('/')) { continue }
             & $mk $line
+            $emitted++
+        }
+        if ($emitted -eq 0) {
+            # Non-empty CompletionText is required: PS 5.1 silently drops
+            # results whose CompletionText is empty, then falls back to the
+            # FileSystem provider. We feed the typed word back when present
+            # (visibly a no-op), else a single space (also a near-no-op).
+            $stub = if ($wordToComplete) { $wordToComplete } else { ' ' }
+            [System.Management.Automation.CompletionResult]::new(
+                $stub, '(no remote matches)', 'ParameterValue', '(no remote matches)')
         }
     }
 
@@ -310,6 +344,18 @@ Register-ArgumentCompleter -Native -CommandName srv -ScriptBlock {
                 # Second positional = remote path (any entry).
                 & $remote_ls $false
             }
+        }
+        { $_ -in 'run','exec' } {
+            # srv run <cmd> <args...>: args are remote (paths usually).
+            & $remote_ls $false
+        }
+        default {
+            # Catch-all: srv routes unrecognized first tokens to the remote.
+            # Their args should complete remotely too. Without this branch
+            # PowerShell's native completer falls back to local file
+            # completion when the script block returns 0 results, leaking
+            # local cwd contents into srv completions.
+            & $remote_ls $false
         }
     }
 }
