@@ -14,7 +14,8 @@ import (
 // cmdUI is `srv ui` -- a one-screen dashboard showing the bits of srv
 // state that usually require five separate subcommands to inspect:
 // active profile / cwd, daemon health, saved profile groups, saved
-// tunnels (with live up/down state), detached jobs, recent sessions.
+// tunnels (with live up/down state), detached jobs, MCP servers,
+// recent sessions.
 //
 // Read-only by design. Adding inline edit (kill a job, toggle a
 // tunnel) is tempting but invites a UX rabbit hole (confirmation
@@ -22,10 +23,16 @@ import (
 // subcommand in another terminal pane. The win here is "see
 // everything at a glance" -- not "be a full TUI app".
 //
-// Auto-refreshes every 2 seconds. Keys:
+// Refresh policy: ticks every 2 seconds, but only writes to the
+// terminal when the rendered content actually changed. That keeps
+// the screen perfectly still on an idle dashboard (no per-tick
+// flicker) while still picking up changes from `srv group set` etc.
+// in another shell within ~2s.
+//
+// Keys:
 //
 //	q / Ctrl-C    exit
-//	r             refresh immediately
+//	r             force a redraw even if data is unchanged
 func cmdUI(cfg *Config) error {
 	if !isStdinTTY() {
 		// Without a TTY there's no way to read keys; degrade to a
@@ -44,47 +51,77 @@ func cmdUI(cfg *Config) error {
 	defer fmt.Fprint(os.Stderr, ansiShow)
 
 	kr := newKeyReader()
+	var lastFrame string
 	prevLines := 0
 	const refreshEvery = 2 * time.Second
+	forceRedraw := true
 
 	for {
 		// Reload config each loop so profile / group / tunnel edits
-		// from another terminal show up on the next refresh -- the
-		// dashboard becomes a passive monitor for the whole srv setup.
+		// from another terminal show up on the next refresh.
 		fresh, _ := LoadConfig()
 		if fresh == nil {
 			fresh = cfg
 		}
 
-		if prevLines > 0 {
-			fmt.Fprintf(os.Stderr, "\x1b[%dA\x1b[J", prevLines)
-		}
 		out := renderDashboard(fresh)
-		fmt.Fprint(os.Stderr, strings.ReplaceAll(out, "\n", "\r\n"))
-		prevLines = strings.Count(out, "\n")
+		if forceRedraw || out != lastFrame {
+			redrawDashboard(out, prevLines)
+			lastFrame = out
+			prevLines = strings.Count(out, "\n")
+			forceRedraw = false
+		}
 
 		b, ok := kr.readWithTimeout(refreshEvery)
 		if !ok {
-			continue // timeout -> refresh
+			continue // timeout -> recheck data
 		}
 		switch b {
 		case 'q', 0x03: // q / Ctrl-C
 			clearPicker(prevLines)
 			return nil
 		case 'r':
-			continue
+			forceRedraw = true
 		}
 	}
 }
 
+// redrawDashboard moves the cursor up to the start of the previous
+// frame and writes the new one over it. Crucially, the per-line erase
+// (\x1b[K -- erase from cursor to end of line) happens AFTER each
+// line's content lands, not before -- so the terminal only sees
+// "rewrite this line and trim any stale tail," never "blank this line
+// (visible flash) then refill." The whole frame is emitted in a single
+// Fprint, so most terminals render it in one paint cycle.
+//
+// A final \x1b[J (erase to end of screen) handles the case where the
+// new frame is shorter than the old (e.g. a job finished and dropped
+// out of the table) -- leftover lines below get cleaned up.
+func redrawDashboard(content string, prevLines int) {
+	var sb strings.Builder
+	if prevLines > 0 {
+		fmt.Fprintf(&sb, "\x1b[%dA\r", prevLines)
+	}
+	// "<line>\x1b[K\r\n" -- write content first, then clear any stale
+	// chars that extend past the new content on this line, then move
+	// to the next line. \x1b[2K (clear whole line) would blank the
+	// line briefly before refilling, which is what we want to avoid.
+	sb.WriteString(strings.ReplaceAll(content, "\n", "\x1b[K\r\n"))
+	sb.WriteString("\x1b[J")
+	fmt.Fprint(os.Stderr, sb.String())
+}
+
 // renderDashboard collects every section into a single multi-line
 // string. Pulled out so non-tty mode and the interactive loop share
-// the same renderer. Returns content ending with a newline.
+// the same renderer. The output is deterministic from the inputs (no
+// per-call timestamp embedded) so the refresh loop can hash-compare
+// frames and skip redraws when nothing changed.
 func renderDashboard(cfg *Config) string {
 	var sb strings.Builder
 	dashHeader(&sb)
 	dashActive(&sb, cfg)
 	dashDaemon(&sb)
+	dashMCP(&sb)
 	dashGroups(&sb, cfg)
 	dashTunnels(&sb, cfg)
 	dashJobs(&sb)
@@ -94,9 +131,7 @@ func renderDashboard(cfg *Config) string {
 }
 
 func dashHeader(sb *strings.Builder) {
-	now := time.Now().Format("15:04:05")
-	fmt.Fprintf(sb, "%ssrv ui%s   %s\n\n",
-		ansiBold, ansiReset, ansiDim+now+ansiReset)
+	fmt.Fprintf(sb, "%ssrv ui%s\n\n", ansiBold, ansiReset)
 }
 
 func dashActive(sb *strings.Builder, cfg *Config) {
@@ -215,8 +250,10 @@ func dashSessions(sb *strings.Builder) {
 	if sf == nil || len(sf.Sessions) == 0 {
 		return
 	}
-	// Only show recently-seen sessions to keep the dashboard tight --
-	// the rest still live in sessions.json and `srv sessions list`.
+	// Only sessions that have actually pinned a profile are
+	// dashboard-worthy. Unpinned sessions are created on every srv
+	// invocation by TouchSession() -- they are noise, not state.
+	// Users who want the full list still have `srv sessions list`.
 	type row struct {
 		sid     string
 		rec     *SessionRecord
@@ -225,6 +262,9 @@ func dashSessions(sb *strings.Builder) {
 	}
 	rows := make([]row, 0, len(sf.Sessions))
 	for sid, rec := range sf.Sessions {
+		if rec.Profile == nil || *rec.Profile == "" {
+			continue
+		}
 		r := row{sid: sid, rec: rec}
 		if t, ok := parseISOLike(rec.LastSeen); ok {
 			r.seen = t
@@ -232,16 +272,16 @@ func dashSessions(sb *strings.Builder) {
 		}
 		rows = append(rows, r)
 	}
+	if len(rows) == 0 {
+		return
+	}
 	sort.Slice(rows, func(i, j int) bool { return rows[i].seen.After(rows[j].seen) })
 	if len(rows) > 5 {
 		rows = rows[:5]
 	}
 	fmt.Fprintf(sb, "%sSessions (top %d)%s\n", ansiBold, len(rows), ansiReset)
 	for _, r := range rows {
-		prof := "-"
-		if r.rec.Profile != nil {
-			prof = *r.rec.Profile
-		}
+		prof := *r.rec.Profile
 		age := "?"
 		if r.hasSeen {
 			age = fmtDuration(time.Since(r.seen)) + " ago"
@@ -251,8 +291,50 @@ func dashSessions(sb *strings.Builder) {
 	fmt.Fprintln(sb)
 }
 
+// dashMCP shows whether any MCP server processes are alive (parsed
+// from the tail of mcp.log) plus the most recent tool call. Useful
+// when the dashboard sits in one terminal pane while a Claude Code
+// session in another runs MCP tools -- you can watch tool=... lines
+// arrive in near real time.
+func dashMCP(sb *strings.Builder) {
+	st := readMCPStatus()
+	if !st.LogExists {
+		// Never started an MCP server on this machine; no signal to
+		// show. Don't print an empty section.
+		return
+	}
+	fmt.Fprintf(sb, "%sMCP%s\n", ansiBold, ansiReset)
+	if len(st.ActivePIDs) == 0 {
+		// Log exists but no recent activity / no live pid. Show that
+		// MCP is idle plus the most recent activity for context.
+		if !st.LastActive.IsZero() {
+			fmt.Fprintf(sb, "  %sidle%s     last activity %s ago\n",
+				ansiDim, ansiReset, fmtDuration(time.Since(st.LastActive)))
+		} else {
+			fmt.Fprintf(sb, "  %sidle%s\n", ansiDim, ansiReset)
+		}
+	} else {
+		pids := make([]string, 0, len(st.ActivePIDs))
+		for _, p := range st.ActivePIDs {
+			pids = append(pids, strconv.Itoa(p))
+		}
+		fmt.Fprintf(sb, "  %srunning%s  pids %s\n",
+			ansiYellow, ansiReset, strings.Join(pids, ", "))
+	}
+	if st.LastTool != "" {
+		status := ansiYellow + "ok" + ansiReset
+		if !st.LastToolOK {
+			status = "\x1b[31m" + "err" + ansiReset
+		}
+		fmt.Fprintf(sb, "  last     tool=%s dur=%s %s  %s\n",
+			st.LastTool, st.LastToolDur, status,
+			ansiDim+fmtDuration(time.Since(st.LastToolAt))+" ago"+ansiReset)
+	}
+	fmt.Fprintln(sb)
+}
+
 func dashFooter(sb *strings.Builder) {
-	fmt.Fprintf(sb, "%sq quit  r refresh  (auto-refresh every 2s)%s\n",
+	fmt.Fprintf(sb, "%sq quit  r force-redraw  (auto-redraws on data change, ~2s)%s\n",
 		ansiDim, ansiReset)
 }
 
