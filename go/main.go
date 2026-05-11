@@ -83,6 +83,10 @@ Integrations:
   srv project                            show the active .srv-project pin (if any)
   srv group <list|show|set|remove>       manage named profile groups (for fan-out via -G)
   srv -G <group> <cmd>                   run cmd in parallel on every profile in <group>
+  srv tunnel add <name> [-R] <spec> [-P <profile>] [--autostart]
+                                         save a named tunnel
+  srv tunnel <up|down|list|show|remove> [name]
+                                         manage saved tunnels (up/down go through the daemon)
   srv mcp                                run as a stdio MCP server
   srv guard [on|off|status]              MCP confirmation guard for high-risk ops (default off)
   srv color [on|off|use [name]|list|status]
@@ -180,6 +184,10 @@ const helpZH = `srv - 跨平台 SSH 远端命令工具,持久 cwd / 连接复用
   srv project                            查看当前 .srv-project 自动 pin 状态
   srv group <list|show|set|remove>       管理命名 profile 组(配合 -G 使用)
   srv -G <group> <cmd>                   在组内所有 profile 上并行执行 cmd
+  srv tunnel add <name> [-R] <spec> [-P <profile>] [--autostart]
+                                         保存命名隧道
+  srv tunnel <up|down|list|show|remove> [name]
+                                         管理保存的隧道(up/down 由 daemon 托管)
   srv mcp                                以 stdio MCP server 跑
   srv guard [on|off|status]              MCP 高危操作确认开关(默认关闭,可针对当前 shell 开启)
   srv color [on|off|use [name]|list|status]

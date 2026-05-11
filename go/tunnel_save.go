@@ -1,0 +1,300 @@
+package main
+
+import (
+	"encoding/json"
+	"fmt"
+	"net"
+	"sort"
+	"strconv"
+	"time"
+)
+
+// Saved-tunnel management: persists named tunnel definitions in
+// Config.Tunnels (handled here) and talks to the daemon to bring them
+// up / down (the daemon owns the actual goroutines so the tunnel
+// outlives the CLI process).
+
+// tunnelAdd parses the same arg shape as one-shot `srv tunnel` plus a
+// leading <name> and optional --autostart, then saves the result.
+//
+//	srv tunnel add db -L 5432:db.internal:5432 -P prod --autostart
+//	srv tunnel add web 8080
+func tunnelAdd(args []string, cfg *Config, profileOverride string) error {
+	if len(args) < 2 {
+		return exitErr(2, "usage: srv tunnel add <name> [-R] <spec> [-P <profile>] [--autostart]")
+	}
+	name := args[0]
+	rest := args[1:]
+
+	def := &TunnelDef{Type: "local"}
+	if profileOverride != "" {
+		def.Profile = profileOverride
+	}
+	specSeen := false
+
+	for i := 0; i < len(rest); i++ {
+		a := rest[i]
+		switch {
+		case a == "-R" || a == "--reverse":
+			def.Type = "remote"
+		case a == "-L" || a == "--local":
+			def.Type = "local"
+		case a == "--autostart":
+			def.Autostart = true
+		case a == "-P" || a == "--profile":
+			if i+1 >= len(rest) {
+				return exitErr(2, "%s requires a value", a)
+			}
+			def.Profile = rest[i+1]
+			i++
+		case len(a) > 10 && a[:10] == "--profile=":
+			def.Profile = a[10:]
+		default:
+			if specSeen {
+				return exitErr(2, "unexpected arg %q (already have spec %q)", a, def.Spec)
+			}
+			if _, _, _, err := parseTunnelSpec(a); err != nil {
+				return exitErr(2, "bad spec %q: %v", a, err)
+			}
+			def.Spec = a
+			specSeen = true
+		}
+	}
+	if !specSeen {
+		return exitErr(2, "missing port spec (e.g. 8080 or 5432:db:5432)")
+	}
+	if def.Profile != "" {
+		if _, ok := cfg.Profiles[def.Profile]; !ok {
+			return exitErr(1, "profile %q not found", def.Profile)
+		}
+	}
+
+	if cfg.Tunnels == nil {
+		cfg.Tunnels = map[string]*TunnelDef{}
+	}
+	cfg.Tunnels[name] = def
+	if err := SaveConfig(cfg); err != nil {
+		return err
+	}
+	fmt.Printf("tunnel %q saved (%s %s", name, def.Type, def.Spec)
+	if def.Profile != "" {
+		fmt.Printf(", profile=%s", def.Profile)
+	}
+	if def.Autostart {
+		fmt.Print(", autostart")
+	}
+	fmt.Println(")")
+	return nil
+}
+
+func tunnelRemove(args []string, cfg *Config) error {
+	if len(args) < 1 {
+		return exitErr(2, "usage: srv tunnel remove <name>")
+	}
+	name := args[0]
+	if _, ok := cfg.Tunnels[name]; !ok {
+		return exitErr(1, "tunnel %q not found", name)
+	}
+	delete(cfg.Tunnels, name)
+	if err := SaveConfig(cfg); err != nil {
+		return err
+	}
+	fmt.Printf("tunnel %q removed (consider `srv tunnel down %s` to stop a running instance)\n", name, name)
+	return nil
+}
+
+// tunnelList prints saved tunnels and overlays daemon status so the
+// user sees in one shot which are defined and which are actually
+// running. Sorted by name so output is reproducible.
+func tunnelList(cfg *Config) error {
+	if len(cfg.Tunnels) == 0 {
+		fmt.Println("(no saved tunnels)")
+		return nil
+	}
+	active := loadActiveTunnels()
+	names := make([]string, 0, len(cfg.Tunnels))
+	for n := range cfg.Tunnels {
+		names = append(names, n)
+	}
+	sort.Strings(names)
+	for _, n := range names {
+		def := cfg.Tunnels[n]
+		status := "stopped"
+		listen := ""
+		if a, ok := active[n]; ok {
+			status = "running"
+			listen = a.Listen
+		}
+		flags := ""
+		if def.Autostart {
+			flags = " autostart"
+		}
+		profile := def.Profile
+		if profile == "" {
+			profile = "(default)"
+		}
+		line := fmt.Sprintf("%-16s %-7s %s %s  profile=%s%s",
+			n, def.Type, def.Spec, status, profile, flags)
+		if listen != "" {
+			line += " listen=" + listen
+		}
+		fmt.Println(line)
+	}
+	return nil
+}
+
+func tunnelShow(args []string, cfg *Config) error {
+	if len(args) < 1 {
+		return exitErr(2, "usage: srv tunnel show <name>")
+	}
+	name := args[0]
+	def, ok := cfg.Tunnels[name]
+	if !ok {
+		return exitErr(1, "tunnel %q not found", name)
+	}
+	fmt.Printf("name:      %s\n", name)
+	fmt.Printf("type:      %s\n", def.Type)
+	fmt.Printf("spec:      %s\n", def.Spec)
+	if def.Profile != "" {
+		fmt.Printf("profile:   %s\n", def.Profile)
+	} else {
+		fmt.Printf("profile:   (default at up-time)\n")
+	}
+	fmt.Printf("autostart: %v\n", def.Autostart)
+	active := loadActiveTunnels()
+	if a, ok := active[name]; ok {
+		fmt.Printf("status:    running (listen=%s, started %s)\n",
+			a.Listen, time.Unix(a.Started, 0).Format(time.RFC3339))
+	} else {
+		fmt.Printf("status:    stopped\n")
+	}
+	return nil
+}
+
+// tunnelUp asks the daemon to bring a saved tunnel up. The daemon owns
+// the goroutine so the tunnel survives this CLI process exiting.
+// ensureDaemon() is called first because the daemon must be alive to
+// host the tunnel.
+func tunnelUp(args []string) error {
+	if len(args) < 1 {
+		return exitErr(2, "usage: srv tunnel up <name>")
+	}
+	name := args[0]
+	if !ensureDaemon() {
+		return exitErr(1, "could not start daemon; tunnel up needs the daemon to host the listener")
+	}
+	conn := daemonDial(2 * time.Second)
+	if conn == nil {
+		return exitErr(1, "daemon unreachable")
+	}
+	defer conn.Close()
+	resp, err := daemonCall(conn, daemonRequest{Op: "tunnel_up", Name: name}, 10*time.Second)
+	if err != nil {
+		return exitErr(1, "daemon call: %v", err)
+	}
+	if resp == nil || !resp.OK {
+		msg := "daemon refused"
+		if resp != nil && resp.Err != "" {
+			msg = resp.Err
+		}
+		return exitErr(1, "tunnel up %s: %s", name, msg)
+	}
+	if resp.Listen != "" {
+		fmt.Printf("tunnel %q up (listening on %s)\n", name, resp.Listen)
+	} else {
+		fmt.Printf("tunnel %q up\n", name)
+	}
+	return nil
+}
+
+func tunnelDown(args []string) error {
+	if len(args) < 1 {
+		return exitErr(2, "usage: srv tunnel down <name>")
+	}
+	name := args[0]
+	conn := daemonDial(2 * time.Second)
+	if conn == nil {
+		return exitErr(1, "daemon not running (nothing to stop)")
+	}
+	defer conn.Close()
+	resp, err := daemonCall(conn, daemonRequest{Op: "tunnel_down", Name: name}, 5*time.Second)
+	if err != nil {
+		return exitErr(1, "daemon call: %v", err)
+	}
+	if resp == nil || !resp.OK {
+		msg := "daemon refused"
+		if resp != nil && resp.Err != "" {
+			msg = resp.Err
+		}
+		return exitErr(1, "tunnel down %s: %s", name, msg)
+	}
+	fmt.Printf("tunnel %q stopped\n", name)
+	return nil
+}
+
+// loadActiveTunnels asks the daemon what's currently running. Returns
+// an empty map when the daemon is down (so `srv tunnel list` still
+// shows definitions, just all "stopped").
+func loadActiveTunnels() map[string]tunnelInfo {
+	out := map[string]tunnelInfo{}
+	conn := daemonDial(500 * time.Millisecond)
+	if conn == nil {
+		return out
+	}
+	defer conn.Close()
+	resp, err := daemonCall(conn, daemonRequest{Op: "tunnel_list"}, 2*time.Second)
+	if err != nil || resp == nil || !resp.OK {
+		return out
+	}
+	for _, t := range resp.Tunnels {
+		out[t.Name] = t
+	}
+	return out
+}
+
+// applyTunnelSpec is a tiny helper used by both the one-shot path and
+// the daemon when resolving a TunnelDef into (port, host, port).
+// Returns localPort/remoteHost/remotePort -- semantics flip in the
+// caller based on TunnelDef.Type.
+func applyTunnelSpec(spec string) (int, string, int, error) {
+	return parseTunnelSpec(spec)
+}
+
+// tunnelListenLabel formats the human-facing "I'm listening here" line
+// for an active TunnelDef. Pulled out so daemon status and CLI both
+// format identically.
+func tunnelListenLabel(def *TunnelDef, profile *Profile) string {
+	lp, _, _, err := parseTunnelSpec(def.Spec)
+	if err != nil {
+		return def.Spec
+	}
+	switch def.Type {
+	case "remote":
+		// Remote listener side -- we say "remote-host:port".
+		host := "localhost"
+		if profile != nil && profile.Host != "" {
+			host = profile.Host
+		}
+		return host + ":" + strconv.Itoa(lp)
+	default:
+		return net.JoinHostPort("127.0.0.1", strconv.Itoa(lp))
+	}
+}
+
+// tunnelInfo flows from the daemon to the CLI as the "active" view of
+// one tunnel. JSON-tagged for the daemon protocol; never written to
+// disk.
+type tunnelInfo struct {
+	Name    string `json:"name"`
+	Type    string `json:"type"`
+	Spec    string `json:"spec"`
+	Profile string `json:"profile,omitempty"`
+	Listen  string `json:"listen,omitempty"`
+	Started int64  `json:"started,omitempty"`
+}
+
+// String makes tunnelInfo printable for diagnostics.
+func (t tunnelInfo) String() string {
+	b, _ := json.Marshal(t)
+	return string(b)
+}

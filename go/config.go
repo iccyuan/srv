@@ -172,6 +172,28 @@ type Config struct {
 	// config but error at use time -- a half-defined group is easier to
 	// debug than a silent no-op.
 	Groups map[string][]string `json:"groups,omitempty"`
+	// Tunnels is the catalog of named, persistable tunnels. Bring one up
+	// with `srv tunnel up <name>` (runs inside the daemon, survives the
+	// CLI exit) and tear down with `srv tunnel down`. Autostart entries
+	// come up automatically when the daemon starts.
+	Tunnels map[string]*TunnelDef `json:"tunnels,omitempty"`
+}
+
+// TunnelDef is the saved-on-disk description of one named tunnel. The
+// runtime state (active listener, started time, etc.) lives in the
+// daemon and is queried via the `tunnel_list` daemon op.
+type TunnelDef struct {
+	// Type is "local" (default; like `ssh -L`) or "remote" (`ssh -R`).
+	Type string `json:"type"`
+	// Spec uses the same forms as the one-shot CLI: "8080",
+	// "8080:9090", or "8080:host:9090".
+	Spec string `json:"spec"`
+	// Profile name to dial. Empty falls back to ResolveProfile rules at
+	// up-time so $SRV_PROFILE / `.srv-project` still apply.
+	Profile string `json:"profile,omitempty"`
+	// Autostart=true brings the tunnel up automatically when the daemon
+	// starts (typical for "always-on" things like a db port-forward).
+	Autostart bool `json:"autostart,omitempty"`
 }
 
 // HintsEnabled reports whether typo / post-failure hints should fire.

@@ -12,31 +12,63 @@ import (
 	"syscall"
 )
 
-// cmdTunnel runs a local-to-remote TCP forwarder over the SSH connection
-// (the ssh -L equivalent), or a remote-to-local forwarder with -R. Spec forms:
+// cmdTunnel dispatches between three forms:
 //
-//	N             local 127.0.0.1:N -> remote 127.0.0.1:N
-//	L:R           local 127.0.0.1:L -> remote 127.0.0.1:R
-//	L:host:R      local 127.0.0.1:L -> host:R   (resolved on the remote side)
+//	srv tunnel <spec>           -- legacy one-shot, blocks until Ctrl-C
+//	srv tunnel -R <spec>        -- same, reverse direction
+//	srv tunnel <action> [args]  -- saved-tunnel management (add/up/down/list/show/remove)
 //
-// Stops cleanly on SIGINT/SIGTERM, or when the underlying ssh connection
-// drops -- whichever comes first.
+// The action keywords are chosen to never collide with valid port specs
+// (which start with a digit or `-R`), so the old form keeps working
+// without a flag.
 func cmdTunnel(args []string, cfg *Config, profileOverride string) error {
 	if len(args) == 0 {
-		fmt.Fprintln(os.Stderr, "usage: srv tunnel [-R] <localPort>[:[<host>:]<remotePort>]")
-		fmt.Fprintln(os.Stderr, "  srv tunnel 8080            # local 8080 -> remote 127.0.0.1:8080")
-		fmt.Fprintln(os.Stderr, "  srv tunnel 8080:9090       # local 8080 -> remote 127.0.0.1:9090")
-		fmt.Fprintln(os.Stderr, "  srv tunnel 8080:db:5432    # local 8080 -> db:5432 (resolved on remote)")
-		fmt.Fprintln(os.Stderr, "  srv tunnel -R 9000:3000    # remote 9000 -> local 127.0.0.1:3000")
+		printTunnelUsage()
 		return exitCode(2)
 	}
+	switch args[0] {
+	case "add":
+		return tunnelAdd(args[1:], cfg, profileOverride)
+	case "remove", "rm":
+		return tunnelRemove(args[1:], cfg)
+	case "list", "ls":
+		return tunnelList(cfg)
+	case "show":
+		return tunnelShow(args[1:], cfg)
+	case "up":
+		return tunnelUp(args[1:])
+	case "down":
+		return tunnelDown(args[1:])
+	}
+	return cmdTunnelOneShot(args, cfg, profileOverride)
+}
+
+func printTunnelUsage() {
+	fmt.Fprintln(os.Stderr, "Forms:")
+	fmt.Fprintln(os.Stderr, "  srv tunnel [-R] <port-spec>           one-shot (blocks until Ctrl-C)")
+	fmt.Fprintln(os.Stderr, "  srv tunnel add <name> [-R] <spec> [-P <profile>] [--autostart]")
+	fmt.Fprintln(os.Stderr, "  srv tunnel up <name>                  start a saved tunnel (via daemon)")
+	fmt.Fprintln(os.Stderr, "  srv tunnel down <name>                stop a running tunnel")
+	fmt.Fprintln(os.Stderr, "  srv tunnel list                       list saved tunnels + status")
+	fmt.Fprintln(os.Stderr, "  srv tunnel show <name>                show one tunnel's definition")
+	fmt.Fprintln(os.Stderr, "  srv tunnel remove <name>              delete a saved tunnel")
+	fmt.Fprintln(os.Stderr, "Port spec:")
+	fmt.Fprintln(os.Stderr, "  N             local 127.0.0.1:N -> remote 127.0.0.1:N")
+	fmt.Fprintln(os.Stderr, "  L:R           local 127.0.0.1:L -> remote 127.0.0.1:R")
+	fmt.Fprintln(os.Stderr, "  L:host:R      local 127.0.0.1:L -> host:R (resolved on remote)")
+}
+
+// cmdTunnelOneShot is the legacy `srv tunnel <spec>` foreground form.
+// Kept verbatim so existing muscle memory keeps working; the new saved-
+// tunnel surface is opt-in via the `add` / `up` action keywords.
+func cmdTunnelOneShot(args []string, cfg *Config, profileOverride string) error {
 	reverse := false
 	if args[0] == "-R" || args[0] == "--reverse" {
 		reverse = true
 		args = args[1:]
 	}
 	if len(args) == 0 {
-		fmt.Fprintln(os.Stderr, "usage: srv tunnel [-R] <port-spec>")
+		printTunnelUsage()
 		return exitCode(2)
 	}
 	lp, rh, rp, err := parseTunnelSpec(args[0])
@@ -56,48 +88,80 @@ func cmdTunnel(args []string, cfg *Config, profileOverride string) error {
 		return exitCode(255)
 	}
 	defer c.Close()
-	if reverse {
-		return exitCode(runReverseTunnel(c, profile, lp, rh, rp))
-	}
 
-	listenAddr := net.JoinHostPort("127.0.0.1", strconv.Itoa(lp))
+	stopCh := make(chan struct{})
+	sigCh := make(chan os.Signal, 1)
+	signal.Notify(sigCh, os.Interrupt, syscall.SIGTERM)
+	defer signal.Stop(sigCh)
+	go func() {
+		select {
+		case <-sigCh:
+			fmt.Fprintln(os.Stderr, "\nsrv tunnel: stopping.")
+		case <-stopCh:
+		}
+	}()
+
+	var listenLabel string
+	var runErr error
+	if reverse {
+		listenLabel = fmt.Sprintf("%s:127.0.0.1:%d", profile.Host, lp)
+		fmt.Fprintf(os.Stderr,
+			"srv tunnel -R: %s -> local %s   (Ctrl-C to stop)\n",
+			listenLabel, net.JoinHostPort(rh, strconv.Itoa(rp)),
+		)
+		runErr = runReverseForwarder(c, lp, rh, rp, stopCh, sigCh)
+	} else {
+		listenLabel = net.JoinHostPort("127.0.0.1", strconv.Itoa(lp))
+		fmt.Fprintf(os.Stderr,
+			"srv tunnel: %s -> %s -> %s:%d   (Ctrl-C to stop)\n",
+			listenLabel, profile.Host, rh, rp,
+		)
+		runErr = runLocalForwarder(c, lp, rh, rp, stopCh, sigCh)
+	}
+	if runErr != nil {
+		fmt.Fprintln(os.Stderr, "srv tunnel:", runErr)
+		return exitCode(1)
+	}
+	return nil
+}
+
+// runLocalForwarder is the body of a local-to-remote forwarder, shared
+// by the one-shot CLI and the daemon-hosted persistent tunnel. Returns
+// when the listener closes or the ssh connection drops.
+//
+// stopCh: external close signal (daemon shutdown / explicit `tunnel
+// down`). sigCh: optional; nil under daemon, set under CLI to allow
+// Ctrl-C to break the accept loop.
+func runLocalForwarder(c *Client, localPort int, remoteHost string, remotePort int, stopCh <-chan struct{}, sigCh <-chan os.Signal) error {
+	listenAddr := net.JoinHostPort("127.0.0.1", strconv.Itoa(localPort))
 	listener, err := net.Listen("tcp", listenAddr)
 	if err != nil {
-		fmt.Fprintln(os.Stderr, "srv tunnel: listen:", err)
-		return exitCode(1)
+		return fmt.Errorf("listen %s: %w", listenAddr, err)
 	}
 	defer listener.Close()
 
-	fmt.Fprintf(os.Stderr,
-		"srv tunnel: 127.0.0.1:%d -> %s -> %s:%d   (Ctrl-C to stop)\n",
-		lp, profile.Host, rh, rp,
-	)
-
 	stopOnce := sync.Once{}
 	stop := func() { stopOnce.Do(func() { _ = listener.Close() }) }
-
-	sigCh := make(chan os.Signal, 1)
-	signal.Notify(sigCh, os.Interrupt, syscall.SIGTERM)
 	go func() {
-		<-sigCh
-		fmt.Fprintln(os.Stderr, "\nsrv tunnel: stopping.")
-		stop()
+		select {
+		case <-stopCh:
+			stop()
+		case <-sigChOrNil(sigCh):
+			stop()
+		}
 	}()
-
-	// If the SSH connection drops, every subsequent c.Conn.Dial fails;
-	// surface that and stop the listener so the user notices.
 	go func() {
 		err := c.Conn.Wait()
 		fmt.Fprintf(os.Stderr, "srv tunnel: ssh connection closed: %v\n", err)
 		stop()
 	}()
 
-	remoteAddr := net.JoinHostPort(rh, strconv.Itoa(rp))
+	remoteAddr := net.JoinHostPort(remoteHost, strconv.Itoa(remotePort))
 	var wg sync.WaitGroup
 	for {
 		local, err := listener.Accept()
 		if err != nil {
-			break // listener closed
+			break
 		}
 		wg.Add(1)
 		go func(local net.Conn) {
@@ -119,34 +183,34 @@ func cmdTunnel(args []string, cfg *Config, profileOverride string) error {
 	return nil
 }
 
-func runReverseTunnel(c *Client, profile *Profile, remotePort int, localHost string, localPort int) int {
+// runReverseForwarder mirrors runLocalForwarder for the -R direction:
+// the remote side does the listen, local dials happen per accepted
+// connection.
+func runReverseForwarder(c *Client, remotePort int, localHost string, localPort int, stopCh <-chan struct{}, sigCh <-chan os.Signal) error {
 	remoteListen := net.JoinHostPort("127.0.0.1", strconv.Itoa(remotePort))
 	listener, err := c.Conn.Listen("tcp", remoteListen)
 	if err != nil {
-		fmt.Fprintln(os.Stderr, "srv tunnel -R: remote listen:", err)
-		return 1
+		return fmt.Errorf("remote listen %s: %w", remoteListen, err)
 	}
 	defer listener.Close()
-	localAddr := net.JoinHostPort(localHost, strconv.Itoa(localPort))
-	fmt.Fprintf(os.Stderr,
-		"srv tunnel -R: %s:127.0.0.1:%d -> local %s   (Ctrl-C to stop)\n",
-		profile.Host, remotePort, localAddr,
-	)
+
 	stopOnce := sync.Once{}
 	stop := func() { stopOnce.Do(func() { _ = listener.Close() }) }
-	sigCh := make(chan os.Signal, 1)
-	signal.Notify(sigCh, os.Interrupt, syscall.SIGTERM)
-	defer signal.Stop(sigCh)
 	go func() {
-		<-sigCh
-		fmt.Fprintln(os.Stderr, "\nsrv tunnel -R: stopping.")
-		stop()
+		select {
+		case <-stopCh:
+			stop()
+		case <-sigChOrNil(sigCh):
+			stop()
+		}
 	}()
 	go func() {
 		err := c.Conn.Wait()
 		fmt.Fprintf(os.Stderr, "srv tunnel -R: ssh connection closed: %v\n", err)
 		stop()
 	}()
+
+	localAddr := net.JoinHostPort(localHost, strconv.Itoa(localPort))
 	var wg sync.WaitGroup
 	for {
 		remote, err := listener.Accept()
@@ -170,7 +234,18 @@ func runReverseTunnel(c *Client, profile *Profile, remotePort int, localHost str
 		}(remote)
 	}
 	wg.Wait()
-	return 0
+	return nil
+}
+
+// sigChOrNil returns the channel directly when non-nil; otherwise a
+// channel that never fires. Lets the same select-block work in both
+// CLI mode (with SIGINT/SIGTERM) and daemon mode (where signals are
+// already handled at the daemon level).
+func sigChOrNil(sigCh <-chan os.Signal) <-chan os.Signal {
+	if sigCh != nil {
+		return sigCh
+	}
+	return nil
 }
 
 // parseTunnelSpec turns "8080" / "8080:9090" / "8080:host:9090" into its

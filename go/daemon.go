@@ -55,6 +55,9 @@ type daemonRequest struct {
 	// from the calling shell's, so persisted cwd would be wrong. Instead
 	// the CLI sends its cwd along with each request.
 	Cwd string `json:"cwd,omitempty"`
+	// Name carries the named entity (tunnel name today) for ops that
+	// look up by name rather than by profile.
+	Name string `json:"name,omitempty"`
 }
 
 type daemonResponse struct {
@@ -71,6 +74,12 @@ type daemonResponse struct {
 	ExitCode int      `json:"exit_code,omitempty"`
 	Profiles []string `json:"profiles_pooled,omitempty"`
 	Uptime   int64    `json:"uptime_sec,omitempty"`
+	// Tunnels carries the active-tunnel snapshot returned by
+	// tunnel_list. Empty otherwise.
+	Tunnels []tunnelInfo `json:"tunnels,omitempty"`
+	// Listen is the human-readable listen address reported by
+	// tunnel_up so the CLI can echo "listening on 127.0.0.1:5432".
+	Listen string `json:"listen,omitempty"`
 }
 
 type wireErr struct {
@@ -113,6 +122,29 @@ type daemonState struct {
 	lastReq  time.Time
 	stopCh   chan struct{}
 	stopOnce sync.Once
+	// Active named tunnels. Separate mutex so a busy tunnel accept loop
+	// doesn't contend with the per-request mu used by ls / cd / run.
+	tunnelsMu sync.Mutex
+	tunnels   map[string]*activeTunnel
+}
+
+// activeTunnel is one running, daemon-hosted tunnel. The forwarder
+// goroutine watches stopCh and unwinds the listener when it fires.
+type activeTunnel struct {
+	name      string
+	def       *TunnelDef
+	profile   string
+	listen    string // human-readable listen address (cached for status)
+	startedAt time.Time
+	stopCh    chan struct{}
+	stopOnce  sync.Once
+	// done closes when the forwarder goroutine exits. Lets shutdown
+	// wait briefly for clean tear-down before yanking the daemon.
+	done chan struct{}
+}
+
+func (a *activeTunnel) stop() {
+	a.stopOnce.Do(func() { close(a.stopCh) })
 }
 
 const (
@@ -189,10 +221,16 @@ func cmdDaemon(args []string) error {
 		startedAt: time.Now(),
 		lastReq:   time.Now(),
 		stopCh:    make(chan struct{}),
+		tunnels:   map[string]*activeTunnel{},
 	}
 
 	// Background gc: close idle connections, exit if whole daemon idle.
 	go state.runGC()
+
+	// Bring up any tunnels flagged autostart=true. Failures are logged
+	// but don't block daemon startup -- a misconfigured tunnel
+	// shouldn't keep ls / cd / run from working.
+	go state.startAutostartTunnels()
 
 	// Signal handling.
 	sigCh := make(chan os.Signal, 1)
@@ -346,6 +384,12 @@ func (s *daemonState) dispatch(req daemonRequest) (resp daemonResponse) {
 		return s.handlePwd(req)
 	case "run":
 		return s.handleRun(req)
+	case "tunnel_up":
+		return s.handleTunnelUp(req)
+	case "tunnel_down":
+		return s.handleTunnelDown(req)
+	case "tunnel_list":
+		return s.handleTunnelList(req)
 	}
 	return daemonResponse{OK: false, Err: "unknown op: " + req.Op}
 }
@@ -752,6 +796,11 @@ func (s *daemonState) gc() {
 }
 
 func (s *daemonState) closeAll() {
+	// Stop tunnels first: their listeners hold references to pooled
+	// clients, so closing the pool before the tunnels would race the
+	// forwarder goroutines into "use of closed network connection"
+	// errors during shutdown.
+	s.stopAllTunnels()
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	for _, pc := range s.pool {

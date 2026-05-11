@@ -71,10 +71,14 @@ var compSpecs = map[string]compSpec{
 	"sessions":   {positions: []argSlot{{typ: argEnum, choices: []string{"list", "show", "clear", "prune"}}}},
 	"completion": {positions: []argSlot{{typ: argEnum, choices: []string{"bash", "zsh", "powershell"}}}},
 	"group":      {positions: []argSlot{{typ: argEnum, choices: []string{"list", "show", "set", "remove"}}}},
-	"guard":      {positions: []argSlot{{typ: argEnum, choices: []string{"on", "off", "status"}}}},
-	"daemon":     {positions: []argSlot{{typ: argEnum, choices: []string{"status", "stop", "restart", "logs", "prune-cache"}}}},
-	"color":      {positions: []argSlot{{typ: argEnum, choices: []string{"on", "off", "auto", "use", "list", "status"}}}},
-	"env":        {positions: []argSlot{{typ: argEnum, choices: []string{"list", "set", "unset", "clear"}}}},
+	// `srv tunnel <TAB>` lists the management actions. The one-shot
+	// numeric-port form is unconfigurable here (the catch-all takes
+	// over for anything not matching an enum value).
+	"tunnel": {positions: []argSlot{{typ: argEnum, choices: []string{"add", "remove", "list", "show", "up", "down"}}}},
+	"guard":  {positions: []argSlot{{typ: argEnum, choices: []string{"on", "off", "status"}}}},
+	"daemon": {positions: []argSlot{{typ: argEnum, choices: []string{"status", "stop", "restart", "logs", "prune-cache"}}}},
+	"color":  {positions: []argSlot{{typ: argEnum, choices: []string{"on", "off", "auto", "use", "list", "status"}}}},
+	"env":    {positions: []argSlot{{typ: argEnum, choices: []string{"list", "set", "unset", "clear"}}}},
 
 	"config": {
 		positions: []argSlot{{typ: argEnum, choices: []string{"list", "default", "global", "remove", "show", "set", "edit"}}},
