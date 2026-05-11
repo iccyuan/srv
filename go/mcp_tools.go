@@ -16,6 +16,12 @@ import (
 // tools/call) both read from `mcpTools`. Adding a tool means appending
 // a single entry below; the def-list and the dispatch switch can never
 // drift. Same OCP pattern as the CLI subcommand registry in commands.go.
+//
+// Each tool's handler is a top-level named function (`handleMCPRun`
+// etc.). The registry just pairs a toolDef with its handler, which
+// keeps the file scannable (each handler is one function, not a 100-
+// line closure buried inside a struct literal) and each handler unit-
+// testable in isolation.
 
 // mcpRunTextMax caps the combined stdout+stderr the `run` tool returns
 // to the MCP client. Beyond this, output is truncated with a marker
@@ -49,44 +55,86 @@ type toolContent struct {
 	Text string `json:"text"`
 }
 
-// runRiskyTokens are substrings that flag a remote command as
-// destructive enough to require confirm=true when the session guard is
-// on. Matched case-insensitively against the full command string. The
-// list is intentionally short and conservative -- false-positive on a
-// real `rm -rf` is fine (the model can re-issue with confirm=true);
-// false-negatives are the real concern, so we cover the canonical
-// "oh no" set: recursive force delete, raw-disk writes, mkfs, system
-// halt, SQL drops, and explicit truncates.
-var runRiskyTokens = []string{
-	"rm -rf", "rm -fr", "rm -rF", "rm -Rf", "rm -fR", "rm -RF", "rm -FR",
-	"rm --recursive --force", "rm --force --recursive",
-	"rm -r --force", "rm -f --recursive",
-	"dd of=", "dd if=/dev/zero", "dd if=/dev/random", "dd if=/dev/urandom",
-	"mkfs.", "mkfs ",
-	"shutdown ", "shutdown\n", "shutdown;",
-	" reboot", ";reboot", "&&reboot",
-	" halt", "; halt", "&& halt",
-	" poweroff", ";poweroff", "&&poweroff",
-	"drop database", "drop table", "drop schema",
-	"truncate table", "truncate -",
-	":>/", ":> /",
-	"chattr -i",
-	"> /dev/sd", "> /dev/nvme", "> /dev/disk", "> /dev/hd",
+// riskyPattern flags a remote command as destructive enough to require
+// confirm=true when the session guard is on. Each pattern is a regex
+// matched against the full command string; `name` is the human-readable
+// label surfaced to the model in the block reason.
+//
+// The list is intentionally short and conservative -- false-positives
+// are recoverable (re-issue with confirm=true), false-negatives are not.
+// We cover the canonical "oh no" set: recursive force delete, raw-disk
+// writes, mkfs, system halt, SQL drops, explicit truncates.
+//
+// Word boundaries (\b) keep us from matching `farm -rf` etc. Quoted
+// content (echo "rm -rf /") is filtered out separately by runRiskyMatch
+// via isInsideQuotes, since \b alone can't tell a real command position
+// from a string-literal occurrence.
+type riskyPattern struct {
+	name string
+	re   *regexp.Regexp
 }
 
-// runRiskyMatch reports the first risky token contained in `command`,
-// or "" if none match. Match is case-insensitive.
+var runRiskyPatterns = []riskyPattern{
+	// rm with both -r/-R and -f/-F somewhere in the flag bundle, or the
+	// long-flag equivalents. Captures -rf, -fr, -rF, -Rf, -fR, -RF, -FR,
+	// `--recursive --force` (either order), and short+long mixes.
+	{"rm -rf", regexp.MustCompile(`(?i)\brm\s+(?:-[a-zA-Z]*[rR][a-zA-Z]*[fF]\b|-[a-zA-Z]*[fF][a-zA-Z]*[rR]\b|--recursive\s+--force|--force\s+--recursive|-[rRfF]\s+--(?:recursive|force)\b|--(?:recursive|force)\s+-[rRfF]\b)`)},
+	{"dd of=/...", regexp.MustCompile(`(?i)\bdd\s+(?:[^|;&\n]*\s)?(?:of=|if=/dev/(?:zero|random|urandom)\b)`)},
+	{"mkfs", regexp.MustCompile(`(?i)\bmkfs(?:\.[a-z0-9]+)?\b`)},
+	{"shutdown", regexp.MustCompile(`(?i)\bshutdown\b`)},
+	{"reboot", regexp.MustCompile(`(?i)\breboot\b`)},
+	{"halt", regexp.MustCompile(`(?i)\bhalt\b`)},
+	{"poweroff", regexp.MustCompile(`(?i)\bpoweroff\b`)},
+	{"drop database", regexp.MustCompile(`(?i)\bdrop\s+(?:database|table|schema)\b`)},
+	{"truncate table", regexp.MustCompile(`(?i)\btruncate\s+(?:table\b|-)`)},
+	{":>/", regexp.MustCompile(`:\s*>\s*/`)},
+	{"chattr -i", regexp.MustCompile(`(?i)\bchattr\s+-i\b`)},
+	{"> /dev/disk", regexp.MustCompile(`>\s*/dev/(?:sd|nvme|disk|hd)`)},
+}
+
+// runRiskyMatch reports the name of the first risky pattern present in
+// `command`, or "" if none. Matches inside single- or double-quoted
+// strings (e.g. `echo "rm -rf foo"`) are skipped -- they're operands,
+// not commands. Quote tracking is best-effort: it handles common shell
+// quoting but doesn't try to mirror full POSIX rules.
 func runRiskyMatch(command string) string {
 	if command == "" {
 		return ""
 	}
-	lc := strings.ToLower(command)
-	for _, t := range runRiskyTokens {
-		if strings.Contains(lc, strings.ToLower(t)) {
-			return t
+	for _, p := range runRiskyPatterns {
+		for _, loc := range p.re.FindAllStringIndex(command, -1) {
+			if !isInsideQuotes(command, loc[0]) {
+				return p.name
+			}
 		}
 	}
 	return ""
+}
+
+// isInsideQuotes reports whether byte offset `pos` in `s` falls inside
+// a `"..."` or `'...'` quoted region. Tracks backslash escapes inside
+// double quotes (POSIX rule); single quotes are literal. Heredocs and
+// $'...' are not modeled -- treating their contents as "real command"
+// favors safety (catch the risky token) over precision.
+func isInsideQuotes(s string, pos int) bool {
+	inDouble, inSingle, escape := false, false, false
+	for i := 0; i < pos && i < len(s); i++ {
+		c := s[i]
+		if escape {
+			escape = false
+			continue
+		}
+		if c == '\\' && inDouble {
+			escape = true
+			continue
+		}
+		if c == '"' && !inSingle {
+			inDouble = !inDouble
+		} else if c == '\'' && !inDouble {
+			inSingle = !inSingle
+		}
+	}
+	return inDouble || inSingle
 }
 
 // mcpTextErr wraps a plain string as an isError tool result. Used by
@@ -106,10 +154,17 @@ var runLongWaitSleep = regexp.MustCompile(`\bsleep\s+(\d+(?:\.\d+)?)\b`)
 
 // runForeverPatterns are commands that don't terminate on their own.
 // `tail -f`, `watch`, and `journalctl -f` are the canonical sins.
+//
+// `[^;&|\n]*?` allows arbitrary intervening flags (`journalctl -u nginx -f`,
+// `tail -n 100 -f log`) while still stopping at shell separators -- so
+// `echo hi; journalctl -u svc -f` triggers, but a quoted argument cannot
+// hop the separator boundary. Note: case-sensitive `-f` -- we do not
+// flag `tail -F` (retry-on-truncate), which has legitimate non-blocking
+// uses in scripted contexts.
 var runForeverPatterns = []*regexp.Regexp{
-	regexp.MustCompile(`\btail\s+(?:-[^|>;&\s]*)?(?:-f|--follow)\b`),
+	regexp.MustCompile(`\btail\b[^;&|\n]*?\s(?:-f|--follow)\b`),
 	regexp.MustCompile(`\bwatch\s+`),
-	regexp.MustCompile(`\bjournalctl\s+(?:-[^|>;&\s]*)?(?:-f|--follow)\b`),
+	regexp.MustCompile(`\bjournalctl\b[^;&|\n]*?\s(?:-f|--follow)\b`),
 }
 
 // runRejectSync inspects a command planned for synchronous execution and
@@ -200,6 +255,906 @@ func intSchema(def int, desc string) map[string]any {
 	return out
 }
 
+// resolveMCPProfile is the per-handler wrapper around ResolveProfile.
+// Returns (name, profile, nil) on success or ("", nil, errResult) when
+// resolution fails -- callers `return *errResult` to short-circuit.
+// This replaces the 12-call repetition of ResolveProfile + mcpTextErr
+// across the registry.
+func resolveMCPProfile(cfg *Config, override string) (string, *Profile, *toolResult) {
+	name, prof, err := ResolveProfile(cfg, override)
+	if err != nil {
+		r := mcpTextErr(err.Error())
+		return "", nil, &r
+	}
+	return name, prof, nil
+}
+
+// guardCheckRisky returns a blocking toolResult when the session guard
+// is on AND `cmd` matches a high-risk pattern AND the caller didn't
+// pass confirm=true. Returns nil to mean "allowed". Used by `run`,
+// `detach`, and any other tool that ferries a raw shell command to the
+// remote.
+func guardCheckRisky(tool, cmd string, confirm bool) *toolResult {
+	if !GuardOn() || confirm {
+		return nil
+	}
+	pat := runRiskyMatch(cmd)
+	if pat == "" {
+		return nil
+	}
+	r := guardBlocked(tool, fmt.Sprintf("command contains a high-risk pattern %q", pat))
+	return &r
+}
+
+// -----------------------------------------------------------------------------
+// Named tool handlers. Each function below is the handler for one MCP tool
+// and is referenced from the `mcpTools` registry at the bottom of the file.
+// Signatures match mcpToolHandler so they're interchangeable with the
+// dispatch loop.
+// -----------------------------------------------------------------------------
+
+func handleMCPRun(args map[string]any, cfg *Config, profileOverride string) toolResult {
+	cmd, _ := args["command"].(string)
+	if cmd == "" {
+		return mcpTextErr("error: command is required")
+	}
+	confirm, _ := args["confirm"].(bool)
+	if blocked := guardCheckRisky("run", cmd, confirm); blocked != nil {
+		return *blocked
+	}
+	profName, prof, errResult := resolveMCPProfile(cfg, profileOverride)
+	if errResult != nil {
+		return *errResult
+	}
+	background, _ := args["background"].(bool)
+	if background {
+		rec, err := spawnDetached(profName, prof, cmd)
+		if err != nil {
+			return mcpTextErr(err.Error())
+		}
+		return mcpDetachedResult(rec)
+	}
+	// Hard-reject sync calls that would block the MCP turn for too
+	// long. Description tells the model what to do instead; this
+	// catches the case where it ignored that and went with the
+	// reflex sleep+poll pattern anyway.
+	if why := runRejectSync(cmd); why != "" {
+		return mcpTextErr(runRejectMessage(cmd, why))
+	}
+	cwd := GetCwd(profName, prof)
+	res, _ := runRemoteCapture(prof, cwd, cmd)
+	text, truncatedBytes := buildMCPRunText(res, cwd)
+	structured := map[string]any{
+		"exit_code": res.ExitCode,
+		"cwd":       cwd,
+	}
+	if truncatedBytes > 0 {
+		structured["truncated_bytes"] = truncatedBytes
+	}
+	return toolResult{
+		Content:           []toolContent{{Type: "text", Text: text}},
+		IsError:           res.ExitCode != 0,
+		StructuredContent: structured,
+	}
+}
+
+func handleMCPCd(args map[string]any, cfg *Config, profileOverride string) toolResult {
+	path, _ := args["path"].(string)
+	profName, prof, errResult := resolveMCPProfile(cfg, profileOverride)
+	if errResult != nil {
+		return *errResult
+	}
+	newCwd, err := changeRemoteCwd(profName, prof, path)
+	if err != nil {
+		return mcpTextErr(err.Error())
+	}
+	return toolResult{
+		Content:           []toolContent{{Type: "text", Text: newCwd}},
+		StructuredContent: map[string]any{"cwd": newCwd, "profile": profName},
+	}
+}
+
+func handleMCPPwd(args map[string]any, cfg *Config, profileOverride string) toolResult {
+	profName, prof, errResult := resolveMCPProfile(cfg, profileOverride)
+	if errResult != nil {
+		return *errResult
+	}
+	cwd := GetCwd(profName, prof)
+	return toolResult{
+		Content:           []toolContent{{Type: "text", Text: cwd}},
+		StructuredContent: map[string]any{"cwd": cwd, "profile": profName},
+	}
+}
+
+func handleMCPUse(args map[string]any, cfg *Config, profileOverride string) toolResult {
+	clear, _ := args["clear"].(bool)
+	if clear {
+		sid, _ := SetSessionProfile("")
+		return toolResult{
+			Content:           []toolContent{{Type: "text", Text: fmt.Sprintf("session %s: unpinned", sid)}},
+			StructuredContent: map[string]any{"session": sid, "profile": nil},
+		}
+	}
+	target, _ := args["profile"].(string)
+	if target == "" {
+		sid, rec := TouchSession()
+		info := map[string]any{
+			"session": sid,
+			"pinned":  nil,
+			"default": cfg.DefaultProfile,
+		}
+		if rec.Profile != nil {
+			info["pinned"] = *rec.Profile
+		}
+		b, _ := json.MarshalIndent(info, "", "  ")
+		return toolResult{
+			Content:           []toolContent{{Type: "text", Text: string(b)}},
+			StructuredContent: info,
+		}
+	}
+	if _, ok := cfg.Profiles[target]; !ok {
+		return mcpTextErr(fmt.Sprintf("profile %q not found", target))
+	}
+	sid, _ := SetSessionProfile(target)
+	return toolResult{
+		Content:           []toolContent{{Type: "text", Text: fmt.Sprintf("session %s: pinned to %q", sid, target)}},
+		StructuredContent: map[string]any{"session": sid, "profile": target},
+	}
+}
+
+func handleMCPStatus(args map[string]any, cfg *Config, profileOverride string) toolResult {
+	profName, prof, errResult := resolveMCPProfile(cfg, profileOverride)
+	if errResult != nil {
+		return *errResult
+	}
+	sid, rec := TouchSession()
+	var pinned any
+	if rec.Profile != nil {
+		pinned = *rec.Profile
+	}
+	multiplex := prof.Multiplex == nil || *prof.Multiplex
+	return mcpJSONResult(map[string]any{
+		"profile":       profName,
+		"pinned":        pinned,
+		"host":          prof.Host,
+		"user":          prof.User,
+		"port":          prof.GetPort(),
+		"identity_file": prof.IdentityFile,
+		"cwd":           GetCwd(profName, prof),
+		"session":       sid,
+		"multiplex":     multiplex,
+		"compression":   prof.GetCompression(),
+		"guard":         GuardOn(),
+	})
+}
+
+func handleMCPListProfiles(args map[string]any, cfg *Config, profileOverride string) toolResult {
+	sid, rec := TouchSession()
+	var pinned any
+	if rec.Profile != nil {
+		pinned = *rec.Profile
+	}
+	names := make([]string, 0, len(cfg.Profiles))
+	for n := range cfg.Profiles {
+		names = append(names, n)
+	}
+	return mcpJSONResult(map[string]any{
+		"default":  cfg.DefaultProfile,
+		"pinned":   pinned,
+		"session":  sid,
+		"profiles": names,
+	})
+}
+
+func handleMCPCheck(args map[string]any, cfg *Config, profileOverride string) toolResult {
+	profName, prof, errResult := resolveMCPProfile(cfg, profileOverride)
+	if errResult != nil {
+		return *errResult
+	}
+	res := runCheck(prof)
+	var advice []string
+	if !res.OK {
+		advice = checkAdvice(res.Diagnosis, prof, profName)
+	}
+	info := map[string]any{
+		"profile":   profName,
+		"host":      prof.Host,
+		"user":      prof.User,
+		"port":      prof.GetPort(),
+		"ok":        res.OK,
+		"diagnosis": res.Diagnosis,
+		"exit_code": res.ExitCode,
+	}
+	var text string
+	if res.OK {
+		target := prof.Host
+		if prof.User != "" {
+			target = prof.User + "@" + prof.Host
+		}
+		text = fmt.Sprintf("OK -- %s: %s key auth works.", profName, target)
+	} else {
+		text = fmt.Sprintf("FAIL (%s): %s\n\n%s", res.Diagnosis,
+			strings.TrimSpace(res.Stderr), strings.Join(advice, "\n"))
+	}
+	return toolResult{
+		Content:           []toolContent{{Type: "text", Text: text}},
+		IsError:           !res.OK,
+		StructuredContent: info,
+	}
+}
+
+func handleMCPDoctor(args map[string]any, cfg *Config, profileOverride string) toolResult {
+	checks, ok := doctorChecks(cfg, profileOverride)
+	res := mcpJSONResult(map[string]any{"ok": ok, "checks": checks})
+	res.IsError = !ok
+	return res
+}
+
+func handleMCPDaemonStatus(args map[string]any, cfg *Config, profileOverride string) toolResult {
+	conn := daemonDial(time.Second)
+	if conn == nil {
+		return mcpJSONResult(map[string]any{"running": false})
+	}
+	defer conn.Close()
+	resp, err := daemonCall(conn, daemonRequest{Op: "status"}, 2*time.Second)
+	if err != nil || resp == nil {
+		return mcpTextErr(fmt.Sprintf("daemon status failed: %v", err))
+	}
+	return mcpJSONResult(map[string]any{
+		"running":         true,
+		"uptime_sec":      resp.Uptime,
+		"profiles_pooled": resp.Profiles,
+		"protocol":        resp.V,
+	})
+}
+
+func handleMCPEnv(args map[string]any, cfg *Config, profileOverride string) toolResult {
+	action, _ := args["action"].(string)
+	if action == "" {
+		action = "list"
+	}
+	profName, prof, errResult := resolveMCPProfile(cfg, profileOverride)
+	if errResult != nil {
+		return *errResult
+	}
+	key, _ := args["key"].(string)
+	value, _ := args["value"].(string)
+	switch action {
+	case "list":
+	case "set":
+		if key == "" {
+			return mcpTextErr("key is required")
+		}
+		if prof.Env == nil {
+			prof.Env = map[string]string{}
+		}
+		prof.Env[key] = value
+		if err := SaveConfig(cfg); err != nil {
+			return mcpTextErr(err.Error())
+		}
+	case "unset":
+		if key == "" {
+			return mcpTextErr("key is required")
+		}
+		delete(prof.Env, key)
+		if err := SaveConfig(cfg); err != nil {
+			return mcpTextErr(err.Error())
+		}
+	case "clear":
+		prof.Env = nil
+		if err := SaveConfig(cfg); err != nil {
+			return mcpTextErr(err.Error())
+		}
+	default:
+		return mcpTextErr("unknown env action")
+	}
+	return mcpJSONResult(map[string]any{"profile": profName, "env": prof.Env})
+}
+
+func handleMCPDiff(args map[string]any, cfg *Config, profileOverride string) toolResult {
+	local, _ := args["local"].(string)
+	if local == "" {
+		return mcpTextErr("local is required")
+	}
+	remote, _ := args["remote"].(string)
+	text, rc, err := diffLocalRemote(cfg, profileOverride, local, remote)
+	if err != nil {
+		return mcpTextErr(err.Error())
+	}
+	return toolResult{
+		Content:           []toolContent{{Type: "text", Text: text}},
+		IsError:           rc != 0,
+		StructuredContent: map[string]any{"exit_code": rc, "local": local, "remote": remote},
+	}
+}
+
+func handleMCPPush(args map[string]any, cfg *Config, profileOverride string) toolResult {
+	local, _ := args["local"].(string)
+	if local == "" {
+		return mcpTextErr("local is required")
+	}
+	if _, err := os.Stat(local); err != nil {
+		return mcpTextErr(fmt.Sprintf("local path missing: %q", local))
+	}
+	profName, prof, errResult := resolveMCPProfile(cfg, profileOverride)
+	if errResult != nil {
+		return *errResult
+	}
+	cwd := GetCwd(profName, prof)
+	remote, _ := args["remote"].(string)
+	if remote == "" {
+		remote = filepath.Base(local)
+	}
+	abs := resolveRemotePath(remote, cwd)
+	st, _ := os.Stat(local)
+	recursive := false
+	if rb, ok := args["recursive"].(bool); ok {
+		recursive = rb
+	}
+	if st != nil && st.IsDir() {
+		recursive = true
+	}
+	start := time.Now()
+	rc, finalRemote, perr := pushPath(prof, local, abs, recursive)
+	duration := time.Since(start)
+	var bytes int64
+	if rc == 0 {
+		bytes = sumLocalSize(local)
+	}
+	var text string
+	if rc == 0 {
+		text = fmt.Sprintf("uploaded %s -> %s [exit 0]%s", local, finalRemote, fmtRate(bytes, duration))
+	} else {
+		text = fmt.Sprintf("upload FAILED %s -> %s [exit %d]", local, finalRemote, rc)
+		if perr != nil {
+			text += ": " + perr.Error()
+		}
+	}
+	structured := map[string]any{
+		"exit_code":        rc,
+		"remote":           finalRemote,
+		"local":            local,
+		"duration_seconds": duration.Seconds(),
+	}
+	if rc == 0 {
+		structured["bytes_transferred"] = bytes
+	}
+	return toolResult{
+		Content:           []toolContent{{Type: "text", Text: text}},
+		IsError:           rc != 0,
+		StructuredContent: structured,
+	}
+}
+
+func handleMCPPull(args map[string]any, cfg *Config, profileOverride string) toolResult {
+	remote, _ := args["remote"].(string)
+	if remote == "" {
+		return mcpTextErr("remote is required")
+	}
+	profName, prof, errResult := resolveMCPProfile(cfg, profileOverride)
+	if errResult != nil {
+		return *errResult
+	}
+	cwd := GetCwd(profName, prof)
+	local, _ := args["local"].(string)
+	if local == "" {
+		local = "."
+	}
+	abs := resolveRemotePath(remote, cwd)
+	recursive := false
+	if rb, ok := args["recursive"].(bool); ok {
+		recursive = rb
+	}
+	start := time.Now()
+	rc, finalLocal, perr := pullPath(prof, abs, local, recursive)
+	duration := time.Since(start)
+	var bytes int64
+	if rc == 0 {
+		bytes = sumLocalSize(finalLocal)
+	}
+	var text string
+	if rc == 0 {
+		text = fmt.Sprintf("downloaded %s -> %s [exit 0]%s", abs, finalLocal, fmtRate(bytes, duration))
+	} else {
+		text = fmt.Sprintf("download FAILED %s -> %s [exit %d]", abs, finalLocal, rc)
+		if perr != nil {
+			text += ": " + perr.Error()
+		}
+	}
+	structured := map[string]any{
+		"exit_code":        rc,
+		"remote":           abs,
+		"local":            finalLocal,
+		"duration_seconds": duration.Seconds(),
+	}
+	if rc == 0 {
+		structured["bytes_transferred"] = bytes
+	}
+	return toolResult{
+		Content:           []toolContent{{Type: "text", Text: text}},
+		IsError:           rc != 0,
+		StructuredContent: structured,
+	}
+}
+
+func handleMCPSync(args map[string]any, cfg *Config, profileOverride string) toolResult {
+	profName, prof, errResult := resolveMCPProfile(cfg, profileOverride)
+	if errResult != nil {
+		return *errResult
+	}
+	o := &syncOpts{gitScope: "all"}
+	if v, ok := args["remote_root"].(string); ok {
+		o.remoteRoot = v
+	}
+	if v, ok := args["mode"].(string); ok {
+		o.mode = v
+	}
+	if v, ok := args["git_scope"].(string); ok {
+		o.gitScope = v
+	}
+	if v, ok := args["since"].(string); ok {
+		o.since = v
+	}
+	if v, ok := args["root"].(string); ok {
+		o.root = v
+	}
+	if v, ok := args["dry_run"].(bool); ok {
+		o.dryRun = v
+	}
+	if v, ok := args["delete"].(bool); ok {
+		o.delete = v
+	}
+	if v, ok := args["yes"].(bool); ok {
+		o.yes = v
+	}
+	if o.delete && !o.dryRun && GuardOn() {
+		confirm, _ := args["confirm"].(bool)
+		if !confirm {
+			return guardBlocked("sync",
+				"delete=true would remove remote files")
+		}
+	}
+	if v, ok := args["delete_limit"].(float64); ok {
+		o.deleteLimit = int(v)
+	}
+	if v, ok := args["include"].([]any); ok {
+		for _, x := range v {
+			if s, ok := x.(string); ok {
+				o.include = append(o.include, s)
+			}
+		}
+	}
+	if v, ok := args["exclude"].([]any); ok {
+		for _, x := range v {
+			if s, ok := x.(string); ok {
+				o.exclude = append(o.exclude, s)
+			}
+		}
+	}
+	if v, ok := args["files"].([]any); ok {
+		for _, x := range v {
+			if s, ok := x.(string); ok {
+				o.files = append(o.files, s)
+			}
+		}
+	}
+	localRoot := o.root
+	if localRoot == "" {
+		localRoot = findGitRoot(mustCwd())
+		if localRoot == "" {
+			localRoot = mustCwd()
+		}
+	}
+	if o.mode == "" {
+		if findGitRoot(localRoot) != "" {
+			o.mode = "git"
+		} else if len(o.include) > 0 {
+			o.mode = "glob"
+		} else if o.since != "" {
+			o.mode = "mtime"
+		} else if len(o.files) > 0 {
+			o.mode = "list"
+		} else {
+			return mcpTextErr("no mode resolved (not a git repo and no include/since/files)")
+		}
+	}
+	cwd := GetCwd(profName, prof)
+	remoteRoot := cwd
+	if o.remoteRoot != "" {
+		remoteRoot = resolveRemotePath(o.remoteRoot, cwd)
+	} else if prof.SyncRoot != "" {
+		remoteRoot = resolveRemotePath(prof.SyncRoot, cwd)
+	}
+	allExcludes := append([]string{}, o.exclude...)
+	allExcludes = append(allExcludes, prof.SyncExclude...)
+	allExcludes = append(allExcludes, defaultSyncExcludes...)
+	files, err := collectSyncFiles(o, localRoot, allExcludes)
+	if err != nil {
+		return mcpTextErr(err.Error())
+	}
+	deletes, err := collectSyncDeletes(o, localRoot, allExcludes)
+	if err != nil {
+		return mcpTextErr(err.Error())
+	}
+	limit := o.deleteLimit
+	if limit == 0 {
+		limit = 20
+	}
+	if len(deletes) > limit && !o.dryRun && !o.yes {
+		return mcpTextErr(fmt.Sprintf("sync delete would remove %d files (limit %d). Re-run dry_run=true, yes=true, or set delete_limit.", len(deletes), limit))
+	}
+	if len(files) == 0 && len(deletes) == 0 {
+		return toolResult{
+			Content:           []toolContent{{Type: "text", Text: "(nothing to sync)"}},
+			StructuredContent: map[string]any{"files": []string{}, "deletes": deletes, "remote_root": remoteRoot, "exit_code": 0},
+		}
+	}
+	if o.dryRun {
+		text := fmt.Sprintf("would sync %d files to %s\n", len(files), remoteRoot)
+		lim := len(files)
+		if lim > 200 {
+			lim = 200
+		}
+		text += strings.Join(files[:lim], "\n")
+		if len(files) > 200 {
+			text += fmt.Sprintf("\n... (%d more)", len(files)-200)
+		}
+		if len(deletes) > 0 {
+			text += "\nwould delete:\n" + strings.Join(deletes, "\n")
+		}
+		return toolResult{
+			Content: []toolContent{{Type: "text", Text: text}},
+			StructuredContent: map[string]any{
+				"files_count":   len(files),
+				"deletes_count": len(deletes),
+				"remote_root":   remoteRoot,
+				"dry_run":       true,
+			},
+		}
+	}
+	rc := 0
+	var terr error
+	start := time.Now()
+	if len(files) > 0 {
+		rc, terr = tarUploadStream(prof, localRoot, files, remoteRoot)
+	}
+	if rc == 0 && len(deletes) > 0 {
+		rc, terr = deleteRemoteFiles(prof, remoteRoot, deletes)
+	}
+	duration := time.Since(start)
+	var bytes int64
+	if rc == 0 {
+		for _, f := range files {
+			if st, err := os.Stat(filepath.Join(localRoot, f)); err == nil {
+				bytes += st.Size()
+			}
+		}
+	}
+	var text string
+	if rc == 0 {
+		text = fmt.Sprintf("synced %d files to %s [exit 0]%s", len(files), remoteRoot, fmtRate(bytes, duration))
+	} else {
+		text = fmt.Sprintf("sync FAILED to %s [exit %d]; %d files were NOT transferred -- verify with `run \"ls -la %s\"` before assuming",
+			remoteRoot, rc, len(files), remoteRoot)
+	}
+	if terr != nil {
+		text += ": " + terr.Error()
+	}
+	structured := map[string]any{
+		"files_count":      len(files),
+		"deletes_count":    len(deletes),
+		"remote_root":      remoteRoot,
+		"exit_code":        rc,
+		"duration_seconds": duration.Seconds(),
+	}
+	if rc == 0 {
+		structured["bytes_transferred"] = bytes
+	}
+	return toolResult{
+		Content:           []toolContent{{Type: "text", Text: text}},
+		IsError:           rc != 0,
+		StructuredContent: structured,
+	}
+}
+
+func handleMCPSyncDeleteDryRun(args map[string]any, cfg *Config, profileOverride string) toolResult {
+	profName, prof, errResult := resolveMCPProfile(cfg, profileOverride)
+	if errResult != nil {
+		return *errResult
+	}
+	root, _ := args["root"].(string)
+	if root == "" {
+		root = findGitRoot(mustCwd())
+	}
+	if root == "" {
+		return mcpTextErr("not in a git repo")
+	}
+	root, _ = filepath.Abs(root)
+	o := &syncOpts{mode: "git", gitScope: "all", delete: true, dryRun: true}
+	allExcludes := append([]string{}, prof.SyncExclude...)
+	allExcludes = append(allExcludes, defaultSyncExcludes...)
+	deletes, err := collectSyncDeletes(o, root, allExcludes)
+	if err != nil {
+		return mcpTextErr(err.Error())
+	}
+	cwd := GetCwd(profName, prof)
+	remoteRoot := cwd
+	if v, _ := args["remote_root"].(string); v != "" {
+		remoteRoot = resolveRemotePath(v, cwd)
+	} else if prof.SyncRoot != "" {
+		remoteRoot = resolveRemotePath(prof.SyncRoot, cwd)
+	}
+	text := fmt.Sprintf("would delete %d files from %s\n%s", len(deletes), remoteRoot, strings.Join(deletes, "\n"))
+	return toolResult{
+		Content: []toolContent{{Type: "text", Text: text}},
+		StructuredContent: map[string]any{
+			"deletes_count": len(deletes),
+			"remote_root":   remoteRoot,
+			"dry_run":       true,
+		},
+	}
+}
+
+func handleMCPDetach(args map[string]any, cfg *Config, profileOverride string) toolResult {
+	cmd, _ := args["command"].(string)
+	if cmd == "" {
+		return mcpTextErr("command is required")
+	}
+	confirm, _ := args["confirm"].(bool)
+	if blocked := guardCheckRisky("detach", cmd, confirm); blocked != nil {
+		return *blocked
+	}
+	profName, prof, errResult := resolveMCPProfile(cfg, profileOverride)
+	if errResult != nil {
+		return *errResult
+	}
+	rec, err := spawnDetached(profName, prof, cmd)
+	if err != nil {
+		return mcpTextErr(err.Error())
+	}
+	return mcpDetachedResult(rec)
+}
+
+func handleMCPListJobs(args map[string]any, cfg *Config, profileOverride string) toolResult {
+	jobs := loadJobsFile().Jobs
+	if profileOverride != "" {
+		out := jobs[:0]
+		for _, j := range jobs {
+			if j.Profile == profileOverride {
+				out = append(out, j)
+			}
+		}
+		jobs = out
+	}
+	return mcpJSONResult(map[string]any{"jobs": jobs})
+}
+
+func handleMCPTailLog(args map[string]any, cfg *Config, profileOverride string) toolResult {
+	jid, _ := args["id"].(string)
+	lines := 200
+	if v, ok := args["lines"].(float64); ok {
+		lines = int(v)
+	}
+	jobs := loadJobsFile()
+	j := findJob(jobs, jid)
+	if j == nil {
+		return mcpTextErr(fmt.Sprintf("no such job %q", jid))
+	}
+	prof, ok := cfg.Profiles[j.Profile]
+	if !ok {
+		return mcpTextErr(fmt.Sprintf("profile %q not found", j.Profile))
+	}
+	res, _ := runRemoteCapture(prof, "", fmt.Sprintf("tail -n %d %s", lines, j.Log))
+	text := res.Stdout
+	if text == "" {
+		text = res.Stderr
+	}
+	return toolResult{
+		Content:           []toolContent{{Type: "text", Text: text}},
+		IsError:           res.ExitCode != 0,
+		StructuredContent: map[string]any{"job_id": j.ID, "exit_code": res.ExitCode},
+	}
+}
+
+func handleMCPWaitJob(args map[string]any, cfg *Config, profileOverride string) toolResult {
+	jid, _ := args["id"].(string)
+	maxWait := mcpWaitJobDefaultSeconds
+	if v, ok := args["max_wait_seconds"].(float64); ok && v > 0 {
+		maxWait = int(v)
+	}
+	if maxWait > mcpWaitJobMaxSeconds {
+		maxWait = mcpWaitJobMaxSeconds
+	}
+	tailLines := 50
+	if v, ok := args["tail_lines"].(float64); ok && v > 0 {
+		tailLines = int(v)
+	}
+	jobs := loadJobsFile()
+	j := findJob(jobs, jid)
+	if j == nil {
+		return mcpTextErr(fmt.Sprintf("no such job %q", jid))
+	}
+	prof, ok := cfg.Profiles[j.Profile]
+	if !ok {
+		return mcpTextErr(fmt.Sprintf("profile %q not found", j.Profile))
+	}
+	// One remote round-trip drives the whole wait loop. Bash spins
+	// for up to maxWait seconds, checking each second for either
+	// the .exit marker (job finished, capture exit code) or the
+	// PID being gone without an .exit (got killed externally).
+	// Either resolution prints `STATUS=...` on the first line plus
+	// the log tail; if maxWait elapses the same shape is returned
+	// with STATUS=running so the model can loop.
+	exitFile := fmt.Sprintf("~/.srv-jobs/%s.exit", j.ID)
+	script := fmt.Sprintf(`for i in $(seq 1 %d); do
+  if [ -f %s ]; then
+    code=$(cat %s)
+    printf 'STATUS=completed EXIT=%%s\n' "$code"
+    tail -n %d %s
+    exit 0
+  fi
+  if ! kill -0 %d 2>/dev/null; then
+    echo STATUS=killed
+    tail -n %d %s
+    exit 0
+  fi
+  sleep 1
+done
+echo STATUS=running
+tail -n %d %s
+`, maxWait, exitFile, exitFile, tailLines, j.Log, j.Pid, tailLines, j.Log, tailLines, j.Log)
+	start := time.Now()
+	res, _ := runRemoteCapture(prof, "", script)
+	waited := time.Since(start).Seconds()
+
+	lines := strings.SplitN(res.Stdout, "\n", 2)
+	statusLine := ""
+	body := ""
+	if len(lines) > 0 {
+		statusLine = lines[0]
+	}
+	if len(lines) > 1 {
+		body = lines[1]
+	}
+	status := "unknown"
+	exitCode := -1
+	if strings.HasPrefix(statusLine, "STATUS=completed") {
+		status = "completed"
+		if i := strings.Index(statusLine, "EXIT="); i >= 0 {
+			if n, err := strconv.Atoi(strings.TrimSpace(statusLine[i+5:])); err == nil {
+				exitCode = n
+			}
+		}
+		// Job finished -- prune from local registry so list_jobs
+		// doesn't keep advertising it. The .log / .exit files on
+		// the remote stay; users can still tail historical logs
+		// manually if they want.
+		out := jobs.Jobs[:0]
+		for _, x := range jobs.Jobs {
+			if x.ID != j.ID {
+				out = append(out, x)
+			}
+		}
+		jobs.Jobs = out
+		_ = saveJobsFile(jobs)
+	} else if strings.HasPrefix(statusLine, "STATUS=killed") {
+		status = "killed"
+	} else if strings.HasPrefix(statusLine, "STATUS=running") {
+		status = "running"
+	}
+
+	var hint string
+	switch status {
+	case "completed":
+		hint = fmt.Sprintf("[%s exit=%d after %.1fs]", status, exitCode, waited)
+	case "running":
+		hint = fmt.Sprintf("[%s after %.1fs -- call wait_job again to keep waiting, or kill_job to stop]", status, waited)
+	default:
+		hint = fmt.Sprintf("[%s after %.1fs]", status, waited)
+	}
+	text := hint
+	if body != "" {
+		text += "\n" + body
+	}
+	structured := map[string]any{
+		"job_id":         j.ID,
+		"status":         status,
+		"waited_seconds": waited,
+	}
+	if status == "completed" {
+		structured["exit_code"] = exitCode
+	}
+	return toolResult{
+		Content:           []toolContent{{Type: "text", Text: text}},
+		IsError:           status == "killed" || (status == "completed" && exitCode != 0),
+		StructuredContent: structured,
+	}
+}
+
+func handleMCPListDir(args map[string]any, cfg *Config, profileOverride string) toolResult {
+	path, _ := args["path"].(string)
+	dirsOnly, _ := args["dirs_only"].(bool)
+	limit := 500
+	if v, ok := args["limit"].(float64); ok && v > 0 {
+		limit = int(v)
+	}
+	entries, err := listRemoteEntries(path, cfg, profileOverride)
+	if err != nil {
+		return mcpTextErr(err.Error())
+	}
+	if dirsOnly {
+		kept := entries[:0]
+		for _, e := range entries {
+			if strings.HasSuffix(e, "/") {
+				kept = append(kept, e)
+			}
+		}
+		entries = kept
+	}
+	truncated := 0
+	if len(entries) > limit {
+		truncated = len(entries) - limit
+		entries = entries[:limit]
+	}
+	text := strings.Join(entries, "\n")
+	if text != "" {
+		text += "\n"
+	}
+	structured := map[string]any{
+		"entries": entries,
+		"count":   len(entries),
+	}
+	if truncated > 0 {
+		structured["truncated_count"] = truncated
+	}
+	return toolResult{
+		Content:           []toolContent{{Type: "text", Text: text}},
+		StructuredContent: structured,
+	}
+}
+
+func handleMCPKillJob(args map[string]any, cfg *Config, profileOverride string) toolResult {
+	jid, _ := args["id"].(string)
+	sig, _ := args["signal"].(string)
+	if sig == "" {
+		sig = "TERM"
+	}
+	jobs := loadJobsFile()
+	j := findJob(jobs, jid)
+	if j == nil {
+		return mcpTextErr(fmt.Sprintf("no such job %q", jid))
+	}
+	prof, ok := cfg.Profiles[j.Profile]
+	if !ok {
+		return mcpTextErr(fmt.Sprintf("profile %q not found", j.Profile))
+	}
+	cmd := fmt.Sprintf("kill -%s %d 2>/dev/null && echo killed || echo 'no such pid'", sig, j.Pid)
+	res, _ := runRemoteCapture(prof, "", cmd)
+	out := jobs.Jobs[:0]
+	for _, x := range jobs.Jobs {
+		if x.ID != j.ID {
+			out = append(out, x)
+		}
+	}
+	jobs.Jobs = out
+	_ = saveJobsFile(jobs)
+	text := strings.TrimSpace(res.Stdout)
+	if text == "" {
+		text = strings.TrimSpace(res.Stderr)
+	}
+	return toolResult{
+		Content:           []toolContent{{Type: "text", Text: text}},
+		IsError:           res.ExitCode != 0,
+		StructuredContent: map[string]any{"job_id": j.ID, "signal": sig, "exit_code": res.ExitCode},
+	}
+}
+
+// -----------------------------------------------------------------------------
+// Registry. Each entry pairs a toolDef (advertised to the client via
+// tools/list) with its handler (called from tools/call). Order here is
+// only a presentation choice; mcpToolMap below makes lookup O(1).
+// -----------------------------------------------------------------------------
+
 var mcpTools = []mcpTool{
 	{
 		def: toolDef{
@@ -216,53 +1171,7 @@ var mcpTools = []mcpTool{
 				"required": []string{"command"},
 			},
 		},
-		handler: func(args map[string]any, cfg *Config, profileOverride string) toolResult {
-			cmd, _ := args["command"].(string)
-			if cmd == "" {
-				return mcpTextErr("error: command is required")
-			}
-			confirm, _ := args["confirm"].(bool)
-			if GuardOn() && !confirm {
-				if pat := runRiskyMatch(cmd); pat != "" {
-					return guardBlocked("run",
-						fmt.Sprintf("command contains a high-risk pattern %q", pat))
-				}
-			}
-			profName, prof, err := ResolveProfile(cfg, profileOverride)
-			if err != nil {
-				return mcpTextErr(err.Error())
-			}
-			background, _ := args["background"].(bool)
-			if background {
-				rec, err := spawnDetached(profName, prof, cmd)
-				if err != nil {
-					return mcpTextErr(err.Error())
-				}
-				return mcpDetachedResult(rec)
-			}
-			// Hard-reject sync calls that would block the MCP turn for too
-			// long. Description tells the model what to do instead; this
-			// catches the case where it ignored that and went with the
-			// reflex sleep+poll pattern anyway.
-			if why := runRejectSync(cmd); why != "" {
-				return mcpTextErr(runRejectMessage(cmd, why))
-			}
-			cwd := GetCwd(profName, prof)
-			res, _ := runRemoteCapture(prof, cwd, cmd)
-			text, truncatedBytes := buildMCPRunText(res, cwd)
-			structured := map[string]any{
-				"exit_code": res.ExitCode,
-				"cwd":       cwd,
-			}
-			if truncatedBytes > 0 {
-				structured["truncated_bytes"] = truncatedBytes
-			}
-			return toolResult{
-				Content:           []toolContent{{Type: "text", Text: text}},
-				IsError:           res.ExitCode != 0,
-				StructuredContent: structured,
-			}
-		},
+		handler: handleMCPRun,
 	},
 	{
 		def: toolDef{
@@ -277,21 +1186,7 @@ var mcpTools = []mcpTool{
 				"required": []string{"path"},
 			},
 		},
-		handler: func(args map[string]any, cfg *Config, profileOverride string) toolResult {
-			path, _ := args["path"].(string)
-			profName, prof, err := ResolveProfile(cfg, profileOverride)
-			if err != nil {
-				return mcpTextErr(err.Error())
-			}
-			newCwd, err := changeRemoteCwd(profName, prof, path)
-			if err != nil {
-				return mcpTextErr(err.Error())
-			}
-			return toolResult{
-				Content:           []toolContent{{Type: "text", Text: newCwd}},
-				StructuredContent: map[string]any{"cwd": newCwd, "profile": profName},
-			}
-		},
+		handler: handleMCPCd,
 	},
 	{
 		def: toolDef{
@@ -302,17 +1197,7 @@ var mcpTools = []mcpTool{
 				"properties": map[string]any{"profile": strSchema("")},
 			},
 		},
-		handler: func(args map[string]any, cfg *Config, profileOverride string) toolResult {
-			profName, prof, err := ResolveProfile(cfg, profileOverride)
-			if err != nil {
-				return mcpTextErr(err.Error())
-			}
-			cwd := GetCwd(profName, prof)
-			return toolResult{
-				Content:           []toolContent{{Type: "text", Text: cwd}},
-				StructuredContent: map[string]any{"cwd": cwd, "profile": profName},
-			}
-		},
+		handler: handleMCPPwd,
 	},
 	{
 		def: toolDef{
@@ -326,41 +1211,7 @@ var mcpTools = []mcpTool{
 				},
 			},
 		},
-		handler: func(args map[string]any, cfg *Config, profileOverride string) toolResult {
-			clear, _ := args["clear"].(bool)
-			if clear {
-				sid, _ := SetSessionProfile("")
-				return toolResult{
-					Content:           []toolContent{{Type: "text", Text: fmt.Sprintf("session %s: unpinned", sid)}},
-					StructuredContent: map[string]any{"session": sid, "profile": nil},
-				}
-			}
-			target, _ := args["profile"].(string)
-			if target == "" {
-				sid, rec := TouchSession()
-				info := map[string]any{
-					"session": sid,
-					"pinned":  nil,
-					"default": cfg.DefaultProfile,
-				}
-				if rec.Profile != nil {
-					info["pinned"] = *rec.Profile
-				}
-				b, _ := json.MarshalIndent(info, "", "  ")
-				return toolResult{
-					Content:           []toolContent{{Type: "text", Text: string(b)}},
-					StructuredContent: info,
-				}
-			}
-			if _, ok := cfg.Profiles[target]; !ok {
-				return mcpTextErr(fmt.Sprintf("profile %q not found", target))
-			}
-			sid, _ := SetSessionProfile(target)
-			return toolResult{
-				Content:           []toolContent{{Type: "text", Text: fmt.Sprintf("session %s: pinned to %q", sid, target)}},
-				StructuredContent: map[string]any{"session": sid, "profile": target},
-			}
-		},
+		handler: handleMCPUse,
 	},
 	{
 		def: toolDef{
@@ -371,31 +1222,7 @@ var mcpTools = []mcpTool{
 				"properties": map[string]any{"profile": strSchema("")},
 			},
 		},
-		handler: func(args map[string]any, cfg *Config, profileOverride string) toolResult {
-			profName, prof, err := ResolveProfile(cfg, profileOverride)
-			if err != nil {
-				return mcpTextErr(err.Error())
-			}
-			sid, rec := TouchSession()
-			var pinned any
-			if rec.Profile != nil {
-				pinned = *rec.Profile
-			}
-			multiplex := prof.Multiplex == nil || *prof.Multiplex
-			return mcpJSONResult(map[string]any{
-				"profile":       profName,
-				"pinned":        pinned,
-				"host":          prof.Host,
-				"user":          prof.User,
-				"port":          prof.GetPort(),
-				"identity_file": prof.IdentityFile,
-				"cwd":           GetCwd(profName, prof),
-				"session":       sid,
-				"multiplex":     multiplex,
-				"compression":   prof.GetCompression(),
-				"guard":         GuardOn(),
-			})
-		},
+		handler: handleMCPStatus,
 	},
 	{
 		def: toolDef{
@@ -403,23 +1230,7 @@ var mcpTools = []mcpTool{
 			Description: "List profiles.",
 			InputSchema: map[string]any{"type": "object", "properties": map[string]any{}},
 		},
-		handler: func(args map[string]any, cfg *Config, profileOverride string) toolResult {
-			sid, rec := TouchSession()
-			var pinned any
-			if rec.Profile != nil {
-				pinned = *rec.Profile
-			}
-			names := make([]string, 0, len(cfg.Profiles))
-			for n := range cfg.Profiles {
-				names = append(names, n)
-			}
-			return mcpJSONResult(map[string]any{
-				"default":  cfg.DefaultProfile,
-				"pinned":   pinned,
-				"session":  sid,
-				"profiles": names,
-			})
-		},
+		handler: handleMCPListProfiles,
 	},
 	{
 		def: toolDef{
@@ -430,42 +1241,7 @@ var mcpTools = []mcpTool{
 				"properties": map[string]any{"profile": strSchema("")},
 			},
 		},
-		handler: func(args map[string]any, cfg *Config, profileOverride string) toolResult {
-			profName, prof, err := ResolveProfile(cfg, profileOverride)
-			if err != nil {
-				return mcpTextErr(err.Error())
-			}
-			res := runCheck(prof)
-			var advice []string
-			if !res.OK {
-				advice = checkAdvice(res.Diagnosis, prof, profName)
-			}
-			info := map[string]any{
-				"profile":   profName,
-				"host":      prof.Host,
-				"user":      prof.User,
-				"port":      prof.GetPort(),
-				"ok":        res.OK,
-				"diagnosis": res.Diagnosis,
-				"exit_code": res.ExitCode,
-			}
-			var text string
-			if res.OK {
-				target := prof.Host
-				if prof.User != "" {
-					target = prof.User + "@" + prof.Host
-				}
-				text = fmt.Sprintf("OK -- %s: %s key auth works.", profName, target)
-			} else {
-				text = fmt.Sprintf("FAIL (%s): %s\n\n%s", res.Diagnosis,
-					strings.TrimSpace(res.Stderr), strings.Join(advice, "\n"))
-			}
-			return toolResult{
-				Content:           []toolContent{{Type: "text", Text: text}},
-				IsError:           !res.OK,
-				StructuredContent: info,
-			}
-		},
+		handler: handleMCPCheck,
 	},
 	{
 		def: toolDef{
@@ -476,12 +1252,7 @@ var mcpTools = []mcpTool{
 				"properties": map[string]any{"profile": strSchema("")},
 			},
 		},
-		handler: func(args map[string]any, cfg *Config, profileOverride string) toolResult {
-			checks, ok := doctorChecks(cfg, profileOverride)
-			res := mcpJSONResult(map[string]any{"ok": ok, "checks": checks})
-			res.IsError = !ok
-			return res
-		},
+		handler: handleMCPDoctor,
 	},
 	{
 		def: toolDef{
@@ -489,23 +1260,7 @@ var mcpTools = []mcpTool{
 			Description: "Show daemon status.",
 			InputSchema: map[string]any{"type": "object", "properties": map[string]any{}},
 		},
-		handler: func(args map[string]any, cfg *Config, profileOverride string) toolResult {
-			conn := daemonDial(time.Second)
-			if conn == nil {
-				return mcpJSONResult(map[string]any{"running": false})
-			}
-			defer conn.Close()
-			resp, err := daemonCall(conn, daemonRequest{Op: "status"}, 2*time.Second)
-			if err != nil || resp == nil {
-				return mcpTextErr(fmt.Sprintf("daemon status failed: %v", err))
-			}
-			return mcpJSONResult(map[string]any{
-				"running":         true,
-				"uptime_sec":      resp.Uptime,
-				"profiles_pooled": resp.Profiles,
-				"protocol":        resp.V,
-			})
-		},
+		handler: handleMCPDaemonStatus,
 	},
 	{
 		def: toolDef{
@@ -521,48 +1276,7 @@ var mcpTools = []mcpTool{
 				},
 			},
 		},
-		handler: func(args map[string]any, cfg *Config, profileOverride string) toolResult {
-			action, _ := args["action"].(string)
-			if action == "" {
-				action = "list"
-			}
-			profName, prof, err := ResolveProfile(cfg, profileOverride)
-			if err != nil {
-				return mcpTextErr(err.Error())
-			}
-			key, _ := args["key"].(string)
-			value, _ := args["value"].(string)
-			switch action {
-			case "list":
-			case "set":
-				if key == "" {
-					return mcpTextErr("key is required")
-				}
-				if prof.Env == nil {
-					prof.Env = map[string]string{}
-				}
-				prof.Env[key] = value
-				if err := SaveConfig(cfg); err != nil {
-					return mcpTextErr(err.Error())
-				}
-			case "unset":
-				if key == "" {
-					return mcpTextErr("key is required")
-				}
-				delete(prof.Env, key)
-				if err := SaveConfig(cfg); err != nil {
-					return mcpTextErr(err.Error())
-				}
-			case "clear":
-				prof.Env = nil
-				if err := SaveConfig(cfg); err != nil {
-					return mcpTextErr(err.Error())
-				}
-			default:
-				return mcpTextErr("unknown env action")
-			}
-			return mcpJSONResult(map[string]any{"profile": profName, "env": prof.Env})
-		},
+		handler: handleMCPEnv,
 	},
 	{
 		def: toolDef{
@@ -578,22 +1292,7 @@ var mcpTools = []mcpTool{
 				"required": []string{"local"},
 			},
 		},
-		handler: func(args map[string]any, cfg *Config, profileOverride string) toolResult {
-			local, _ := args["local"].(string)
-			if local == "" {
-				return mcpTextErr("local is required")
-			}
-			remote, _ := args["remote"].(string)
-			text, rc, err := diffLocalRemote(cfg, profileOverride, local, remote)
-			if err != nil {
-				return mcpTextErr(err.Error())
-			}
-			return toolResult{
-				Content:           []toolContent{{Type: "text", Text: text}},
-				IsError:           rc != 0,
-				StructuredContent: map[string]any{"exit_code": rc, "local": local, "remote": remote},
-			}
-		},
+		handler: handleMCPDiff,
 	},
 	{
 		def: toolDef{
@@ -609,63 +1308,7 @@ var mcpTools = []mcpTool{
 				"required": []string{"local"},
 			},
 		},
-		handler: func(args map[string]any, cfg *Config, profileOverride string) toolResult {
-			local, _ := args["local"].(string)
-			if local == "" {
-				return mcpTextErr("local is required")
-			}
-			if _, err := os.Stat(local); err != nil {
-				return mcpTextErr(fmt.Sprintf("local path missing: %q", local))
-			}
-			profName, prof, err := ResolveProfile(cfg, profileOverride)
-			if err != nil {
-				return mcpTextErr(err.Error())
-			}
-			cwd := GetCwd(profName, prof)
-			remote, _ := args["remote"].(string)
-			if remote == "" {
-				remote = filepath.Base(local)
-			}
-			abs := resolveRemotePath(remote, cwd)
-			st, _ := os.Stat(local)
-			recursive := false
-			if rb, ok := args["recursive"].(bool); ok {
-				recursive = rb
-			}
-			if st != nil && st.IsDir() {
-				recursive = true
-			}
-			start := time.Now()
-			rc, finalRemote, perr := pushPath(prof, local, abs, recursive)
-			duration := time.Since(start)
-			var bytes int64
-			if rc == 0 {
-				bytes = sumLocalSize(local)
-			}
-			var text string
-			if rc == 0 {
-				text = fmt.Sprintf("uploaded %s -> %s [exit 0]%s", local, finalRemote, fmtRate(bytes, duration))
-			} else {
-				text = fmt.Sprintf("upload FAILED %s -> %s [exit %d]", local, finalRemote, rc)
-				if perr != nil {
-					text += ": " + perr.Error()
-				}
-			}
-			structured := map[string]any{
-				"exit_code":        rc,
-				"remote":           finalRemote,
-				"local":            local,
-				"duration_seconds": duration.Seconds(),
-			}
-			if rc == 0 {
-				structured["bytes_transferred"] = bytes
-			}
-			return toolResult{
-				Content:           []toolContent{{Type: "text", Text: text}},
-				IsError:           rc != 0,
-				StructuredContent: structured,
-			}
-		},
+		handler: handleMCPPush,
 	},
 	{
 		def: toolDef{
@@ -682,56 +1325,7 @@ var mcpTools = []mcpTool{
 				"required": []string{"remote"},
 			},
 		},
-		handler: func(args map[string]any, cfg *Config, profileOverride string) toolResult {
-			remote, _ := args["remote"].(string)
-			if remote == "" {
-				return mcpTextErr("remote is required")
-			}
-			profName, prof, err := ResolveProfile(cfg, profileOverride)
-			if err != nil {
-				return mcpTextErr(err.Error())
-			}
-			cwd := GetCwd(profName, prof)
-			local, _ := args["local"].(string)
-			if local == "" {
-				local = "."
-			}
-			abs := resolveRemotePath(remote, cwd)
-			recursive := false
-			if rb, ok := args["recursive"].(bool); ok {
-				recursive = rb
-			}
-			start := time.Now()
-			rc, finalLocal, perr := pullPath(prof, abs, local, recursive)
-			duration := time.Since(start)
-			var bytes int64
-			if rc == 0 {
-				bytes = sumLocalSize(finalLocal)
-			}
-			var text string
-			if rc == 0 {
-				text = fmt.Sprintf("downloaded %s -> %s [exit 0]%s", abs, finalLocal, fmtRate(bytes, duration))
-			} else {
-				text = fmt.Sprintf("download FAILED %s -> %s [exit %d]", abs, finalLocal, rc)
-				if perr != nil {
-					text += ": " + perr.Error()
-				}
-			}
-			structured := map[string]any{
-				"exit_code":        rc,
-				"remote":           abs,
-				"local":            finalLocal,
-				"duration_seconds": duration.Seconds(),
-			}
-			if rc == 0 {
-				structured["bytes_transferred"] = bytes
-			}
-			return toolResult{
-				Content:           []toolContent{{Type: "text", Text: text}},
-				IsError:           rc != 0,
-				StructuredContent: structured,
-			}
-		},
+		handler: handleMCPPull,
 	},
 	{
 		def: toolDef{
@@ -757,185 +1351,7 @@ var mcpTools = []mcpTool{
 				},
 			},
 		},
-		handler: func(args map[string]any, cfg *Config, profileOverride string) toolResult {
-			profName, prof, err := ResolveProfile(cfg, profileOverride)
-			if err != nil {
-				return mcpTextErr(err.Error())
-			}
-			o := &syncOpts{gitScope: "all"}
-			if v, ok := args["remote_root"].(string); ok {
-				o.remoteRoot = v
-			}
-			if v, ok := args["mode"].(string); ok {
-				o.mode = v
-			}
-			if v, ok := args["git_scope"].(string); ok {
-				o.gitScope = v
-			}
-			if v, ok := args["since"].(string); ok {
-				o.since = v
-			}
-			if v, ok := args["root"].(string); ok {
-				o.root = v
-			}
-			if v, ok := args["dry_run"].(bool); ok {
-				o.dryRun = v
-			}
-			if v, ok := args["delete"].(bool); ok {
-				o.delete = v
-			}
-			if v, ok := args["yes"].(bool); ok {
-				o.yes = v
-			}
-			if o.delete && !o.dryRun && GuardOn() {
-				confirm, _ := args["confirm"].(bool)
-				if !confirm {
-					return guardBlocked("sync",
-						"delete=true would remove remote files")
-				}
-			}
-			if v, ok := args["delete_limit"].(float64); ok {
-				o.deleteLimit = int(v)
-			}
-			if v, ok := args["include"].([]any); ok {
-				for _, x := range v {
-					if s, ok := x.(string); ok {
-						o.include = append(o.include, s)
-					}
-				}
-			}
-			if v, ok := args["exclude"].([]any); ok {
-				for _, x := range v {
-					if s, ok := x.(string); ok {
-						o.exclude = append(o.exclude, s)
-					}
-				}
-			}
-			if v, ok := args["files"].([]any); ok {
-				for _, x := range v {
-					if s, ok := x.(string); ok {
-						o.files = append(o.files, s)
-					}
-				}
-			}
-			localRoot := o.root
-			if localRoot == "" {
-				localRoot = findGitRoot(mustCwd())
-				if localRoot == "" {
-					localRoot = mustCwd()
-				}
-			}
-			if o.mode == "" {
-				if findGitRoot(localRoot) != "" {
-					o.mode = "git"
-				} else if len(o.include) > 0 {
-					o.mode = "glob"
-				} else if o.since != "" {
-					o.mode = "mtime"
-				} else if len(o.files) > 0 {
-					o.mode = "list"
-				} else {
-					return mcpTextErr("no mode resolved (not a git repo and no include/since/files)")
-				}
-			}
-			cwd := GetCwd(profName, prof)
-			remoteRoot := cwd
-			if o.remoteRoot != "" {
-				remoteRoot = resolveRemotePath(o.remoteRoot, cwd)
-			} else if prof.SyncRoot != "" {
-				remoteRoot = resolveRemotePath(prof.SyncRoot, cwd)
-			}
-			allExcludes := append([]string{}, o.exclude...)
-			allExcludes = append(allExcludes, prof.SyncExclude...)
-			allExcludes = append(allExcludes, defaultSyncExcludes...)
-			files, err := collectSyncFiles(o, localRoot, allExcludes)
-			if err != nil {
-				return mcpTextErr(err.Error())
-			}
-			deletes, err := collectSyncDeletes(o, localRoot, allExcludes)
-			if err != nil {
-				return mcpTextErr(err.Error())
-			}
-			limit := o.deleteLimit
-			if limit == 0 {
-				limit = 20
-			}
-			if len(deletes) > limit && !o.dryRun && !o.yes {
-				return mcpTextErr(fmt.Sprintf("sync delete would remove %d files (limit %d). Re-run dry_run=true, yes=true, or set delete_limit.", len(deletes), limit))
-			}
-			if len(files) == 0 && len(deletes) == 0 {
-				return toolResult{
-					Content:           []toolContent{{Type: "text", Text: "(nothing to sync)"}},
-					StructuredContent: map[string]any{"files": []string{}, "deletes": deletes, "remote_root": remoteRoot, "exit_code": 0},
-				}
-			}
-			if o.dryRun {
-				text := fmt.Sprintf("would sync %d files to %s\n", len(files), remoteRoot)
-				lim := len(files)
-				if lim > 200 {
-					lim = 200
-				}
-				text += strings.Join(files[:lim], "\n")
-				if len(files) > 200 {
-					text += fmt.Sprintf("\n... (%d more)", len(files)-200)
-				}
-				if len(deletes) > 0 {
-					text += "\nwould delete:\n" + strings.Join(deletes, "\n")
-				}
-				return toolResult{
-					Content: []toolContent{{Type: "text", Text: text}},
-					StructuredContent: map[string]any{
-						"files_count":   len(files),
-						"deletes_count": len(deletes),
-						"remote_root":   remoteRoot,
-						"dry_run":       true,
-					},
-				}
-			}
-			rc := 0
-			var terr error
-			start := time.Now()
-			if len(files) > 0 {
-				rc, terr = tarUploadStream(prof, localRoot, files, remoteRoot)
-			}
-			if rc == 0 && len(deletes) > 0 {
-				rc, terr = deleteRemoteFiles(prof, remoteRoot, deletes)
-			}
-			duration := time.Since(start)
-			var bytes int64
-			if rc == 0 {
-				for _, f := range files {
-					if st, err := os.Stat(filepath.Join(localRoot, f)); err == nil {
-						bytes += st.Size()
-					}
-				}
-			}
-			var text string
-			if rc == 0 {
-				text = fmt.Sprintf("synced %d files to %s [exit 0]%s", len(files), remoteRoot, fmtRate(bytes, duration))
-			} else {
-				text = fmt.Sprintf("sync FAILED to %s [exit %d]; %d files were NOT transferred -- verify with `run \"ls -la %s\"` before assuming",
-					remoteRoot, rc, len(files), remoteRoot)
-			}
-			if terr != nil {
-				text += ": " + terr.Error()
-			}
-			structured := map[string]any{
-				"files_count":      len(files),
-				"deletes_count":    len(deletes),
-				"remote_root":      remoteRoot,
-				"exit_code":        rc,
-				"duration_seconds": duration.Seconds(),
-			}
-			if rc == 0 {
-				structured["bytes_transferred"] = bytes
-			}
-			return toolResult{
-				Content:           []toolContent{{Type: "text", Text: text}},
-				IsError:           rc != 0,
-				StructuredContent: structured,
-			}
-		},
+		handler: handleMCPSync,
 	},
 	{
 		def: toolDef{
@@ -946,43 +1362,7 @@ var mcpTools = []mcpTool{
 				"properties": map[string]any{"root": strSchema("Local root."), "remote_root": strSchema("Remote root."), "profile": strSchema("")},
 			},
 		},
-		handler: func(args map[string]any, cfg *Config, profileOverride string) toolResult {
-			profName, prof, err := ResolveProfile(cfg, profileOverride)
-			if err != nil {
-				return mcpTextErr(err.Error())
-			}
-			root, _ := args["root"].(string)
-			if root == "" {
-				root = findGitRoot(mustCwd())
-			}
-			if root == "" {
-				return mcpTextErr("not in a git repo")
-			}
-			root, _ = filepath.Abs(root)
-			o := &syncOpts{mode: "git", gitScope: "all", delete: true, dryRun: true}
-			allExcludes := append([]string{}, prof.SyncExclude...)
-			allExcludes = append(allExcludes, defaultSyncExcludes...)
-			deletes, err := collectSyncDeletes(o, root, allExcludes)
-			if err != nil {
-				return mcpTextErr(err.Error())
-			}
-			cwd := GetCwd(profName, prof)
-			remoteRoot := cwd
-			if v, _ := args["remote_root"].(string); v != "" {
-				remoteRoot = resolveRemotePath(v, cwd)
-			} else if prof.SyncRoot != "" {
-				remoteRoot = resolveRemotePath(prof.SyncRoot, cwd)
-			}
-			text := fmt.Sprintf("would delete %d files from %s\n%s", len(deletes), remoteRoot, strings.Join(deletes, "\n"))
-			return toolResult{
-				Content: []toolContent{{Type: "text", Text: text}},
-				StructuredContent: map[string]any{
-					"deletes_count": len(deletes),
-					"remote_root":   remoteRoot,
-					"dry_run":       true,
-				},
-			}
-		},
+		handler: handleMCPSyncDeleteDryRun,
 	},
 	{
 		def: toolDef{
@@ -998,28 +1378,7 @@ var mcpTools = []mcpTool{
 				"required": []string{"command"},
 			},
 		},
-		handler: func(args map[string]any, cfg *Config, profileOverride string) toolResult {
-			cmd, _ := args["command"].(string)
-			if cmd == "" {
-				return mcpTextErr("command is required")
-			}
-			confirm, _ := args["confirm"].(bool)
-			if GuardOn() && !confirm {
-				if pat := runRiskyMatch(cmd); pat != "" {
-					return guardBlocked("detach",
-						fmt.Sprintf("command contains a high-risk pattern %q", pat))
-				}
-			}
-			profName, prof, err := ResolveProfile(cfg, profileOverride)
-			if err != nil {
-				return mcpTextErr(err.Error())
-			}
-			rec, err := spawnDetached(profName, prof, cmd)
-			if err != nil {
-				return mcpTextErr(err.Error())
-			}
-			return mcpDetachedResult(rec)
-		},
+		handler: handleMCPDetach,
 	},
 	{
 		def: toolDef{
@@ -1030,19 +1389,7 @@ var mcpTools = []mcpTool{
 				"properties": map[string]any{"profile": strSchema("")},
 			},
 		},
-		handler: func(args map[string]any, cfg *Config, profileOverride string) toolResult {
-			jobs := loadJobsFile().Jobs
-			if profileOverride != "" {
-				out := jobs[:0]
-				for _, j := range jobs {
-					if j.Profile == profileOverride {
-						out = append(out, j)
-					}
-				}
-				jobs = out
-			}
-			return mcpJSONResult(map[string]any{"jobs": jobs})
-		},
+		handler: handleMCPListJobs,
 	},
 	{
 		def: toolDef{
@@ -1057,32 +1404,7 @@ var mcpTools = []mcpTool{
 				"required": []string{"id"},
 			},
 		},
-		handler: func(args map[string]any, cfg *Config, profileOverride string) toolResult {
-			jid, _ := args["id"].(string)
-			lines := 200
-			if v, ok := args["lines"].(float64); ok {
-				lines = int(v)
-			}
-			jobs := loadJobsFile()
-			j := findJob(jobs, jid)
-			if j == nil {
-				return mcpTextErr(fmt.Sprintf("no such job %q", jid))
-			}
-			prof, ok := cfg.Profiles[j.Profile]
-			if !ok {
-				return mcpTextErr(fmt.Sprintf("profile %q not found", j.Profile))
-			}
-			res, _ := runRemoteCapture(prof, "", fmt.Sprintf("tail -n %d %s", lines, j.Log))
-			text := res.Stdout
-			if text == "" {
-				text = res.Stderr
-			}
-			return toolResult{
-				Content:           []toolContent{{Type: "text", Text: text}},
-				IsError:           res.ExitCode != 0,
-				StructuredContent: map[string]any{"job_id": j.ID, "exit_code": res.ExitCode},
-			}
-		},
+		handler: handleMCPTailLog,
 	},
 	{
 		def: toolDef{
@@ -1098,120 +1420,7 @@ var mcpTools = []mcpTool{
 				"required": []string{"id"},
 			},
 		},
-		handler: func(args map[string]any, cfg *Config, profileOverride string) toolResult {
-			jid, _ := args["id"].(string)
-			maxWait := mcpWaitJobDefaultSeconds
-			if v, ok := args["max_wait_seconds"].(float64); ok && v > 0 {
-				maxWait = int(v)
-			}
-			if maxWait > mcpWaitJobMaxSeconds {
-				maxWait = mcpWaitJobMaxSeconds
-			}
-			tailLines := 50
-			if v, ok := args["tail_lines"].(float64); ok && v > 0 {
-				tailLines = int(v)
-			}
-			jobs := loadJobsFile()
-			j := findJob(jobs, jid)
-			if j == nil {
-				return mcpTextErr(fmt.Sprintf("no such job %q", jid))
-			}
-			prof, ok := cfg.Profiles[j.Profile]
-			if !ok {
-				return mcpTextErr(fmt.Sprintf("profile %q not found", j.Profile))
-			}
-			// One remote round-trip drives the whole wait loop. Bash spins
-			// for up to maxWait seconds, checking each second for either
-			// the .exit marker (job finished, capture exit code) or the
-			// PID being gone without an .exit (got killed externally).
-			// Either resolution prints `STATUS=...` on the first line plus
-			// the log tail; if maxWait elapses the same shape is returned
-			// with STATUS=running so the model can loop.
-			exitFile := fmt.Sprintf("~/.srv-jobs/%s.exit", j.ID)
-			script := fmt.Sprintf(`for i in $(seq 1 %d); do
-  if [ -f %s ]; then
-    code=$(cat %s)
-    printf 'STATUS=completed EXIT=%%s\n' "$code"
-    tail -n %d %s
-    exit 0
-  fi
-  if ! kill -0 %d 2>/dev/null; then
-    echo STATUS=killed
-    tail -n %d %s
-    exit 0
-  fi
-  sleep 1
-done
-echo STATUS=running
-tail -n %d %s
-`, maxWait, exitFile, exitFile, tailLines, j.Log, j.Pid, tailLines, j.Log, tailLines, j.Log)
-			start := time.Now()
-			res, _ := runRemoteCapture(prof, "", script)
-			waited := time.Since(start).Seconds()
-
-			lines := strings.SplitN(res.Stdout, "\n", 2)
-			statusLine := ""
-			body := ""
-			if len(lines) > 0 {
-				statusLine = lines[0]
-			}
-			if len(lines) > 1 {
-				body = lines[1]
-			}
-			status := "unknown"
-			exitCode := -1
-			if strings.HasPrefix(statusLine, "STATUS=completed") {
-				status = "completed"
-				if i := strings.Index(statusLine, "EXIT="); i >= 0 {
-					if n, err := strconv.Atoi(strings.TrimSpace(statusLine[i+5:])); err == nil {
-						exitCode = n
-					}
-				}
-				// Job finished -- prune from local registry so list_jobs
-				// doesn't keep advertising it. The .log / .exit files on
-				// the remote stay; users can still tail historical logs
-				// manually if they want.
-				out := jobs.Jobs[:0]
-				for _, x := range jobs.Jobs {
-					if x.ID != j.ID {
-						out = append(out, x)
-					}
-				}
-				jobs.Jobs = out
-				_ = saveJobsFile(jobs)
-			} else if strings.HasPrefix(statusLine, "STATUS=killed") {
-				status = "killed"
-			} else if strings.HasPrefix(statusLine, "STATUS=running") {
-				status = "running"
-			}
-
-			var hint string
-			switch status {
-			case "completed":
-				hint = fmt.Sprintf("[%s exit=%d after %.1fs]", status, exitCode, waited)
-			case "running":
-				hint = fmt.Sprintf("[%s after %.1fs -- call wait_job again to keep waiting, or kill_job to stop]", status, waited)
-			default:
-				hint = fmt.Sprintf("[%s after %.1fs]", status, waited)
-			}
-			text := hint
-			if body != "" {
-				text += "\n" + body
-			}
-			structured := map[string]any{
-				"job_id":         j.ID,
-				"status":         status,
-				"waited_seconds": waited,
-			}
-			if status == "completed" {
-				structured["exit_code"] = exitCode
-			}
-			return toolResult{
-				Content:           []toolContent{{Type: "text", Text: text}},
-				IsError:           status == "killed" || (status == "completed" && exitCode != 0),
-				StructuredContent: structured,
-			}
-		},
+		handler: handleMCPWaitJob,
 	},
 	{
 		def: toolDef{
@@ -1227,47 +1436,7 @@ tail -n %d %s
 				},
 			},
 		},
-		handler: func(args map[string]any, cfg *Config, profileOverride string) toolResult {
-			path, _ := args["path"].(string)
-			dirsOnly, _ := args["dirs_only"].(bool)
-			limit := 500
-			if v, ok := args["limit"].(float64); ok && v > 0 {
-				limit = int(v)
-			}
-			entries, err := listRemoteEntries(path, cfg, profileOverride)
-			if err != nil {
-				return mcpTextErr(err.Error())
-			}
-			if dirsOnly {
-				kept := entries[:0]
-				for _, e := range entries {
-					if strings.HasSuffix(e, "/") {
-						kept = append(kept, e)
-					}
-				}
-				entries = kept
-			}
-			truncated := 0
-			if len(entries) > limit {
-				truncated = len(entries) - limit
-				entries = entries[:limit]
-			}
-			text := strings.Join(entries, "\n")
-			if text != "" {
-				text += "\n"
-			}
-			structured := map[string]any{
-				"entries": entries,
-				"count":   len(entries),
-			}
-			if truncated > 0 {
-				structured["truncated_count"] = truncated
-			}
-			return toolResult{
-				Content:           []toolContent{{Type: "text", Text: text}},
-				StructuredContent: structured,
-			}
-		},
+		handler: handleMCPListDir,
 	},
 	{
 		def: toolDef{
@@ -1282,41 +1451,7 @@ tail -n %d %s
 				"required": []string{"id"},
 			},
 		},
-		handler: func(args map[string]any, cfg *Config, profileOverride string) toolResult {
-			jid, _ := args["id"].(string)
-			sig, _ := args["signal"].(string)
-			if sig == "" {
-				sig = "TERM"
-			}
-			jobs := loadJobsFile()
-			j := findJob(jobs, jid)
-			if j == nil {
-				return mcpTextErr(fmt.Sprintf("no such job %q", jid))
-			}
-			prof, ok := cfg.Profiles[j.Profile]
-			if !ok {
-				return mcpTextErr(fmt.Sprintf("profile %q not found", j.Profile))
-			}
-			cmd := fmt.Sprintf("kill -%s %d 2>/dev/null && echo killed || echo 'no such pid'", sig, j.Pid)
-			res, _ := runRemoteCapture(prof, "", cmd)
-			out := jobs.Jobs[:0]
-			for _, x := range jobs.Jobs {
-				if x.ID != j.ID {
-					out = append(out, x)
-				}
-			}
-			jobs.Jobs = out
-			_ = saveJobsFile(jobs)
-			text := strings.TrimSpace(res.Stdout)
-			if text == "" {
-				text = strings.TrimSpace(res.Stderr)
-			}
-			return toolResult{
-				Content:           []toolContent{{Type: "text", Text: text}},
-				IsError:           res.ExitCode != 0,
-				StructuredContent: map[string]any{"job_id": j.ID, "signal": sig, "exit_code": res.ExitCode},
-			}
-		},
+		handler: handleMCPKillJob,
 	},
 }
 
