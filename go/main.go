@@ -81,6 +81,8 @@ Integrations:
   srv completion <bash|zsh|powershell> [--install]
                                          emit shell completion script (or auto-install into the shell's rc file)
   srv project                            show the active .srv-project pin (if any)
+  srv group <list|show|set|remove>       manage named profile groups (for fan-out via -G)
+  srv -G <group> <cmd>                   run cmd in parallel on every profile in <group>
   srv mcp                                run as a stdio MCP server
   srv guard [on|off|status]              MCP confirmation guard for high-risk ops (default off)
   srv color [on|off|use [name]|list|status]
@@ -176,6 +178,8 @@ const helpZH = `srv - 跨平台 SSH 远端命令工具,持久 cwd / 连接复用
   srv completion <bash|zsh|powershell> [--install]
                                          输出 shell 补全脚本(加 --install 直接写入对应 shell 的 rc 文件)
   srv project                            查看当前 .srv-project 自动 pin 状态
+  srv group <list|show|set|remove>       管理命名 profile 组(配合 -G 使用)
+  srv -G <group> <cmd>                   在组内所有 profile 上并行执行 cmd
   srv mcp                                以 stdio MCP server 跑
   srv guard [on|off|status]              MCP 高危操作确认开关(默认关闭,可针对当前 shell 开启)
   srv color [on|off|use [name]|list|status]
@@ -209,6 +213,7 @@ Session 检测:
 
 type globalOpts struct {
 	profile string
+	group   string
 	tty     bool
 	detach  bool
 	noHints bool
@@ -229,6 +234,17 @@ func parseGlobalFlags(args []string) (globalOpts, []string) {
 			continue
 		case len(a) > 10 && a[:10] == "--profile=":
 			opts.profile = a[10:]
+			i++
+			continue
+		case a == "-G" || a == "--group":
+			if i+1 >= len(args) {
+				fatal("%s", t("err.flag_requires_value", a))
+			}
+			opts.group = args[i+1]
+			i += 2
+			continue
+		case len(a) > 8 && a[:8] == "--group=":
+			opts.group = a[8:]
 			i++
 			continue
 		case a == "-t" || a == "--tty":
@@ -346,12 +362,22 @@ func run(args []string) int {
 	sub := rest[0]
 	cmd, known := lookupSub(sub)
 
+	// -P and -G are mutually exclusive: a single profile pin makes no
+	// sense when the caller has also asked for a group fan-out. Surface
+	// at the parse point so the failure is at top-level, not buried in
+	// one subcommand handler.
+	if opts.profile != "" && opts.group != "" {
+		fmt.Fprintln(os.Stderr, "error: -P and -G are mutually exclusive")
+		return 2
+	}
+
 	// Build the uniform context. cfg is loaded only when at least one
 	// path needs it: a known subcommand without noConfig, or the
 	// remote-fallthrough (cmdRunWithHints / cmdDetach both need cfg).
 	ctx := cmdCtx{
 		args:            rest[1:],
 		profileOverride: opts.profile,
+		group:           opts.group,
 		detach:          opts.detach,
 		tty:             opts.tty,
 		noHints:         opts.noHints,
@@ -376,6 +402,9 @@ func run(args []string) int {
 	// token is suspiciously close to a known local subcommand -- the
 	// run still proceeds (their command might be the right one).
 	emitTypoHintPre(ctx.cfg, opts, sub)
+	if opts.group != "" {
+		return translateExit(cmdRunGroup(rest, ctx.cfg, opts.group))
+	}
 	if opts.detach {
 		return translateExit(cmdDetach(rest, ctx.cfg, opts.profile))
 	}

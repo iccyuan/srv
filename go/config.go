@@ -166,6 +166,12 @@ type Config struct {
 	// pin explicitly. Unknown values fall back to English.
 	Lang     string              `json:"lang,omitempty"`
 	Profiles map[string]*Profile `json:"profiles"`
+	// Groups names a list of profiles that fan-out commands (`srv -G
+	// <group> <cmd>`) target in parallel. Keys are group names, values
+	// are ordered profile names. Empty groups are valid in the on-disk
+	// config but error at use time -- a half-defined group is easier to
+	// debug than a silent no-op.
+	Groups map[string][]string `json:"groups,omitempty"`
 }
 
 // HintsEnabled reports whether typo / post-failure hints should fire.

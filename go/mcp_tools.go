@@ -915,6 +915,83 @@ func handleMCPDetach(args map[string]any, cfg *Config, profileOverride string) t
 	return mcpDetachedResult(rec)
 }
 
+// handleMCPRunGroup fans `command` out across every profile in a
+// named group and returns one structured result per member.
+//
+// Why separate from `run`: mixing the fan-out shape into the `run`
+// tool's schema would force callers to handle both "single result"
+// and "array of results" depending on whether `group` was set. Keeping
+// it separate gives both tools narrow, predictable response shapes.
+func handleMCPRunGroup(args map[string]any, cfg *Config, profileOverride string) toolResult {
+	groupName, _ := args["group"].(string)
+	if groupName == "" {
+		return mcpTextErr("group is required")
+	}
+	cmd, _ := args["command"].(string)
+	if cmd == "" {
+		return mcpTextErr("command is required")
+	}
+	confirm, _ := args["confirm"].(bool)
+	if blocked := guardCheckRisky("run_group", cmd, confirm); blocked != nil {
+		return *blocked
+	}
+	// Long-blocking sync rejection applies fan-out too: a `sleep 60`
+	// across 10 hosts wedges every connection in parallel for the same
+	// 60s and still busts the MCP per-tool timeout.
+	if why := runRejectSync(cmd); why != "" {
+		return mcpTextErr(runRejectMessage(cmd, why))
+	}
+	results, err := runGroup(cfg, groupName, cmd)
+	if err != nil {
+		return mcpTextErr(err.Error())
+	}
+
+	// Build a compact text section per profile -- enough for the model
+	// to read at a glance, with the full payload in structured content.
+	var sb strings.Builder
+	maxExit, failed := 0, 0
+	for _, r := range results {
+		fmt.Fprintf(&sb, "=== %s [exit %d, %.1fs]", r.Profile, r.ExitCode, r.Duration)
+		if r.Error != "" {
+			fmt.Fprintf(&sb, " ERROR: %s", r.Error)
+		}
+		sb.WriteString(" ===\n")
+		if r.Stdout != "" {
+			sb.WriteString(r.Stdout)
+			if !strings.HasSuffix(r.Stdout, "\n") {
+				sb.WriteByte('\n')
+			}
+		}
+		if r.Stderr != "" {
+			sb.WriteString("--- stderr ---\n")
+			sb.WriteString(r.Stderr)
+			if !strings.HasSuffix(r.Stderr, "\n") {
+				sb.WriteByte('\n')
+			}
+		}
+		if r.ExitCode != 0 || r.Error != "" {
+			failed++
+			if r.ExitCode > maxExit {
+				maxExit = r.ExitCode
+			} else if r.ExitCode < 0 && maxExit == 0 {
+				maxExit = 255
+			}
+		}
+	}
+	fmt.Fprintf(&sb, "\n%d profile(s), %d succeeded, %d failed.\n", len(results), len(results)-failed, failed)
+
+	return toolResult{
+		Content: []toolContent{{Type: "text", Text: sb.String()}},
+		IsError: failed > 0,
+		StructuredContent: map[string]any{
+			"group":     groupName,
+			"results":   results,
+			"succeeded": len(results) - failed,
+			"failed":    failed,
+		},
+	}
+}
+
 func handleMCPListJobs(args map[string]any, cfg *Config, profileOverride string) toolResult {
 	jobs := loadJobsFile().Jobs
 	if profileOverride != "" {
@@ -1363,6 +1440,22 @@ var mcpTools = []mcpTool{
 			},
 		},
 		handler: handleMCPSyncDeleteDryRun,
+	},
+	{
+		def: toolDef{
+			Name:        "run_group",
+			Description: "Run the same remote command across every profile in a named group, in parallel. Returns one result per member with exit code, stdout/stderr, and duration. Use this when you'd otherwise have to loop `run` over N hosts (deploys, restarts, status checks). Synchronous: subject to the same 60s MCP per-tool cap as `run`, so keep the command short or run it via `detach` per-profile and then poll.",
+			InputSchema: map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"group":   strSchema("Group name as defined in config.groups."),
+					"command": strSchema("Remote shell command to run on every member."),
+					"confirm": boolSchema(false, "Required when guard is on AND command hits a high-risk pattern."),
+				},
+				"required": []string{"group", "command"},
+			},
+		},
+		handler: handleMCPRunGroup,
 	},
 	{
 		def: toolDef{

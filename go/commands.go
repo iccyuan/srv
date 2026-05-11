@@ -25,9 +25,14 @@ type cmdCtx struct {
 	args            []string
 	cfg             *Config
 	profileOverride string
-	detach          bool
-	tty             bool
-	noHints         bool
+	// group is the -G / --group flag, populated when the user wants to
+	// fan-out a command across a named profile group. Currently honored
+	// only by `run` (and the implicit run path); other subcommands
+	// ignore it.
+	group   string
+	detach  bool
+	tty     bool
+	noHints bool
 }
 
 type subcommand struct {
@@ -101,10 +106,14 @@ var subcommands = []subcommand{
 	{name: "color", handler: func(c cmdCtx) error { return cmdColor(c.args) }},
 	{name: "daemon", handler: func(c cmdCtx) error { return cmdDaemon(c.args) }},
 	{name: "project", noConfig: true, handler: func(c cmdCtx) error { return cmdProject(c.args) }},
+	{name: "group", handler: func(c cmdCtx) error { return cmdGroup(c.args, c.cfg) }},
 
-	// run/exec: -d global flag swaps in cmdDetach; otherwise wrap with
-	// the typo-hint emitter.
+	// run/exec: -d global flag swaps in cmdDetach; -G swaps in fan-out;
+	// otherwise wrap with the typo-hint emitter.
 	{name: "run", aliases: []string{"exec"}, handler: func(c cmdCtx) error {
+		if c.group != "" {
+			return cmdRunGroup(c.args, c.cfg, c.group)
+		}
 		if c.detach {
 			return cmdDetach(c.args, c.cfg, c.profileOverride)
 		}
