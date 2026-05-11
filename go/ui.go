@@ -201,7 +201,7 @@ func dashJobs(sb *strings.Builder) {
 			cmd = cmd[:57] + "..."
 		}
 		started := j.Started
-		if t, err := time.Parse(time.RFC3339, j.Started); err == nil {
+		if t, ok := parseISOLike(j.Started); ok {
 			started = fmtDuration(time.Since(t)) + " ago"
 		}
 		fmt.Fprintf(sb, "  %-12s  %-10s  pid=%-6d  %s  %s\n",
@@ -226,7 +226,7 @@ func dashSessions(sb *strings.Builder) {
 	rows := make([]row, 0, len(sf.Sessions))
 	for sid, rec := range sf.Sessions {
 		r := row{sid: sid, rec: rec}
-		if t, err := time.Parse(time.RFC3339, rec.LastSeen); err == nil {
+		if t, ok := parseISOLike(rec.LastSeen); ok {
 			r.seen = t
 			r.hasSeen = true
 		}
@@ -254,6 +254,26 @@ func dashSessions(sb *strings.Builder) {
 func dashFooter(sb *strings.Builder) {
 	fmt.Fprintf(sb, "%sq quit  r refresh  (auto-refresh every 2s)%s\n",
 		ansiDim, ansiReset)
+}
+
+// parseISOLike accepts the timestamp formats srv writes -- nowISO()
+// emits "2006-01-02T15:04:05" in local time (no timezone), while the
+// mcp log uses time.RFC3339. We try both rather than RFC3339-only so
+// stale job records / sessions from before the dashboard existed
+// still render relative times.
+func parseISOLike(s string) (time.Time, bool) {
+	if s == "" {
+		return time.Time{}, false
+	}
+	if t, err := time.Parse(time.RFC3339, s); err == nil {
+		return t, true
+	}
+	// nowISO() writes local wall-clock without a tz suffix. Parse in
+	// time.Local so time.Since(t) compares apples to apples.
+	if t, err := time.ParseInLocation("2006-01-02T15:04:05", s, time.Local); err == nil {
+		return t, true
+	}
+	return time.Time{}, false
 }
 
 // fmtDuration renders a duration as the largest single unit that fits
