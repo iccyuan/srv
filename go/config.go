@@ -248,7 +248,12 @@ func writeFileAtomic(path string, data []byte, perm os.FileMode) error {
 }
 
 // ResolveProfile picks the active profile by precedence:
-// override > session pin > $SRV_PROFILE > config default.
+// override > session pin > $SRV_PROFILE > .srv-project pin > config default.
+//
+// The `.srv-project` step slots in just before the global default so a
+// repo-level pin wins over "whatever profile happens to be default
+// today" but still respects the user's session-scoped or env-scoped
+// override. See findProjectFile for the lookup rules.
 func ResolveProfile(cfg *Config, override string) (string, *Profile, error) {
 	name := override
 	if name == "" {
@@ -259,6 +264,11 @@ func ResolveProfile(cfg *Config, override string) (string, *Profile, error) {
 	}
 	if name == "" {
 		name = os.Getenv("SRV_PROFILE")
+	}
+	if name == "" {
+		if pf := resolveProjectFile(); pf != nil && pf.Profile != "" {
+			name = pf.Profile
+		}
 	}
 	if name == "" {
 		name = cfg.DefaultProfile
@@ -274,15 +284,16 @@ func ResolveProfile(cfg *Config, override string) (string, *Profile, error) {
 	return name, p, nil
 }
 
-// GetCwd returns the persisted cwd for (current session, profile), falling
-// back to $SRV_CWD if set, then profile.default_cwd.
+// GetCwd returns the persisted cwd for (current session, profile),
+// falling back through:
 //
-// $SRV_CWD exists for MCP / per-project setups where each Claude Code
-// (or similar) launch creates a fresh session id and thus has no
-// persisted cwd. Setting "env": {"SRV_CWD": "/mnt/project/foo"} in the
-// project's MCP registration makes srv land in that directory by
-// default, instead of always starting at ~ and forcing the caller to
-// `srv cd` every time.
+//	session-persisted cwd > $SRV_CWD > .srv-project cwd > profile.default_cwd
+//
+// $SRV_CWD predates the project file and stays higher: it's an explicit
+// per-invocation override (e.g. set in an MCP server registration's env
+// block), whereas .srv-project is a passive checked-in pin. The project
+// file is a one-time setup that travels with the repo; the env override
+// is what you reach for when one launch needs something different.
 func GetCwd(profileName string, profile *Profile) string {
 	_, rec := TouchSession()
 	if cwd, ok := rec.Cwds[profileName]; ok && cwd != "" {
@@ -290,6 +301,9 @@ func GetCwd(profileName string, profile *Profile) string {
 	}
 	if env := os.Getenv("SRV_CWD"); env != "" {
 		return env
+	}
+	if pf := resolveProjectFile(); pf != nil && pf.Cwd != "" {
+		return pf.Cwd
 	}
 	return profile.GetDefaultCwd()
 }

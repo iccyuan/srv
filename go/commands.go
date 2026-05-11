@@ -100,6 +100,7 @@ var subcommands = []subcommand{
 	{name: "guard", handler: func(c cmdCtx) error { return cmdGuard(c.args) }},
 	{name: "color", handler: func(c cmdCtx) error { return cmdColor(c.args) }},
 	{name: "daemon", handler: func(c cmdCtx) error { return cmdDaemon(c.args) }},
+	{name: "project", noConfig: true, handler: func(c cmdCtx) error { return cmdProject(c.args) }},
 
 	// run/exec: -d global flag swaps in cmdDetach; otherwise wrap with
 	// the typo-hint emitter.
