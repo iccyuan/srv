@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bufio"
 	"bytes"
 	"errors"
 	"fmt"
@@ -524,6 +525,92 @@ func (c *Client) RunDetached(command string, cwd string, jobID string) (int, err
 		pid = pid*10 + int(ch-'0')
 	}
 	return pid, nil
+}
+
+// StreamChunkKind tags a streamed output line as stdout vs stderr so
+// downstream consumers (MCP progress notifications, future log
+// renderers) can format them differently.
+type StreamChunkKind int
+
+const (
+	StreamStdout StreamChunkKind = iota
+	StreamStderr
+)
+
+// RunStream runs `command` (optionally chdir'd to cwd) and invokes
+// `onChunk` for every line of stdout/stderr as it arrives, then
+// returns the exit code plus the FULL captured output for the caller
+// to use as the final result.
+//
+// "Line" here is delimited by `\n` -- partial lines at EOF are still
+// emitted. We cap each chunk at 8 KiB so a single mega-line (e.g.
+// `cat huge-binary`) doesn't produce a single 1 GB callback payload.
+// The trailing newline is preserved on each chunk so callers can
+// emit them verbatim.
+//
+// Used by the MCP `run_stream` tool to push progress notifications
+// while the command is still executing, sidestepping the MCP per-tool
+// timeout for medium-length commands (20-50s builds/tests).
+func (c *Client) RunStream(command string, cwd string, onChunk func(kind StreamChunkKind, line string)) (int, string, string, error) {
+	full := wrapWithCwd(command, cwd)
+	sess, err := c.Conn.NewSession()
+	if err != nil {
+		return -1, "", "", err
+	}
+	defer sess.Close()
+
+	stdout, err := sess.StdoutPipe()
+	if err != nil {
+		return -1, "", "", err
+	}
+	stderr, err := sess.StderrPipe()
+	if err != nil {
+		return -1, "", "", err
+	}
+	if err := sess.Start(full); err != nil {
+		return -1, "", "", err
+	}
+
+	var stdoutBuf, stderrBuf bytes.Buffer
+	var wg sync.WaitGroup
+	wg.Add(2)
+	go forwardStreamReader(stdout, StreamStdout, &stdoutBuf, onChunk, &wg)
+	go forwardStreamReader(stderr, StreamStderr, &stderrBuf, onChunk, &wg)
+
+	waitErr := sess.Wait()
+	wg.Wait()
+
+	exit := 0
+	if waitErr != nil {
+		var ee *ssh.ExitError
+		if errors.As(waitErr, &ee) {
+			exit = ee.ExitStatus()
+		} else {
+			return -1, stdoutBuf.String(), stderrBuf.String(), waitErr
+		}
+	}
+	return exit, stdoutBuf.String(), stderrBuf.String(), nil
+}
+
+// forwardStreamReader reads from `src` line-by-line, mirrors each line
+// into `buf` (for the final captured-output return), and calls
+// `onChunk` with the kind + line. Single 8 KiB read buffer caps the
+// per-chunk size for callers that wrap each chunk in a message frame.
+func forwardStreamReader(src io.Reader, kind StreamChunkKind, buf *bytes.Buffer, onChunk func(StreamChunkKind, string), wg *sync.WaitGroup) {
+	defer wg.Done()
+	rd := bufio.NewReaderSize(src, 8*1024)
+	for {
+		line, err := rd.ReadString('\n')
+		if len(line) > 0 {
+			buf.WriteString(line)
+			if onChunk != nil {
+				onChunk(kind, line)
+			}
+		}
+		if err != nil {
+			return
+		}
+	}
 }
 
 // RunStreamStdin runs a command on the remote with `stdin` providing the

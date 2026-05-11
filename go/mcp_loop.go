@@ -16,6 +16,19 @@ import (
 // re-enabled from inside the MCP path -- the entire reason it exists.
 var mcpMode bool
 
+// currentProgressToken carries the per-request progress token from the
+// loop down to whichever streaming handler is dispatched. Plain global
+// is safe because the loop is strictly serial -- one tools/call at a
+// time, set on entry, cleared on exit. Handlers that spawn goroutines
+// snapshot it before returning so the goroutines see a stable value
+// even if the next request blanks the global.
+var currentProgressToken any
+
+// currentProgressTokenFn returns whatever was stamped onto the running
+// request. Streaming-capable tools call this to find out if the client
+// asked for streaming (non-nil) or wants the synchronous shape (nil).
+func currentProgressTokenFn() any { return currentProgressToken }
+
 // cmdMcp is the stdio MCP server entry point. Reads JSON-RPC frames from
 // stdin one line at a time, dispatches by method, writes responses to
 // stdout. Logs lifecycle events to ~/.srv/mcp.log so disconnects can be
@@ -64,6 +77,9 @@ func cmdMcp(cfg *Config) error {
 			var p struct {
 				Name      string         `json:"name"`
 				Arguments map[string]any `json:"arguments"`
+				Meta      struct {
+					ProgressToken any `json:"progressToken"`
+				} `json:"_meta"`
 			}
 			if err := json.Unmarshal(req.Params, &p); err != nil {
 				mcpSend(mcpResponse(req.ID, nil, &jsonRPCError{
@@ -80,8 +96,15 @@ func cmdMcp(cfg *Config) error {
 			if cfg2 == nil {
 				cfg2 = newConfig()
 			}
+			// Stash the progress token before dispatch and clear it
+			// after, so streaming tools can read it via
+			// currentProgressTokenFn(). Loop is serial so the global is
+			// race-free; per-handler goroutines that outlive the call
+			// must snapshot the value themselves.
+			currentProgressToken = p.Meta.ProgressToken
 			start := time.Now()
 			res := safeMCPHandle(p.Name, args, cfg2)
+			currentProgressToken = nil
 			ok := "ok"
 			if res.IsError {
 				ok = "err"

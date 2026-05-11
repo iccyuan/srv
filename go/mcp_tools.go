@@ -338,6 +338,87 @@ func handleMCPRun(args map[string]any, cfg *Config, profileOverride string) tool
 	}
 }
 
+// handleMCPRunStream is the streaming variant of `run`. While the
+// remote command executes, every line of stdout/stderr is pushed to
+// the client as a `notifications/progress` notification tagged with
+// the caller's progressToken. The final `tools/call` response still
+// carries the full captured output (capped at mcpRunTextMax) and the
+// exit code -- progress notifications are informational, not the
+// authoritative output, so a client that ignores them still gets the
+// same shape as `run`.
+//
+// Why this exists: the synchronous `run` tool is bound by the MCP
+// per-tool timeout (Claude Code default 60s) -- a 30s build sits
+// silent until completion and risks the "tools no longer available"
+// red dot if it slips past the bound. Streaming keeps progress
+// flowing so the client doesn't time out, and lets the model see
+// partial output before the command finishes.
+func handleMCPRunStream(args map[string]any, cfg *Config, profileOverride string) toolResult {
+	cmd, _ := args["command"].(string)
+	if cmd == "" {
+		return mcpTextErr("error: command is required")
+	}
+	confirm, _ := args["confirm"].(bool)
+	if blocked := guardCheckRisky("run_stream", cmd, confirm); blocked != nil {
+		return *blocked
+	}
+	profName, prof, errResult := resolveMCPProfile(cfg, profileOverride)
+	if errResult != nil {
+		return *errResult
+	}
+	cwd := GetCwd(profName, prof)
+	token := currentProgressTokenFn()
+
+	// Direct dial -- the daemon's stream_run op exists but is wired for
+	// CLI consumption (writes to stdout); routing through it would
+	// require yet another adapter. Cold handshake hits the same ~2.7s
+	// cost as any non-pooled tool, which is fine for an explicitly-
+	// streaming call (the streaming masks the dial cost).
+	c, err := Dial(prof)
+	if err != nil {
+		return mcpTextErr(fmt.Sprintf("dial: %v", err))
+	}
+	defer c.Close()
+
+	// progress counter: byte-based, monotonic. Some MCP clients use
+	// progress to drive a UI bar; bytes is meaningful enough without
+	// knowing the unbounded total.
+	var emitted int
+	onChunk := func(_ StreamChunkKind, line string) {
+		emitted += len(line)
+		mcpProgress(token, emitted, line)
+	}
+
+	exitCode, stdout, stderr, runErr := c.RunStream(cmd, cwd, onChunk)
+	if runErr != nil {
+		return mcpTextErr(fmt.Sprintf("stream run: %v", runErr))
+	}
+
+	res := &RunCaptureResult{
+		Stdout:   stdout,
+		Stderr:   stderr,
+		ExitCode: exitCode,
+		Cwd:      cwd,
+	}
+	text, truncatedBytes := buildMCPRunText(res, cwd)
+	structured := map[string]any{
+		"exit_code":     exitCode,
+		"cwd":           cwd,
+		"bytes_emitted": emitted,
+	}
+	if truncatedBytes > 0 {
+		structured["truncated_bytes"] = truncatedBytes
+	}
+	if token != nil {
+		structured["streamed"] = true
+	}
+	return toolResult{
+		Content:           []toolContent{{Type: "text", Text: text}},
+		IsError:           exitCode != 0,
+		StructuredContent: structured,
+	}
+}
+
 func handleMCPCd(args map[string]any, cfg *Config, profileOverride string) toolResult {
 	path, _ := args["path"].(string)
 	profName, prof, errResult := resolveMCPProfile(cfg, profileOverride)
@@ -1249,6 +1330,22 @@ var mcpTools = []mcpTool{
 			},
 		},
 		handler: handleMCPRun,
+	},
+	{
+		def: toolDef{
+			Name:        "run_stream",
+			Description: "Streaming variant of `run`. Output is pushed to the client as `notifications/progress` messages while the command runs, then the final tool result delivers the full captured output. Use this for medium-length commands (~20-90s builds, tests, deploys) where synchronous `run` would risk the per-tool timeout: progress keeps the call alive, the model sees partial output mid-flight, and the final result still arrives as the authoritative payload.\n\nThe client must pass `_meta.progressToken` on tools/call for the notifications to be delivered -- without it, this falls back to a synchronous shape identical to `run`.",
+			InputSchema: map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"command": strSchema("Remote shell command."),
+					"profile": strSchema(""),
+					"confirm": boolSchema(false, "Required when guard is on AND command hits a high-risk pattern."),
+				},
+				"required": []string{"command"},
+			},
+		},
+		handler: handleMCPRunStream,
 	},
 	{
 		def: toolDef{

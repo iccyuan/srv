@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"sync"
 )
 
 // JSON-RPC 2.0 framing for the stdio MCP server: types, send/response
@@ -31,6 +32,14 @@ type jsonRPCError struct {
 	Message string `json:"message"`
 }
 
+// mcpSendMu serializes writes to stdout so concurrent emitters can't
+// interleave bytes mid-frame. The synchronous tools/call path doesn't
+// need it (one writer at a time), but the streaming run path has its
+// stdout/stderr forwarder goroutines emitting progress notifications
+// in parallel with whatever else, so every write goes through the
+// mutex to keep frames atomic.
+var mcpSendMu sync.Mutex
+
 // mcpSend marshals a response to stdout terminated with a newline (the
 // stdio MCP framing). Recovers from BrokenPipe so a client that closes
 // mid-write doesn't crash the loop.
@@ -40,8 +49,50 @@ func mcpSend(obj any) {
 		return
 	}
 	defer func() { _ = recover() }() // BrokenPipe
+	mcpSendMu.Lock()
+	defer mcpSendMu.Unlock()
 	os.Stdout.Write(b)
 	os.Stdout.Write([]byte("\n"))
+}
+
+// mcpNotification is the JSON-RPC 2.0 shape for server-to-client
+// notifications (no `id`, the client doesn't reply). Used today for
+// `notifications/progress` so the streaming `run_stream` tool can
+// push partial output before its final tool result lands.
+type mcpNotification struct {
+	JSONRPC string `json:"jsonrpc"`
+	Method  string `json:"method"`
+	Params  any    `json:"params,omitempty"`
+}
+
+// progressParams is the payload of a `notifications/progress` message.
+// `progressToken` echoes the value the client sent in tools/call meta;
+// `progress` is a monotonic counter (we use byte count); `message` is
+// the human-readable chunk -- for run_stream that's the streamed line.
+type progressParams struct {
+	ProgressToken any    `json:"progressToken"`
+	Progress      int    `json:"progress"`
+	Message       string `json:"message,omitempty"`
+}
+
+// mcpProgress emits one `notifications/progress` to the client. Caller
+// is responsible for monotonic `progress` -- we don't auto-increment.
+// When token is nil (caller didn't pass _meta.progressToken) this is a
+// no-op so streaming tools degrade gracefully under non-streaming
+// clients.
+func mcpProgress(token any, progress int, message string) {
+	if token == nil {
+		return
+	}
+	mcpSend(mcpNotification{
+		JSONRPC: "2.0",
+		Method:  "notifications/progress",
+		Params: progressParams{
+			ProgressToken: token,
+			Progress:      progress,
+			Message:       message,
+		},
+	})
 }
 
 func mcpResponse(id any, result any, errObj *jsonRPCError) jsonRPCResponse {
