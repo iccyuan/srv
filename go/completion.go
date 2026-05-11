@@ -37,12 +37,19 @@ _srv() {
         local profs
         profs=$(srv _profiles 2>/dev/null)
         COMPREPLY=( $(compgen -W "$profs" -- "$cur") )
-        return nil
+        return 0
     fi
 
+    # First positional: complete from the subcommand list. We must
+    # return 0 here -- "return nil" (the previous typo) is not a valid
+    # exit code in bash and triggered "numeric argument required" on
+    # every TAB. Under bash-completion or any -o bashdefault setup that
+    # non-zero exit fell through to local file completion, so
+    # "srv con" + TAB looked like it was completing filenames starting
+    # with "con" instead of suggesting config / completion.
     if [[ -z "$sub" ]]; then
         COMPREPLY=( $(compgen -W "$subs" -- "$cur") )
-        return nil
+        return 0
     fi
 
     # Helper: load remote entries from 'srv _ls' into COMPREPLY (preserves
