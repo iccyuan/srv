@@ -107,6 +107,9 @@ var subcommands = []subcommand{
 	{name: "daemon", handler: func(c cmdCtx) error { return cmdDaemon(c.args) }},
 	{name: "project", noConfig: true, handler: func(c cmdCtx) error { return cmdProject(c.args) }},
 	{name: "group", handler: func(c cmdCtx) error { return cmdGroup(c.args, c.cfg) }},
+	{name: "sudo", handler: func(c cmdCtx) error {
+		return cmdSudo(c.args, c.cfg, globalOpts{profile: c.profileOverride})
+	}},
 
 	// run/exec: -d global flag swaps in cmdDetach; -G swaps in fan-out;
 	// otherwise wrap with the typo-hint emitter.

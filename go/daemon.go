@@ -58,6 +58,14 @@ type daemonRequest struct {
 	// Name carries the named entity (tunnel name today) for ops that
 	// look up by name rather than by profile.
 	Name string `json:"name,omitempty"`
+	// PasswordB64 carries a sudo password on sudo_cache_set, base64
+	// encoded so JSON quoting / control characters in the password
+	// can't break the wire format. Not logged on either side.
+	PasswordB64 string `json:"password_b64,omitempty"`
+	// TTLSec is the sudo cache lifetime requested by the caller.
+	// Capped server-side to a reasonable max regardless of what the
+	// client asks for.
+	TTLSec int `json:"ttl_sec,omitempty"`
 }
 
 type daemonResponse struct {
@@ -80,6 +88,9 @@ type daemonResponse struct {
 	// Listen is the human-readable listen address reported by
 	// tunnel_up so the CLI can echo "listening on 127.0.0.1:5432".
 	Listen string `json:"listen,omitempty"`
+	// PasswordB64 is the sudo password returned by sudo_cache_get,
+	// base64 encoded. Empty on cache miss.
+	PasswordB64 string `json:"password_b64,omitempty"`
 }
 
 type wireErr struct {
@@ -126,6 +137,17 @@ type daemonState struct {
 	// doesn't contend with the per-request mu used by ls / cd / run.
 	tunnelsMu sync.Mutex
 	tunnels   map[string]*activeTunnel
+	// In-memory sudo password cache, keyed by profile name. Expires
+	// per entry via sudoCacheEntry.expires (compared on get).
+	sudoMu    sync.Mutex
+	sudoCache map[string]sudoCacheEntry
+}
+
+// sudoCacheEntry is one cached sudo password. Stored only in daemon
+// process memory; never persisted. Expires after .expires.
+type sudoCacheEntry struct {
+	password []byte
+	expires  time.Time
 }
 
 // activeTunnel is one running, daemon-hosted tunnel. The forwarder
@@ -222,6 +244,7 @@ func cmdDaemon(args []string) error {
 		lastReq:   time.Now(),
 		stopCh:    make(chan struct{}),
 		tunnels:   map[string]*activeTunnel{},
+		sudoCache: map[string]sudoCacheEntry{},
 	}
 
 	// Background gc: close idle connections, exit if whole daemon idle.
@@ -390,6 +413,12 @@ func (s *daemonState) dispatch(req daemonRequest) (resp daemonResponse) {
 		return s.handleTunnelDown(req)
 	case "tunnel_list":
 		return s.handleTunnelList(req)
+	case "sudo_cache_get":
+		return s.handleSudoCacheGet(req)
+	case "sudo_cache_set":
+		return s.handleSudoCacheSet(req)
+	case "sudo_cache_clear":
+		return s.handleSudoCacheClear(req)
 	}
 	return daemonResponse{OK: false, Err: "unknown op: " + req.Op}
 }
