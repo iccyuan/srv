@@ -66,7 +66,7 @@ srv logs <id> [-f]
 srv kill <id> [-9|--signal=NAME]
 srv sessions [list|show|clear|prune]
 srv daemon [status|restart|logs|prune-cache|stop]
-srv completion <bash|zsh|powershell>
+srv completion <bash|zsh|powershell> [--install]
 srv mcp
 srv guard [on|off|status]
 srv install

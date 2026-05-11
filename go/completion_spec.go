@@ -69,7 +69,7 @@ var compSpecs = map[string]compSpec{
 	"use": {positions: []argSlot{{typ: argEnumProfile, choices: []string{"--clear"}}}},
 
 	"sessions":   {positions: []argSlot{{typ: argEnum, choices: []string{"list", "show", "clear", "prune"}}}},
-	"completion": {positions: []argSlot{{typ: argEnum, choices: []string{"bash", "zsh", "powershell", "clink"}}}},
+	"completion": {positions: []argSlot{{typ: argEnum, choices: []string{"bash", "zsh", "powershell"}}}},
 	"guard":      {positions: []argSlot{{typ: argEnum, choices: []string{"on", "off", "status"}}}},
 	"daemon":     {positions: []argSlot{{typ: argEnum, choices: []string{"status", "stop", "restart", "logs", "prune-cache"}}}},
 	"color":      {positions: []argSlot{{typ: argEnum, choices: []string{"on", "off", "auto", "use", "list", "status"}}}},

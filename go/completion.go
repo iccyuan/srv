@@ -1,8 +1,12 @@
 package main
 
 import (
+	"bytes"
 	"fmt"
 	"os"
+	"os/exec"
+	"path/filepath"
+	"runtime"
 	"strings"
 )
 
@@ -277,8 +281,43 @@ __SRV_CASES__
 
 func cmdCompletion(args []string) error {
 	if len(args) == 0 {
-		return exitErr(1, "usage: srv completion <bash|zsh|powershell>")
+		return exitErr(1, "usage: srv completion <bash|zsh|powershell> [--install]")
 	}
+	// Parse optional --install flag and find the shell name. Flag order
+	// is irrelevant: `srv completion bash --install` and
+	// `srv completion --install bash` both work.
+	install := false
+	shell := ""
+	for _, a := range args {
+		switch a {
+		case "--install", "-i":
+			install = true
+		default:
+			if shell == "" {
+				shell = a
+			}
+		}
+	}
+	if shell == "" {
+		return exitErr(1, "usage: srv completion <bash|zsh|powershell> [--install]")
+	}
+
+	script, canon, err := buildCompletionScript(shell)
+	if err != nil {
+		return err
+	}
+	if install {
+		return installCompletionFor(canon, script)
+	}
+	fmt.Print(script)
+	return nil
+}
+
+// buildCompletionScript renders the per-shell completion script and
+// returns it along with the canonical shell name (bash / zsh /
+// powershell). Splitting this from cmdCompletion lets --install reuse
+// the same renderer without duplicating the placeholder substitutions.
+func buildCompletionScript(shell string) (string, string, error) {
 	// The bash and PowerShell scripts get their `subs` list rendered
 	// from the live registry so adding a new subcommand only requires
 	// a commands.go entry, not three parallel hand-edits. zsh keeps its
@@ -287,17 +326,17 @@ func cmdCompletion(args []string) error {
 	bashSubs := strings.Join(userVisibleSubcommands(), " ")
 	psSubs := "'" + strings.Join(userVisibleSubcommands(), "','") + "'"
 
-	switch args[0] {
+	switch shell {
 	case "bash":
 		// bash users have srv on PATH (otherwise they couldn't run
 		// `srv completion bash` in the first place); leave the inline
 		// `srv _profiles` to use PATH lookup.
 		out := strings.ReplaceAll(bashCompletion, "__SRV_SUBS__", bashSubs)
 		out = strings.ReplaceAll(out, "__SRV_CASES__", emitBashCases())
-		fmt.Print(out)
+		return out, "bash", nil
 	case "zsh":
 		out := strings.ReplaceAll(zshCompletion, "__SRV_CASES__", emitZshCases())
-		fmt.Print(out)
+		return out, "zsh", nil
 	case "powershell", "pwsh", "ps":
 		// PowerShell argument-completer scopes don't always inherit the
 		// expected PATH for native command lookup. Burn the absolute path
@@ -312,9 +351,199 @@ func cmdCompletion(args []string) error {
 		out = strings.ReplaceAll(out, "__SRV_CASES__", emitPSCases())
 		out = strings.ReplaceAll(out, "& srv _profiles", "& "+quoted+" _profiles")
 		out = strings.ReplaceAll(out, "& srv _ls", "& "+quoted+" _ls")
-		fmt.Print(out)
-	default:
-		return exitErr(1, "error: unknown shell %q (expected bash/zsh/powershell)", args[0])
+		return out, "powershell", nil
 	}
+	return "", "", exitErr(1, "error: unknown shell %q (expected bash/zsh/powershell)", shell)
+}
+
+// Markers wrap the loader block in the user's rc file so subsequent
+// `--install` runs replace the previous install in place instead of
+// stacking duplicate copies. Format kept identical across shells so
+// the strip logic is shell-agnostic.
+const (
+	completionInstallStart = "# >>> srv completion >>>"
+	completionInstallEnd   = "# <<< srv completion <<<"
+)
+
+// installCompletionFor writes a loader block into the right rc file
+// for the chosen shell.
+//
+// The block invokes `srv completion <shell>` at every shell startup,
+// resolved via PATH rather than a baked-in absolute path. That keeps
+// the install upgrade-proof: if the user moves the binary or installs
+// a newer version under the same name, the loader picks it up
+// automatically -- no re-install. The "if command exists" guard means
+// the loader is a no-op when srv is temporarily off PATH instead of
+// surfacing a confusing error every time the shell starts.
+func installCompletionFor(shell, script string) error {
+	var (
+		rcPath string
+		block  string
+		err    error
+	)
+	switch shell {
+	case "bash":
+		rcPath, err = bashRcPath()
+		if err != nil {
+			return err
+		}
+		block = `# srv tab completion (auto-installed)
+if command -v srv >/dev/null 2>&1; then
+    source <(srv completion bash)
+fi`
+	case "zsh":
+		rcPath, err = zshRcPath()
+		if err != nil {
+			return err
+		}
+		block = `# srv tab completion (auto-installed)
+if command -v srv >/dev/null 2>&1; then
+    source <(srv completion zsh)
+fi`
+	case "powershell":
+		rcPath, err = psProfilePath()
+		if err != nil {
+			// $PROFILE lookup failed -- usually no pwsh / powershell on
+			// PATH. Fall back to writing the script to ~/.srv/srv-completion.ps1
+			// and tell the user how to dot-source it.
+			return psInstallFallback(script)
+		}
+		block = `# srv tab completion (auto-installed)
+if (Get-Command srv -ErrorAction SilentlyContinue) {
+    srv completion powershell | Out-String | Invoke-Expression
+}`
+	default:
+		return fmt.Errorf("install not supported for %q", shell)
+	}
+
+	if err := writeBlockToRC(rcPath, block); err != nil {
+		return err
+	}
+	fmt.Fprintf(os.Stderr, "installed srv %s completion into %s\n", shell, rcPath)
+	fmt.Fprintf(os.Stderr, "open a new shell (or reload it) to activate.\n")
 	return nil
+}
+
+func bashRcPath() (string, error) {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return "", err
+	}
+	// On macOS the canonical interactive-login startup file is
+	// ~/.bash_profile, on Linux it's ~/.bashrc. Pick by what already
+	// exists; fall back to ~/.bashrc if neither does.
+	if runtime.GOOS == "darwin" {
+		bp := filepath.Join(home, ".bash_profile")
+		if _, err := os.Stat(bp); err == nil {
+			return bp, nil
+		}
+	}
+	return filepath.Join(home, ".bashrc"), nil
+}
+
+func zshRcPath() (string, error) {
+	if zdotdir := os.Getenv("ZDOTDIR"); zdotdir != "" {
+		return filepath.Join(zdotdir, ".zshrc"), nil
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(home, ".zshrc"), nil
+}
+
+// psProfilePath asks PowerShell itself where $PROFILE points. $PROFILE
+// is host-specific (PS 7 on Linux: ~/.config/powershell/...; Windows
+// PS 5.1: ~/Documents/WindowsPowerShell/...) so guessing from $HOME is
+// fragile. Spawning the shell once at install time picks the right one
+// in every environment we run into.
+func psProfilePath() (string, error) {
+	for _, exe := range []string{"pwsh", "powershell"} {
+		out, err := exec.Command(exe, "-NoProfile", "-NonInteractive", "-Command", "$PROFILE.CurrentUserAllHosts").Output()
+		if err != nil {
+			continue
+		}
+		p := strings.TrimSpace(string(out))
+		if p != "" {
+			return p, nil
+		}
+	}
+	return "", fmt.Errorf("could not resolve $PROFILE (neither pwsh nor powershell on PATH)")
+}
+
+// psInstallFallback handles the "no PS interpreter on PATH" case by
+// dumping the rendered script to ~/.srv/srv-completion.ps1 and telling
+// the user how to wire it up themselves.
+func psInstallFallback(script string) error {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return err
+	}
+	dir := filepath.Join(home, ".srv")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return err
+	}
+	path := filepath.Join(dir, "srv-completion.ps1")
+	if err := os.WriteFile(path, []byte(script), 0o644); err != nil {
+		return err
+	}
+	fmt.Fprintf(os.Stderr, "could not auto-locate $PROFILE; wrote completion to %s\n", path)
+	fmt.Fprintf(os.Stderr, "add this line to your PowerShell profile:\n")
+	fmt.Fprintf(os.Stderr, "    . %q\n", path)
+	return nil
+}
+
+// writeBlockToRC inserts `block` between the install markers in
+// rcPath, replacing any prior srv-completion block. Creates the file
+// (and parent dirs) when missing. Idempotent: re-running --install
+// updates the block in place rather than appending a duplicate.
+func writeBlockToRC(rcPath, block string) error {
+	var existing []byte
+	if data, err := os.ReadFile(rcPath); err == nil {
+		existing = data
+	} else if !os.IsNotExist(err) {
+		return err
+	}
+	cleaned := stripCompletionBlock(existing)
+
+	var buf bytes.Buffer
+	buf.Write(cleaned)
+	if len(cleaned) > 0 && !bytes.HasSuffix(cleaned, []byte("\n")) {
+		buf.WriteByte('\n')
+	}
+	fmt.Fprintf(&buf, "%s\n%s\n%s\n", completionInstallStart, block, completionInstallEnd)
+
+	if err := os.MkdirAll(filepath.Dir(rcPath), 0o755); err != nil {
+		return err
+	}
+	return os.WriteFile(rcPath, buf.Bytes(), 0o644)
+}
+
+// stripCompletionBlock removes every `>>> srv completion >>> ... <<< srv
+// completion <<<` block from `data`. Tolerates multiple stray blocks
+// from manual edits. We strip the newline that follows the end marker
+// (so the block disappears cleanly) but keep the newline that precedes
+// the start marker -- that newline is the natural separator between
+// the preceding content and what follows after the block is gone.
+func stripCompletionBlock(data []byte) []byte {
+	s := string(data)
+	for {
+		i := strings.Index(s, completionInstallStart)
+		if i < 0 {
+			break
+		}
+		rest := s[i:]
+		j := strings.Index(rest, completionInstallEnd)
+		if j < 0 {
+			// Malformed -- no end marker. Leave alone rather than gobble
+			// the rest of the file.
+			break
+		}
+		endIdx := i + j + len(completionInstallEnd)
+		if endIdx < len(s) && s[endIdx] == '\n' {
+			endIdx++
+		}
+		s = s[:i] + s[endIdx:]
+	}
+	return []byte(s)
 }

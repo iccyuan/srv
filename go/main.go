@@ -78,7 +78,8 @@ Sessions (per-shell isolation):
   srv sessions prune             remove records whose pid is dead
 
 Integrations:
-  srv completion <bash|zsh|powershell>   emit shell completion script
+  srv completion <bash|zsh|powershell> [--install]
+                                         emit shell completion script (or auto-install into the shell's rc file)
   srv mcp                                run as a stdio MCP server
   srv guard [on|off|status]              MCP confirmation guard for high-risk ops (default off)
   srv color [on|off|use [name]|list|status]
@@ -171,7 +172,8 @@ const helpZH = `srv - 跨平台 SSH 远端命令工具,持久 cwd / 连接复用
   srv sessions prune             清掉 PID 已死的 session
 
 集成 / 工具:
-  srv completion <bash|zsh|powershell>   输出 shell 补全脚本
+  srv completion <bash|zsh|powershell> [--install]
+                                         输出 shell 补全脚本(加 --install 直接写入对应 shell 的 rc 文件)
   srv mcp                                以 stdio MCP server 跑
   srv guard [on|off|status]              MCP 高危操作确认开关(默认关闭,可针对当前 shell 开启)
   srv color [on|off|use [name]|list|status]
