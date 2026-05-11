@@ -168,19 +168,27 @@ _srv "$@"
 `
 
 const powershellCompletion = `# srv PowerShell completion
-Register-ArgumentCompleter -Native -CommandName srv -ScriptBlock {
+# Registered for both 'srv' and 'srv.exe' so users who invoke either
+# form (` + "`" + `srv con<TAB>` + "`" + ` vs ` + "`" + `srv.exe con<TAB>` + "`" + `) get the same suggestions.
+Register-ArgumentCompleter -Native -CommandName srv,srv.exe -ScriptBlock {
     param($wordToComplete, $commandAst, $cursorPosition)
 
     $mk = { param($t) [System.Management.Automation.CompletionResult]::new($t, $t, 'ParameterValue', $t) }
     $emit = { param($items) $items | Where-Object { $_ -like "$wordToComplete*" } | ForEach-Object { & $mk $_ } }
     $profiles = { @((& srv _profiles 2>$null) -split "` + "`" + `n" | Where-Object { $_ }) }
 
-    # Strip global flags and find positional tokens after them.
+    # Strip the command element and find positional tokens after it.
     # @(...) is required: a single-item pipeline collapses to a scalar in PS,
     # which would make foreach iterate characters of the string.
+    # The basename check (Split-Path -Leaf) covers cases where the AST
+    # surfaced the full path (e.g. 'C:\path\srv.exe') instead of the bare
+    # command name.
     $tokens = @($commandAst.CommandElements |
         ForEach-Object { $_.ToString() } |
-        Where-Object { $_ -ne 'srv' -and $_ -ne 'srv.exe' })
+        Where-Object {
+            $leaf = try { [System.IO.Path]::GetFileName($_) } catch { $_ }
+            $leaf -ne 'srv' -and $leaf -ne 'srv.exe'
+        })
     $positional = @()
     $skip = $false
     foreach ($t in $tokens) {
