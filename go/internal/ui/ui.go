@@ -1,13 +1,17 @@
-package main
+package ui
 
 import (
 	"fmt"
 	"os"
 	"sort"
 	"srv/internal/ansi"
+	"srv/internal/clierr"
+	"srv/internal/config"
+	"srv/internal/daemon"
 	"srv/internal/jobs"
 	"srv/internal/mcplog"
 	"srv/internal/project"
+	"srv/internal/remote"
 	"srv/internal/srvtty"
 	"srv/internal/tunnel"
 	"strconv"
@@ -77,19 +81,19 @@ type uiState struct {
 	// the render loop reads from these fields instead of re-doing
 	// the I/O. Without this cache every poll ticks costs roughly:
 	//
-	//	~10ms  GetCwd / session.Touch (sessions.json read + write)
+	//	~10ms  config.GetCwd / session.Touch (sessions.json read + write)
 	//	~5ms   resolveProjectFile (cwd walk + stat)
-	//	~5ms   panelDaemon daemonDial + status RPC
+	//	~5ms   panelDaemon daemon.DialSock + status RPC
 	//	~5ms   panelTunnels loadTunnelStatuses
 	//	~5ms   panelTunnelDetail loadTunnelStatuses (again)
 	//
 	// On a 150ms poll that's ~20% CPU just to redraw "nothing
 	// changed". With the cache idle redraws cost ~1ms (string build).
-	snapCfg          *Config
+	snapCfg          *config.Config
 	snapJobs         []*jobs.Record
 	snapMCP          mcplog.Status
-	snapDaemonResp   *daemonResponse
-	snapTunnelActive map[string]tunnelInfo
+	snapDaemonResp   *daemon.Response
+	snapTunnelActive map[string]daemon.TunnelInfo
 	snapTunnelErrs   map[string]string
 	snapProject      *project.File
 	snapAt           time.Time
@@ -147,7 +151,7 @@ func countUIRows(rows []uiRow) (tunnels, jobs, mcp int) {
 	return tunnels, jobs, mcp
 }
 
-// cmdUI is `srv ui` -- a one-screen dashboard showing the bits of srv
+// Cmd is `srv ui` -- a one-screen dashboard showing the bits of srv
 // state that usually require five separate subcommands to inspect:
 // active profile / cwd, daemon health, saved profile groups, saved
 // tunnels (with live up/down state), MCP servers, detached jobs.
@@ -180,7 +184,7 @@ func countUIRows(rows []uiRow) (tunnels, jobs, mcp int) {
 //	p / P         cycle the active profile forward / backward
 //	                (independent of the shell's `srv use` choice)
 //	k             kill the selected job (arms a Y/N confirm)
-func cmdUI(cfg *Config) error {
+func Cmd(cfg *config.Config) error {
 	if !srvtty.IsStdinTTY() {
 		// Without a TTY there's no way to read keys; degrade to a
 		// one-shot print of the snapshot so `srv ui | less` still
@@ -192,7 +196,7 @@ func cmdUI(cfg *Config) error {
 	fd := int(os.Stdin.Fd())
 	state, err := term.MakeRaw(fd)
 	if err != nil {
-		return exitErr(1, "tty raw mode: %v", err)
+		return clierr.Errf(1, "tty raw mode: %v", err)
 	}
 	defer term.Restore(fd, state)
 
@@ -251,7 +255,7 @@ func cmdUI(cfg *Config) error {
 		// reuse the cached reads -- the visible latency the user
 		// notices when MCP-switching.
 		if st.snapCfg == nil || st.snapAt.IsZero() || time.Since(st.snapAt) > snapTTL {
-			if fresh, _ := LoadConfig(); fresh != nil {
+			if fresh, _ := config.Load(); fresh != nil {
 				st.snapCfg = fresh
 			}
 			st.snapJobs = currentJobs()
@@ -299,7 +303,7 @@ func cmdUI(cfg *Config) error {
 					return nil, false
 				}
 				capture := func(cmd string) (string, int, bool) {
-					res, err := runRemoteCapture(prof, "", cmd)
+					res, err := remote.RunCapture(prof, "", cmd)
 					if err != nil || res == nil {
 						return "", 0, false
 					}
@@ -384,7 +388,7 @@ func cmdUI(cfg *Config) error {
 // sortedTunnelNames returns the names of all defined tunnels in
 // stable alphabetical order so the cursor sees a deterministic row
 // layout across re-renders.
-func sortedTunnelNames(cfg *Config) []string {
+func sortedTunnelNames(cfg *config.Config) []string {
 	if cfg == nil || len(cfg.Tunnels) == 0 {
 		return nil
 	}
@@ -653,7 +657,7 @@ func indexOf(xs []string, v string) int {
 // Precedence: an active confirmation popup eats every key until it
 // resolves (Y = run, anything else = cancel), so a stray arrow press
 // can't accidentally trigger a different action while a "kill?" is up.
-func handleUIKey(b byte, st *uiState, jobs []*jobs.Record, tunnelNames []string, cfg *Config, kr *srvtty.KeyReader) bool {
+func handleUIKey(b byte, st *uiState, jobs []*jobs.Record, tunnelNames []string, cfg *config.Config, kr *srvtty.KeyReader) bool {
 	if st.confirm != nil {
 		yes := b == 'y' || b == 'Y'
 		action := st.confirm.action
@@ -741,7 +745,7 @@ func handleUIKey(b byte, st *uiState, jobs []*jobs.Record, tunnelNames []string,
 // Non-applicable combinations (Space on a job, k on a tunnel) are
 // silently ignored -- the key hint in the footer already advertises
 // which keys apply to which kind of row.
-func armConfirmFor(st *uiState, row uiRow, jobs []*jobs.Record, tunnelNames []string, cfg *Config, key byte) {
+func armConfirmFor(st *uiState, row uiRow, jobs []*jobs.Record, tunnelNames []string, cfg *config.Config, key byte) {
 	switch row.kind {
 	case "job":
 		if key != 'k' || row.idx < 0 || row.idx >= len(jobs) {
@@ -828,7 +832,7 @@ func truncOneLine(s string, width int) string {
 
 // tunnelProfileLabel renders the profile chosen for a tunnel, falling
 // back to "(default at up-time)" when the def left it empty.
-func tunnelProfileLabel(def *TunnelDef) string {
+func tunnelProfileLabel(def *config.TunnelDef) string {
 	if def.Profile == "" {
 		return "(default)"
 	}
@@ -840,15 +844,15 @@ func tunnelProfileLabel(def *TunnelDef) string {
 // same daemon protocol as the CLI subcommands so behaviour stays
 // identical; result strings flow back to the footer.
 func uiTunnelUp(name string) (string, error) {
-	if !ensureDaemon() {
+	if !daemon.Ensure() {
 		return "", fmt.Errorf("daemon unavailable")
 	}
-	conn := daemonDial(2 * time.Second)
+	conn := daemon.DialSock(2 * time.Second)
 	if conn == nil {
 		return "", fmt.Errorf("daemon unreachable")
 	}
 	defer conn.Close()
-	resp, err := daemonCall(conn, daemonRequest{Op: "tunnel_up", Name: name}, 10*time.Second)
+	resp, err := daemon.Call(conn, daemon.Request{Op: "tunnel_up", Name: name}, 10*time.Second)
 	if err != nil {
 		return "", err
 	}
@@ -866,12 +870,12 @@ func uiTunnelUp(name string) (string, error) {
 }
 
 func uiTunnelDown(name string) (string, error) {
-	conn := daemonDial(2 * time.Second)
+	conn := daemon.DialSock(2 * time.Second)
 	if conn == nil {
 		return "", fmt.Errorf("daemon not running")
 	}
 	defer conn.Close()
-	resp, err := daemonCall(conn, daemonRequest{Op: "tunnel_down", Name: name}, 5*time.Second)
+	resp, err := daemon.Call(conn, daemon.Request{Op: "tunnel_down", Name: name}, 5*time.Second)
 	if err != nil {
 		return "", err
 	}
@@ -888,8 +892,8 @@ func uiTunnelDown(name string) (string, error) {
 // uiTunnelRemove stops any running instance first (best-effort), then
 // deletes the saved definition from config. Saving the config goes
 // through the regular write-back path so other shells see the
-// removal on their next LoadConfig.
-func uiTunnelRemove(name string, cfg *Config) (string, error) {
+// removal on their next config.Load.
+func uiTunnelRemove(name string, cfg *config.Config) (string, error) {
 	// Best-effort stop. Ignoring errors here is intentional: the
 	// user said "remove", not "remove iff running"; if the down
 	// fails we still drop the saved entry.
@@ -901,7 +905,7 @@ func uiTunnelRemove(name string, cfg *Config) (string, error) {
 		return "", fmt.Errorf("tunnel %q not found", name)
 	}
 	delete(cfg.Tunnels, name)
-	if err := SaveConfig(cfg); err != nil {
+	if err := config.Save(cfg); err != nil {
 		return "", err
 	}
 	return "removed", nil
@@ -913,13 +917,13 @@ func uiTunnelRemove(name string, cfg *Config) (string, error) {
 // such pid ...") so the caller can put it in the footer. Errors flow
 // back to surface in the dashboard, NOT to stderr -- the screen is
 // in raw mode and stray writes break the layout.
-func uiKillJob(j *jobs.Record, cfg *Config) (string, error) {
+func uiKillJob(j *jobs.Record, cfg *config.Config) (string, error) {
 	prof, ok := cfg.Profiles[j.Profile]
 	if !ok {
 		return "", fmt.Errorf("profile %q not found", j.Profile)
 	}
 	cmd := fmt.Sprintf("kill -TERM %d 2>/dev/null && echo killed || echo 'no such pid'", j.Pid)
-	res, err := runRemoteCapture(prof, "", cmd)
+	res, err := remote.RunCapture(prof, "", cmd)
 	if err != nil {
 		return "", err
 	}
@@ -968,7 +972,7 @@ func redrawDashboard(content string, prevLines int) {
 //
 // Snapshot mode (st == nil) skips the side-by-side -- a piped
 // output of stacked boxes is more useful than ascii-art columns.
-func renderDashboard(cfg *Config, jobs []*jobs.Record, tunnelNames []string, st *uiState) string {
+func renderDashboard(cfg *config.Config, jobs []*jobs.Record, tunnelNames []string, st *uiState) string {
 	var sb strings.Builder
 	panelHeader(&sb, st)
 	panelActive(&sb, cfg, st)
@@ -1254,7 +1258,7 @@ func panelHeader(sb *strings.Builder, st *uiState) {
 // inline when the running total approaches dashboardContentWidth.
 // The "p switch" key hint lives in the box title so the content row
 // stays free for the actual data.
-func panelActive(sb *strings.Builder, cfg *Config, st *uiState) {
+func panelActive(sb *strings.Builder, cfg *config.Config, st *uiState) {
 	boxTopWithHint(sb, "active", "p switch", false)
 	name, prof := lookupSelectedProfile(cfg, st)
 	if prof == nil {
@@ -1298,7 +1302,7 @@ func panelActive(sb *strings.Builder, cfg *Config, st *uiState) {
 // also dominated the per-render cost, so skipping it makes profile
 // switches feel instant. Order of precedence: $SRV_CWD env > pinned
 // project file > profile.default_cwd.
-func uiCwd(prof *Profile, pf *project.File) string {
+func uiCwd(prof *config.Profile, pf *project.File) string {
 	if env := os.Getenv("SRV_CWD"); env != "" {
 		return env
 	}
@@ -1314,8 +1318,8 @@ func uiCwd(prof *Profile, pf *project.File) string {
 // lookupSelectedProfile reads the dashboard's chosen profile from
 // st.selectedProfile (preferred) and falls back to the first
 // available cfg profile -- the dashboard is no longer pegged to
-// sessions.json so we never call ResolveProfile here.
-func lookupSelectedProfile(cfg *Config, st *uiState) (string, *Profile) {
+// sessions.json so we never call config.Resolve here.
+func lookupSelectedProfile(cfg *config.Config, st *uiState) (string, *config.Profile) {
 	if cfg == nil {
 		return "", nil
 	}
@@ -1402,11 +1406,11 @@ func ellipsisAnsiRight(s string, w int) string {
 // panelDaemon renders daemon state from the cached snapshot -- never
 // dials inline. The main loop refreshes st.snapDaemonResp at most
 // once per snapTTL (2s); without that, each render fired a fresh
-// daemonDial+status RPC, which at the 150ms poll interval meant
+// daemon.DialSock+status RPC, which at the 150ms poll interval meant
 // 6-7 socket round-trips per second.
 func panelDaemon(sb *strings.Builder, st *uiState) {
 	boxTop(sb, "daemon")
-	var resp *daemonResponse
+	var resp *daemon.Response
 	if st != nil {
 		resp = st.snapDaemonResp
 	} else {
@@ -1434,20 +1438,20 @@ func panelDaemon(sb *strings.Builder, st *uiState) {
 // fetchDaemonStatusForUI does a single status RPC and returns the
 // response, or nil if the daemon isn't reachable. Used by the main
 // loop's snapshot refresh and by the snapshot-mode (st==nil) fallback.
-func fetchDaemonStatusForUI() *daemonResponse {
-	conn := daemonDial(300 * time.Millisecond)
+func fetchDaemonStatusForUI() *daemon.Response {
+	conn := daemon.DialSock(300 * time.Millisecond)
 	if conn == nil {
 		return nil
 	}
 	defer conn.Close()
-	resp, err := daemonCall(conn, daemonRequest{Op: "status"}, time.Second)
+	resp, err := daemon.Call(conn, daemon.Request{Op: "status"}, time.Second)
 	if err != nil || resp == nil || !resp.OK {
 		return nil
 	}
 	return resp
 }
 
-func panelGroups(sb *strings.Builder, cfg *Config) {
+func panelGroups(sb *strings.Builder, cfg *config.Config) {
 	if len(cfg.Groups) == 0 {
 		return
 	}
@@ -1468,12 +1472,12 @@ func panelGroups(sb *strings.Builder, cfg *Config) {
 	fmt.Fprintln(sb)
 }
 
-func panelTunnels(sb *strings.Builder, cfg *Config, names []string, st *uiState) {
+func panelTunnels(sb *strings.Builder, cfg *config.Config, names []string, st *uiState) {
 	if len(names) == 0 {
 		return
 	}
 	focused := st != nil && st.focusPane == "tunnel"
-	var active map[string]tunnelInfo
+	var active map[string]daemon.TunnelInfo
 	var errs map[string]string
 	if st != nil {
 		active = st.snapTunnelActive
@@ -1561,7 +1565,7 @@ func panelJobs(sb *strings.Builder, jobs []*jobs.Record, st *uiState) {
 // arrow / Tab event so the user doesn't have to press Enter to
 // "open" a row -- ranger / mutt / lazygit pattern. Falls back to a
 // hint when nothing is selected.
-func panelDetail(sb *strings.Builder, cfg *Config, jobs []*jobs.Record, tunnelNames []string, mcp mcplog.Status, st *uiState) {
+func panelDetail(sb *strings.Builder, cfg *config.Config, jobs []*jobs.Record, tunnelNames []string, mcp mcplog.Status, st *uiState) {
 	row := st.currentRow()
 	switch row.kind {
 	case "tunnel":
@@ -1658,7 +1662,7 @@ func panelJobDetail(sb *strings.Builder, j *jobs.Record) {
 // column. Surfaces last-attempt errors prominently -- that's the
 // info the user most wants when something looks "stopped" but they
 // expected "running".
-func panelTunnelDetail(sb *strings.Builder, name string, cfg *Config, st *uiState) {
+func panelTunnelDetail(sb *strings.Builder, name string, cfg *config.Config, st *uiState) {
 	def := cfg.Tunnels[name]
 	if def == nil {
 		boxTop(sb, "tunnel detail")
@@ -1673,7 +1677,7 @@ func panelTunnelDetail(sb *strings.Builder, name string, cfg *Config, st *uiStat
 	boxLine(sb, kvLine("spec", dashPath(def.Spec)))
 	boxLine(sb, kvLine("profile", ansi.Cyan+tunnelProfileLabel(def)+ansi.Reset))
 	boxLine(sb, kvLine("autostart", boolLabel(def.Autostart)))
-	var active map[string]tunnelInfo
+	var active map[string]daemon.TunnelInfo
 	var errs map[string]string
 	if st != nil {
 		active = st.snapTunnelActive
@@ -1897,7 +1901,7 @@ func renderJobDetail(j *jobs.Record, st *uiState) string {
 
 // renderTunnelDetail is the per-tunnel detail panel triggered by
 // Enter on a tunnel row. Mirrors renderJobDetail's shape.
-func renderTunnelDetail(name string, cfg *Config, st *uiState) string {
+func renderTunnelDetail(name string, cfg *config.Config, st *uiState) string {
 	def := cfg.Tunnels[name]
 	if def == nil {
 		return "tunnel " + name + " not found\n"
@@ -1980,7 +1984,7 @@ func wrapText(s string, width int) []string {
 }
 
 // dashboardWidth / dashboardContentWidth follow the terminal's
-// actual column count once cmdUI starts (set by updateDashboardWidth
+// actual column count once Cmd starts (set by updateDashboardWidth
 // each redraw). The hard-coded defaults take over only in non-TTY
 // snapshot mode where no terminal size is reported.
 var dashboardWidth = 88
@@ -2101,9 +2105,9 @@ func dashTableHeader(sb *strings.Builder, cols ...string) {
 	fmt.Fprintf(sb, "  %s%s%s\n", ansi.Dim, dashboardSubRule, ansi.Reset)
 }
 
-func dashActive(sb *strings.Builder, cfg *Config) {
+func dashActive(sb *strings.Builder, cfg *config.Config) {
 	dashSection(sb, "Active")
-	name, prof, err := ResolveProfile(cfg, "")
+	name, prof, err := config.Resolve(cfg, "")
 	if err != nil {
 		dashField(sb, "state", dashStatus("no profile", ansi.Dim))
 		fmt.Fprintln(sb)
@@ -2118,7 +2122,7 @@ func dashActive(sb *strings.Builder, cfg *Config) {
 	}
 	dashField(sb, "profile", dashName(name))
 	dashField(sb, "target", ansi.Cyan+target+ansi.Reset)
-	cwd := GetCwd(name, prof)
+	cwd := config.GetCwd(name, prof)
 	dashField(sb, "cwd", dashPath(cwd))
 	if pf := project.Resolve(); pf != nil {
 		dashField(sb, "pinned", dashPath(pf.Path))
@@ -2128,14 +2132,14 @@ func dashActive(sb *strings.Builder, cfg *Config) {
 
 func dashDaemon(sb *strings.Builder) {
 	dashSection(sb, "Daemon")
-	conn := daemonDial(300 * time.Millisecond)
+	conn := daemon.DialSock(300 * time.Millisecond)
 	if conn == nil {
 		dashField(sb, "state", dashStatus("stopped", ansi.Dim))
 		fmt.Fprintln(sb)
 		return
 	}
 	defer conn.Close()
-	resp, err := daemonCall(conn, daemonRequest{Op: "status"}, time.Second)
+	resp, err := daemon.Call(conn, daemon.Request{Op: "status"}, time.Second)
 	if err != nil || resp == nil || !resp.OK {
 		dashField(sb, "state", dashStatus("unreachable", ansi.Red))
 		fmt.Fprintln(sb)
@@ -2150,7 +2154,7 @@ func dashDaemon(sb *strings.Builder) {
 	fmt.Fprintln(sb)
 }
 
-func dashGroups(sb *strings.Builder, cfg *Config) {
+func dashGroups(sb *strings.Builder, cfg *config.Config) {
 	if len(cfg.Groups) == 0 {
 		return
 	}
@@ -2177,7 +2181,7 @@ func dashGroups(sb *strings.Builder, cfg *Config) {
 // Status precedence: running > failed > stopped. A tunnel that's
 // currently up is shown green even if a prior attempt errored; the
 // error gets cleared on the next successful start anyway.
-func dashTunnels(sb *strings.Builder, cfg *Config, names []string, st *uiState) {
+func dashTunnels(sb *strings.Builder, cfg *config.Config, names []string, st *uiState) {
 	if len(names) == 0 {
 		return
 	}

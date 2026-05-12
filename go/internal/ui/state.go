@@ -1,9 +1,10 @@
-package main
+package ui
 
 import (
 	"encoding/json"
 	"os"
 	"sort"
+	"srv/internal/config"
 
 	"srv/internal/srvpath"
 )
@@ -51,7 +52,7 @@ func saveUIPersistedState(s *uiPersistedState) error {
 // We deliberately do NOT consult sessions.json here -- the dashboard
 // is not bound to the calling shell. That's the entire point of this
 // file.
-func pickInitialUIProfile(cfg *Config) string {
+func pickInitialUIProfile(cfg *config.Config) string {
 	if cfg == nil || len(cfg.Profiles) == 0 {
 		return ""
 	}
@@ -75,7 +76,7 @@ func pickInitialUIProfile(cfg *Config) string {
 
 // cycleProfile returns the next profile name in sorted order after
 // `current`, wrapping at the end. `dir` is +1 or -1.
-func cycleProfile(cfg *Config, current string, dir int) string {
+func cycleProfile(cfg *config.Config, current string, dir int) string {
 	names := sortedProfileNames(cfg)
 	if len(names) == 0 {
 		return ""
@@ -94,7 +95,7 @@ func cycleProfile(cfg *Config, current string, dir int) string {
 // sortedProfileNames returns the cfg.Profiles keys alphabetically.
 // Used as the cycle order for profile switching and any other place
 // that needs a deterministic enumeration.
-func sortedProfileNames(cfg *Config) []string {
+func sortedProfileNames(cfg *config.Config) []string {
 	if cfg == nil {
 		return nil
 	}
