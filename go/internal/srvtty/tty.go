@@ -8,10 +8,12 @@
 package srvtty
 
 import (
+	"bufio"
 	"encoding/base64"
 	"fmt"
 	"os"
 	"strings"
+	"time"
 
 	"golang.org/x/term"
 )
@@ -97,6 +99,54 @@ func ShQuotePath(p string) string {
 // removes one import + two casts at call sites.
 func Base64Encode(s string) string {
 	return base64.StdEncoding.EncodeToString([]byte(s))
+}
+
+// KeyReader pumps stdin bytes into a buffered channel so the
+// interactive picker / dashboard loop can read with a timeout
+// (needed to disambiguate a standalone ESC from an arrow-key escape
+// sequence). The pumping goroutine outlives the caller for the rest
+// of the process; that's fine for a one-shot CLI tool.
+type KeyReader struct {
+	ch chan byte
+}
+
+// NewKeyReader starts the stdin-pump goroutine and returns a reader
+// the caller can poll via Read / ReadWithTimeout.
+func NewKeyReader() *KeyReader {
+	kr := &KeyReader{ch: make(chan byte, 16)}
+	go func() {
+		rd := bufio.NewReader(os.Stdin)
+		for {
+			b, err := rd.ReadByte()
+			if err != nil {
+				close(kr.ch)
+				return
+			}
+			kr.ch <- b
+		}
+	}()
+	return kr
+}
+
+// Read blocks until the next byte or stdin EOF (returns 0, false).
+func (kr *KeyReader) Read() (byte, bool) {
+	b, ok := <-kr.ch
+	return b, ok
+}
+
+// ReadWithTimeout returns (b, true) on a byte, (0, false) on timeout
+// OR on stdin EOF. Callers that need to distinguish "no input yet"
+// from "stdin closed" must observe Read separately.
+func (kr *KeyReader) ReadWithTimeout(d time.Duration) (byte, bool) {
+	select {
+	case b, ok := <-kr.ch:
+		if !ok {
+			return 0, false
+		}
+		return b, true
+	case <-time.After(d):
+		return 0, false
+	}
 }
 
 // RedrawInPlace overwrites a previous N-line frame with `content` in

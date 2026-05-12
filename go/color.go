@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"sort"
+	"srv/internal/picker"
 	"srv/internal/session"
 	"srv/internal/srvpath"
 	"srv/internal/srvtty"
@@ -240,33 +241,33 @@ func applyColorPreset(name string) error {
 // file -- the user version wins, just like loadColorPresetBody). isPinned
 // marks the currently active preset (if any). isDefault marks the
 // shipped default theme (dracula).
-func buildColorPickerItems() []*pickerItem {
+func buildColorPickerItems() []*picker.Item {
 	active := session.GetColorPreset()
 	userPresets, _ := ListColorPresets()
-	out := make([]*pickerItem, 0, len(userPresets)+8)
+	out := make([]*picker.Item, 0, len(userPresets)+8)
 	overridden := map[string]bool{}
 	for _, p := range userPresets {
 		overridden[p] = true
 		ext := userPresetExt(p)
-		out = append(out, &pickerItem{
-			name:      p,
-			meta:      "user " + ext,
-			isPinned:  p == active,
-			isDefault: false,
+		out = append(out, &picker.Item{
+			Name:      p,
+			Meta:      "user " + ext,
+			IsPinned:  p == active,
+			IsDefault: false,
 		})
 	}
 	for _, p := range builtinThemeNames() {
 		if overridden[p] {
 			continue
 		}
-		out = append(out, &pickerItem{
-			name:      p,
-			meta:      "built-in",
-			isPinned:  p == active,
-			isDefault: p == builtinDefaultTheme,
+		out = append(out, &picker.Item{
+			Name:      p,
+			Meta:      "built-in",
+			IsPinned:  p == active,
+			IsDefault: p == builtinDefaultTheme,
 		})
 	}
-	sort.Slice(out, func(i, j int) bool { return out[i].name < out[j].name })
+	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
 	return out
 }
 
@@ -362,7 +363,7 @@ func cmdColor(args []string) error {
 					fmt.Fprintln(os.Stderr, "(no colour presets available)")
 					return exitCode(1)
 				}
-				sel, ok := runItemPicker(items, "Select a colour preset for this shell:", pickerLabels{pin: "active", def: "default"})
+				sel, ok := picker.Run(items, "Select a colour preset for this shell:", picker.Labels{Pin: "active", Def: "default"})
 				if !ok {
 					return nil
 				}

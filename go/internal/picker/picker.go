@@ -1,7 +1,9 @@
-package main
+package picker
 
 import (
-	"bufio"
+	"srv/internal/config"
+	"srv/internal/srvtty"
+
 	"fmt"
 	"os"
 	"sort"
@@ -29,32 +31,32 @@ import (
 //
 // Both markers can apply to the same row.
 
-type pickerItem struct {
-	name      string
-	meta      string // free-form right-column descriptor (host:port, "built-in", etc.)
-	isPinned  bool   // current selection (e.g. session pin, active colour preset)
-	isDefault bool   // baseline default (global default profile, default theme)
+type Item struct {
+	Name      string
+	Meta      string // free-form right-column descriptor (host:port, "built-in", etc.)
+	IsPinned  bool   // current selection (e.g. session pin, active colour preset)
+	IsDefault bool   // baseline default (global default profile, default theme)
 }
 
-// pickerLabels lets the caller customise the marker text rendered for
+// Labels lets the caller customise the marker text rendered for
 // isPinned (yellow) and isDefault (cyan) rows. Both fields are the inner
 // text without the surrounding [] brackets.
-type pickerLabels struct {
-	pin string
-	def string
+type Labels struct {
+	Pin string
+	Def string
 }
 
-// profilePickerLabels matches the original profile-picker visual.
-var profilePickerLabels = pickerLabels{pin: "this shell", def: "default"}
+// ProfileLabels matches the original profile-picker visual.
+var ProfileLabels = Labels{Pin: "this shell", Def: "default"}
 
-// buildPickerItems translates the config + current session into picker rows.
-func buildPickerItems(cfg *Config) []*pickerItem {
+// BuildItems translates the config + current session into picker rows.
+func BuildItems(cfg *config.Config) []*Item {
 	_, rec := session.Touch()
 	pinned := ""
 	if rec.Profile != nil {
 		pinned = *rec.Profile
 	}
-	out := make([]*pickerItem, 0, len(cfg.Profiles))
+	out := make([]*Item, 0, len(cfg.Profiles))
 	for name, p := range cfg.Profiles {
 		conn := p.Host
 		if p.User != "" {
@@ -63,27 +65,27 @@ func buildPickerItems(cfg *Config) []*pickerItem {
 		if p.GetPort() != 22 {
 			conn = fmt.Sprintf("%s:%d", conn, p.GetPort())
 		}
-		out = append(out, &pickerItem{
-			name:      name,
-			meta:      conn,
-			isPinned:  name == pinned,
-			isDefault: name == cfg.DefaultProfile,
+		out = append(out, &Item{
+			Name:      name,
+			Meta:      conn,
+			IsPinned:  name == pinned,
+			IsDefault: name == cfg.DefaultProfile,
 		})
 	}
-	sort.Slice(out, func(i, j int) bool { return out[i].name < out[j].name })
+	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
 	return out
 }
 
-// runProfilePicker is a thin wrapper preserving the original API for the
+// RunProfile is a thin wrapper preserving the original API for the
 // profile-selection use sites.
-func runProfilePicker(items []*pickerItem, prompt string) (string, bool) {
-	return runItemPicker(items, prompt, profilePickerLabels)
+func RunProfile(items []*Item, prompt string) (string, bool) {
+	return Run(items, prompt, ProfileLabels)
 }
 
-// runItemPicker runs the interactive picker with caller-supplied marker
+// Run runs the interactive picker with caller-supplied marker
 // labels. Returns ("", false) on cancel, (name, true) on selection.
 // Caller must ensure stdin is a TTY.
-func runItemPicker(items []*pickerItem, prompt string, labels pickerLabels) (string, bool) {
+func Run(items []*Item, prompt string, labels Labels) (string, bool) {
 	if len(items) == 0 {
 		fmt.Fprintln(os.Stderr, "(no profiles configured -- run `srv init`)")
 		return "", false
@@ -100,19 +102,19 @@ func runItemPicker(items []*pickerItem, prompt string, labels pickerLabels) (str
 	fmt.Fprint(os.Stderr, ansi.Hide)
 	defer fmt.Fprint(os.Stderr, ansi.Show)
 
-	kr := newKeyReader()
+	kr := srvtty.NewKeyReader()
 
 	// Start cursor on a meaningful row: prefer pinned, then default, else 0.
 	cursor := 0
 	for i, it := range items {
-		if it.isPinned {
+		if it.IsPinned {
 			cursor = i
 			break
 		}
 	}
-	if cursor == 0 && !items[0].isPinned {
+	if cursor == 0 && !items[0].IsPinned {
 		for i, it := range items {
-			if it.isDefault {
+			if it.IsDefault {
 				cursor = i
 				break
 			}
@@ -137,7 +139,7 @@ func runItemPicker(items []*pickerItem, prompt string, labels pickerLabels) (str
 		}
 		prevLines = drawPicker(prompt, view, cursor, filter, filterMode, labels)
 
-		b, ok := kr.read()
+		b, ok := kr.Read()
 		if !ok {
 			return cancelPicker(prevLines)
 		}
@@ -152,7 +154,7 @@ func runItemPicker(items []*pickerItem, prompt string, labels pickerLabels) (str
 					continue
 				}
 				clearPicker(prevLines)
-				return view[cursor].name, true
+				return view[cursor].Name, true
 			case 0x7f, 0x08: // backspace / DEL
 				if filter != "" {
 					filter = filter[:len(filter)-1]
@@ -185,21 +187,21 @@ func runItemPicker(items []*pickerItem, prompt string, labels pickerLabels) (str
 				continue
 			}
 			clearPicker(prevLines)
-			return view[cursor].name, true
+			return view[cursor].Name, true
 		case '/':
 			filterMode = true
 			filter = ""
 		case 0x1b:
 			// Possibly an arrow-key escape sequence: ESC [ A/B/C/D.
 			// Brief peek with timeout so a standalone ESC still cancels.
-			b2, more := kr.readWithTimeout(80 * time.Millisecond)
+			b2, more := kr.ReadWithTimeout(80 * time.Millisecond)
 			if !more {
 				return cancelPicker(prevLines)
 			}
 			if b2 != '[' {
 				continue
 			}
-			b3, more := kr.readWithTimeout(20 * time.Millisecond)
+			b3, more := kr.ReadWithTimeout(20 * time.Millisecond)
 			if !more {
 				continue
 			}
@@ -229,15 +231,15 @@ func clearPicker(lines int) {
 	}
 }
 
-func filterItems(items []*pickerItem, filter string) []*pickerItem {
+func filterItems(items []*Item, filter string) []*Item {
 	if filter == "" {
 		return items
 	}
 	q := strings.ToLower(filter)
-	out := make([]*pickerItem, 0, len(items))
+	out := make([]*Item, 0, len(items))
 	for _, it := range items {
-		if strings.Contains(strings.ToLower(it.name), q) ||
-			strings.Contains(strings.ToLower(it.meta), q) {
+		if strings.Contains(strings.ToLower(it.Name), q) ||
+			strings.Contains(strings.ToLower(it.Meta), q) {
 			out = append(out, it)
 		}
 	}
@@ -246,7 +248,7 @@ func filterItems(items []*pickerItem, filter string) []*pickerItem {
 
 // drawPicker emits the full picker UI to stderr and returns the line
 // count it produced (so the next pass knows how far to scroll up).
-func drawPicker(prompt string, items []*pickerItem, cursor int, filter string, filterMode bool, labels pickerLabels) int {
+func drawPicker(prompt string, items []*Item, cursor int, filter string, filterMode bool, labels Labels) int {
 	w := os.Stderr
 	lines := 0
 
@@ -265,7 +267,7 @@ func drawPicker(prompt string, items []*pickerItem, cursor int, filter string, f
 
 	maxName := 0
 	for _, it := range items {
-		if n := len(it.name); n > maxName {
+		if n := len(it.Name); n > maxName {
 			maxName = n
 		}
 	}
@@ -278,12 +280,12 @@ func drawPicker(prompt string, items []*pickerItem, cursor int, filter string, f
 		if i == cursor {
 			marker = ansi.Cyan + ansi.Bold + "> " + ansi.Reset
 		}
-		row := fmt.Sprintf("%-*s  %s", maxName, it.name, it.meta)
-		if it.isPinned {
-			row += " " + ansi.Yellow + ansi.Bold + "[" + labels.pin + "]" + ansi.Reset
+		row := fmt.Sprintf("%-*s  %s", maxName, it.Name, it.Meta)
+		if it.IsPinned {
+			row += " " + ansi.Yellow + ansi.Bold + "[" + labels.Pin + "]" + ansi.Reset
 		}
-		if it.isDefault {
-			row += " " + ansi.Cyan + ansi.Bold + "[" + labels.def + "]" + ansi.Reset
+		if it.IsDefault {
+			row += " " + ansi.Cyan + ansi.Bold + "[" + labels.Def + "]" + ansi.Reset
 		}
 		if i == cursor {
 			fmt.Fprintf(w, "%s%s%s%s\r\n", marker, ansi.Reverse+ansi.Bold, row, ansi.Reset)
@@ -301,45 +303,4 @@ func drawPicker(prompt string, items []*pickerItem, cursor int, filter string, f
 	lines++
 
 	return lines
-}
-
-// keyReader pumps stdin bytes into a buffered channel so the main loop
-// can read with a timeout (needed to disambiguate standalone ESC from an
-// arrow-key escape sequence). The pumping goroutine outlives the picker
-// for the rest of the process; that's fine for a one-shot CLI tool.
-type keyReader struct {
-	ch chan byte
-}
-
-func newKeyReader() *keyReader {
-	kr := &keyReader{ch: make(chan byte, 16)}
-	go func() {
-		rd := bufio.NewReader(os.Stdin)
-		for {
-			b, err := rd.ReadByte()
-			if err != nil {
-				close(kr.ch)
-				return
-			}
-			kr.ch <- b
-		}
-	}()
-	return kr
-}
-
-func (kr *keyReader) read() (byte, bool) {
-	b, ok := <-kr.ch
-	return b, ok
-}
-
-func (kr *keyReader) readWithTimeout(d time.Duration) (byte, bool) {
-	select {
-	case b, ok := <-kr.ch:
-		if !ok {
-			return 0, false
-		}
-		return b, true
-	case <-time.After(d):
-		return 0, false
-	}
 }

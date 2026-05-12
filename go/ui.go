@@ -209,7 +209,7 @@ func cmdUI(cfg *Config) error {
 	fmt.Fprint(os.Stderr, altScreenOn+ansi.Hide+clearScreen+cursorHome)
 	defer fmt.Fprint(os.Stderr, ansi.Show+altScreenOff)
 
-	kr := newKeyReader()
+	kr := srvtty.NewKeyReader()
 	st := &uiState{
 		forceRedraw:     true,
 		cursor:          0,
@@ -353,7 +353,7 @@ func cmdUI(cfg *Config) error {
 			st.forceRedraw = false
 		}
 
-		b, ok := kr.readWithTimeout(pollEvery)
+		b, ok := kr.ReadWithTimeout(pollEvery)
 		if !ok {
 			// Poll tick: usually a no-op redraw (snapshot is cached,
 			// frame matches lastFrame, nothing flushes). The two
@@ -645,7 +645,7 @@ func indexOf(xs []string, v string) int {
 // Precedence: an active confirmation popup eats every key until it
 // resolves (Y = run, anything else = cancel), so a stray arrow press
 // can't accidentally trigger a different action while a "kill?" is up.
-func handleUIKey(b byte, st *uiState, jobs []*jobs.Record, tunnelNames []string, cfg *Config, kr *keyReader) bool {
+func handleUIKey(b byte, st *uiState, jobs []*jobs.Record, tunnelNames []string, cfg *Config, kr *srvtty.KeyReader) bool {
 	if st.confirm != nil {
 		yes := b == 'y' || b == 'Y'
 		action := st.confirm.action
@@ -699,14 +699,14 @@ func handleUIKey(b byte, st *uiState, jobs []*jobs.Record, tunnelNames []string,
 	case 'k', ' ', 'x':
 		armConfirmFor(st, row, jobs, tunnelNames, cfg, b)
 	case 0x1b: // ESC -- possibly an arrow-key sequence
-		b2, ok := kr.readWithTimeout(80 * time.Millisecond)
+		b2, ok := kr.ReadWithTimeout(80 * time.Millisecond)
 		if !ok {
 			return false // bare ESC = quit
 		}
 		if b2 != '[' {
 			return true
 		}
-		b3, ok := kr.readWithTimeout(20 * time.Millisecond)
+		b3, ok := kr.ReadWithTimeout(20 * time.Millisecond)
 		if !ok {
 			return true
 		}

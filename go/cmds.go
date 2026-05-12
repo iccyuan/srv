@@ -7,6 +7,7 @@ import (
 	"os"
 	"sort"
 	"srv/internal/i18n"
+	"srv/internal/picker"
 	"srv/internal/session"
 	"srv/internal/srvpath"
 	"srv/internal/srvtty"
@@ -131,8 +132,8 @@ func cmdConfig(args []string, cfg *Config) error {
 		// from `srv use`, which only pins for the current shell session.
 		if len(rest) == 0 {
 			if srvtty.IsStdinTTY() {
-				items := buildPickerItems(cfg)
-				sel, ok := runProfilePicker(items, "Select global default profile (persists across shells):")
+				items := picker.BuildItems(cfg)
+				sel, ok := picker.RunProfile(items, "Select global default profile (persists across shells):")
 				if !ok {
 					return nil
 				}
@@ -430,8 +431,8 @@ func cmdUse(args []string, cfg *Config) error {
 		// fall back to printing the current pin status so scripts that
 		// already capture the output keep working.
 		if srvtty.IsStdinTTY() && len(cfg.Profiles) > 0 {
-			items := buildPickerItems(cfg)
-			sel, ok := runProfilePicker(items, "Select a profile to pin to this shell:")
+			items := picker.BuildItems(cfg)
+			sel, ok := picker.RunProfile(items, "Select a profile to pin to this shell:")
 			if !ok {
 				return nil
 			}
