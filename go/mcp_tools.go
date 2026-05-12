@@ -1447,6 +1447,25 @@ var mcpTools = []mcpTool{
 	},
 	{
 		def: toolDef{
+			Name:        "journal",
+			Description: "Read or follow systemd journal on the remote. Mirrors journalctl's flag shape: `unit` (-u), `since`, `priority` (-p), `lines` (-n), `grep` (-g, server-side). Pass `follow_seconds` > 0 to stream new lines via `notifications/progress` for that many seconds (cap 60); leave 0 for a one-shot read. Use this in place of `run \"journalctl ...\"` so the bounded-follow case has a real tool surface instead of getting rejected as a long-blocking pattern.",
+			InputSchema: map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"unit":           strSchema("Service unit name (passed to -u)."),
+					"since":          strSchema("Relative or absolute time (e.g. \"10 min ago\")."),
+					"priority":       strSchema("Priority filter (-p), e.g. err / warning / info."),
+					"lines":          intSchema(100, "Number of recent lines to fetch (-n)."),
+					"grep":           strSchema("Server-side regex filter (-g)."),
+					"follow_seconds": intSchema(0, "Follow for N seconds via progress notifications; 0 = one-shot. Capped at 60."),
+					"profile":        strSchema(""),
+				},
+			},
+		},
+		handler: handleMCPJournal,
+	},
+	{
+		def: toolDef{
 			Name:        "tail",
 			Description: "Follow a remote file for a bounded duration and stream new lines via `notifications/progress`. Replaces the rejected `run \"tail -F path\"` pattern for the live-log-watch case: synchronous `run` refuses never-terminating commands, but `tail` is explicitly bounded by follow_seconds (default 30s, cap 60s) so the call has a deterministic ceiling. Use this when you want to watch a log mid-deploy or see what a service is doing right now.",
 			InputSchema: map[string]any{

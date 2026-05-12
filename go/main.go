@@ -93,6 +93,10 @@ Integrations:
   srv ui                                 one-screen dashboard (profiles, daemon, tunnels, jobs, sessions)
   srv tail [-n LINES] [--grep RE] <remote-path>...
                                          live-follow remote file(s) with auto-reconnect on SSH drop
+  srv watch [-n SECS] [--diff] <cmd>     periodic remote command with in-place refresh (BSD watch over SSH)
+  srv journal [-u UNIT] [--since TIME] [-f] [-g RE] [-n LINES]
+                                         remote systemd journal (one-shot or live-follow)
+  srv top [-n SECS]                      stream "top -b" from the remote (auto-reconnect on drop)
   srv mcp                                run as a stdio MCP server
   srv guard [on|off|status]              MCP confirmation guard for high-risk ops (default off)
   srv color [on|off|use [name]|list|status]
@@ -199,6 +203,10 @@ const helpZH = `srv - 跨平台 SSH 远端命令工具,持久 cwd / 连接复用
   srv ui                                 一屏总览(profile / daemon / tunnel / job / session)
   srv tail [-n LINES] [--grep RE] <remote-path>...
                                          实时跟踪远端文件,SSH 断了自动重连
+  srv watch [-n SECS] [--diff] <cmd>     周期性跑远端命令,原地刷新(SSH 上的 watch)
+  srv journal [-u UNIT] [--since TIME] [-f] [-g RE] [-n LINES]
+                                         远端 systemd 日志(一次性或持续跟踪)
+  srv top [-n SECS]                      流式拉取远端 "top -b",断线自动重连
   srv mcp                                以 stdio MCP server 跑
   srv guard [on|off|status]              MCP 高危操作确认开关(默认关闭,可针对当前 shell 开启)
   srv color [on|off|use [name]|list|status]

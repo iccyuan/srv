@@ -86,29 +86,12 @@ func cmdUI(cfg *Config) error {
 	}
 }
 
-// redrawDashboard moves the cursor up to the start of the previous
-// frame and writes the new one over it. Crucially, the per-line erase
-// (\x1b[K -- erase from cursor to end of line) happens AFTER each
-// line's content lands, not before -- so the terminal only sees
-// "rewrite this line and trim any stale tail," never "blank this line
-// (visible flash) then refill." The whole frame is emitted in a single
-// Fprint, so most terminals render it in one paint cycle.
-//
-// A final \x1b[J (erase to end of screen) handles the case where the
-// new frame is shorter than the old (e.g. a job finished and dropped
-// out of the table) -- leftover lines below get cleaned up.
+// redrawDashboard is a thin alias over the shared redrawInPlace
+// helper. Kept as a named entry point so the dashboard's call site
+// reads at the right level of abstraction (we're repainting a
+// dashboard, not invoking a generic terminal helper).
 func redrawDashboard(content string, prevLines int) {
-	var sb strings.Builder
-	if prevLines > 0 {
-		fmt.Fprintf(&sb, "\x1b[%dA\r", prevLines)
-	}
-	// "<line>\x1b[K\r\n" -- write content first, then clear any stale
-	// chars that extend past the new content on this line, then move
-	// to the next line. \x1b[2K (clear whole line) would blank the
-	// line briefly before refilling, which is what we want to avoid.
-	sb.WriteString(strings.ReplaceAll(content, "\n", "\x1b[K\r\n"))
-	sb.WriteString("\x1b[J")
-	fmt.Fprint(os.Stderr, sb.String())
+	redrawInPlace(content, prevLines)
 }
 
 // renderDashboard collects every section into a single multi-line

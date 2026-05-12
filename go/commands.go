@@ -112,6 +112,9 @@ var subcommands = []subcommand{
 	}},
 	{name: "ui", handler: func(c cmdCtx) error { return cmdUI(c.cfg) }},
 	{name: "tail", handler: func(c cmdCtx) error { return cmdTail(c.args, c.cfg, c.profileOverride) }},
+	{name: "watch", handler: func(c cmdCtx) error { return cmdWatch(c.args, c.cfg, c.profileOverride) }},
+	{name: "journal", handler: func(c cmdCtx) error { return cmdJournal(c.args, c.cfg, c.profileOverride) }},
+	{name: "top", handler: func(c cmdCtx) error { return cmdTop(c.args, c.cfg, c.profileOverride) }},
 
 	// run/exec: -d global flag swaps in cmdDetach; -G swaps in fan-out;
 	// otherwise wrap with the typo-hint emitter.

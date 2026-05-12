@@ -87,6 +87,33 @@ func base64Encode(s string) string {
 	return base64.StdEncoding.EncodeToString([]byte(s))
 }
 
+// redrawInPlace overwrites a previous N-line frame with `content` in
+// a single Fprint, avoiding the "blank-then-refill" flash that an
+// erase-first sequence would produce.
+//
+// Caller maintains prevLines (= line count of the last call's
+// content) and passes 0 on the first render. The function emits its
+// output to stderr so it stays out of the way when stdout is being
+// piped / redirected.
+//
+// Shared between `srv ui` (the dashboard) and `srv watch` (periodic
+// snapshot) so both get the same flicker-free repaint behaviour.
+func redrawInPlace(content string, prevLines int) {
+	var sb strings.Builder
+	if prevLines > 0 {
+		// Cursor up, then carriage-return to column 0. No erase yet --
+		// the per-line `\x1b[K` (erase-to-EOL) lands AFTER content so
+		// each line only blanks the stale tail past the new content,
+		// never the whole line.
+		fmt.Fprintf(&sb, "\x1b[%dA\r", prevLines)
+	}
+	sb.WriteString(strings.ReplaceAll(content, "\n", "\x1b[K\r\n"))
+	// Erase to end of screen handles the case where the new frame is
+	// shorter than the old (orphan lines below would otherwise stay).
+	sb.WriteString("\x1b[J")
+	fmt.Fprint(os.Stderr, sb.String())
+}
+
 // allDigits reports whether every rune in s is an ASCII digit.
 func allDigits(s string) bool {
 	if s == "" {

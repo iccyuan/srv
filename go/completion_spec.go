@@ -56,16 +56,19 @@ type compSpec struct {
 // useful but also doesn't leak local files (PS no-op stub takes care
 // of that).
 var compSpecs = map[string]compSpec{
-	"cd":   {positions: []argSlot{{typ: argRemoteDir}}},
-	"edit": {positions: []argSlot{{typ: argRemotePath}}},
-	"open": {positions: []argSlot{{typ: argRemotePath}}},
-	"code": {positions: []argSlot{{typ: argRemoteDir}}},
-	"pull": {positions: []argSlot{{typ: argRemotePath}, {typ: argLocalFile}}},
-	"push": {positions: []argSlot{{typ: argLocalFile}, {typ: argRemotePath}}},
-	"diff": {positions: []argSlot{{typ: argLocalFile}, {typ: argRemotePath}}},
-	"run":  {rest: argRemotePath},
-	"exec": {rest: argRemotePath},
-	"tail": {rest: argRemotePath},
+	"cd":      {positions: []argSlot{{typ: argRemoteDir}}},
+	"edit":    {positions: []argSlot{{typ: argRemotePath}}},
+	"open":    {positions: []argSlot{{typ: argRemotePath}}},
+	"code":    {positions: []argSlot{{typ: argRemoteDir}}},
+	"pull":    {positions: []argSlot{{typ: argRemotePath}, {typ: argLocalFile}}},
+	"push":    {positions: []argSlot{{typ: argLocalFile}, {typ: argRemotePath}}},
+	"diff":    {positions: []argSlot{{typ: argLocalFile}, {typ: argRemotePath}}},
+	"run":     {rest: argRemotePath},
+	"exec":    {rest: argRemotePath},
+	"tail":    {rest: argRemotePath},
+	"watch":   {rest: argRemotePath},
+	"journal": {positions: []argSlot{{typ: argEnum, choices: []string{"-u", "--since", "-p", "-n", "-g", "-f"}}}},
+	"top":     {positions: []argSlot{{typ: argEnum, choices: []string{"-n", "-w", "-u", "-p"}}}},
 
 	"use": {positions: []argSlot{{typ: argEnumProfile, choices: []string{"--clear"}}}},
 
