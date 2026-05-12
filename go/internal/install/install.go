@@ -1,4 +1,4 @@
-package main
+package install
 
 import (
 	_ "embed"
@@ -18,22 +18,33 @@ import (
 //go:embed install.html
 var installHTML []byte
 
-// cmdInstall opens a browser-based installer for srv. It spins up a local
-// HTTP server on a random localhost port, opens the default browser at
-// it, and serves a single-page UI that talks to /api/* endpoints. The
-// server exits when the user clicks Done or after a 10-minute idle.
+// Snap is the small slice of package main state Cmd needs: the
+// current binary version and a summary of the profile config. Caller
+// in main builds it (LoadConfig + Version constant) and passes it
+// in; this package never imports config or main directly.
+type Snap struct {
+	Version        string
+	ProfileCount   int
+	ProfileDefault string
+}
+
+// Cmd opens a browser-based installer for srv. It spins up a local
+// HTTP server on a random localhost port, opens the default browser
+// at it, and serves a single-page UI that talks to /api/* endpoints.
+// The server exits when the user clicks Done or after a 10-minute
+// idle.
 //
 // The same UI handles three platforms uniformly:
-//   - "Add to PATH": Windows User env var, ~/.local/bin symlink on Unix
-//     (or rc-file edit).
+//   - "Add to PATH": Windows User env var, ~/.local/bin symlink on
+//     Unix (or rc-file edit).
 //   - "Register as Claude Code MCP" via `claude mcp add` user scope.
 //   - "Register as Codex MCP" by editing ~/.codex/config.toml.
 //   - "Run srv init" in a new terminal.
 //
-// Bootstrap entry points: ./install.ps1 -Gui and ./install.sh --gui both
-// just locate srv and exec it with `install`. Power users can also run
-// `srv install` directly once it's on PATH.
-func cmdInstall(args []string) error {
+// Bootstrap entry points: ./install.ps1 -Gui and ./install.sh --gui
+// both just locate srv and exec it with `install`. Power users can
+// also run `srv install` directly once it's on PATH.
+func Cmd(args []string, snap Snap) error {
 	noBrowser := false
 	for _, a := range args {
 		switch a {
@@ -47,15 +58,13 @@ func cmdInstall(args []string) error {
 
 	bin, err := os.Executable()
 	if err != nil {
-		fmt.Fprintln(os.Stderr, "srv install: can't locate own binary:", err)
-		return exitCode(1)
+		return fmt.Errorf("can't locate own binary: %v", err)
 	}
 	bin, _ = filepath.Abs(bin)
 
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
-		fmt.Fprintln(os.Stderr, "srv install: listen:", err)
-		return exitCode(1)
+		return fmt.Errorf("listen: %v", err)
 	}
 	addr := listener.Addr().(*net.TCPAddr)
 	url := fmt.Sprintf("http://127.0.0.1:%d", addr.Port)
@@ -81,7 +90,7 @@ func cmdInstall(args []string) error {
 	})
 	mux.HandleFunc("/api/status", func(w http.ResponseWriter, r *http.Request) {
 		bumpIdle()
-		s := buildInstallStatus(bin)
+		s := buildInstallStatus(bin, snap)
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(s)
 	})
@@ -164,20 +173,13 @@ type installStatusProfiles struct {
 	Default string `json:"default"`
 }
 
-func buildInstallStatus(bin string) installStatus {
-	cfg, _ := LoadConfig()
-	profCount := 0
-	profDefault := ""
-	if cfg != nil {
-		profCount = len(cfg.Profiles)
-		profDefault = cfg.DefaultProfile
-	}
+func buildInstallStatus(bin string, snap Snap) installStatus {
 	binDir := filepath.Dir(bin)
 	available, registered, scope := detectClaudeMcp()
 	codexRegistered, codexCommand, codexConfigPath := detectCodexMcp()
 	return installStatus{
 		Platform: runtime.GOOS,
-		Binary:   installStatusBinary{Path: bin, Version: Version},
+		Binary:   installStatusBinary{Path: bin, Version: snap.Version},
 		Path: installStatusPath{
 			Dir:    binDir,
 			OnPath: isOnPath(binDir),
@@ -192,7 +194,7 @@ func buildInstallStatus(bin string) installStatus {
 			Registered: codexRegistered,
 			Command:    codexCommand,
 		},
-		Profiles: installStatusProfiles{Count: profCount, Default: profDefault},
+		Profiles: installStatusProfiles{Count: snap.ProfileCount, Default: snap.ProfileDefault},
 	}
 }
 

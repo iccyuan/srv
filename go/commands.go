@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"srv/internal/install"
 
 	"srv/internal/i18n"
 )
@@ -61,7 +62,14 @@ var subcommands = []subcommand{
 		return nil
 	}},
 	{name: "completion", noConfig: true, handler: func(c cmdCtx) error { return cmdCompletion(c.args) }},
-	{name: "install", noConfig: true, handler: func(c cmdCtx) error { return cmdInstall(c.args) }},
+	{name: "install", noConfig: true, handler: func(c cmdCtx) error {
+		snap := install.Snap{Version: Version}
+		if cfg, _ := LoadConfig(); cfg != nil {
+			snap.ProfileCount = len(cfg.Profiles)
+			snap.ProfileDefault = cfg.DefaultProfile
+		}
+		return install.Cmd(c.args, snap)
+	}},
 	{name: "init", noConfig: true, handler: func(c cmdCtx) error {
 		// init creates config; load empty if missing.
 		cfg, _ := LoadConfig()
