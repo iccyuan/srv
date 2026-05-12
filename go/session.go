@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"srv/internal/srvpath"
 	"srv/internal/srvutil"
 	"strconv"
 	"strings"
@@ -46,24 +47,24 @@ type sessionsFile struct {
 }
 
 func loadSessionsFile() *sessionsFile {
-	data, err := os.ReadFile(SessionsFile())
+	data, err := os.ReadFile(srvpath.Sessions())
 	s := &sessionsFile{Sessions: map[string]*SessionRecord{}}
 	if err != nil {
 		return s
 	}
 	if err := json.Unmarshal(data, s); err != nil {
-		fatal("error: %s is not valid JSON: %v", SessionsFile(), err)
+		fatal("error: %s is not valid JSON: %v", srvpath.Sessions(), err)
 	}
 	if s.Sessions == nil {
 		s.Sessions = map[string]*SessionRecord{}
 	}
-	warnIfNewerSchema(SessionsFile(), s.Version)
+	warnIfNewerSchema(srvpath.Sessions(), s.Version)
 	return s
 }
 
 func writeSessionsFile(s *sessionsFile) error {
 	s.Version = SchemaVersion
-	return writeJSONFile(SessionsFile(), s)
+	return writeJSONFile(srvpath.Sessions(), s)
 }
 
 // intermediateExes (Windows): exes that are transparent launcher
@@ -197,22 +198,11 @@ func SetColorPreset(name string) (string, error) {
 	return sid, nil
 }
 
-// ColorPresetsDir returns ~/.srv/init/, the directory the user drops
-// custom shell snippets into. Each *.sh file is one preset; the
-// filename without extension is what `srv color use <name>` accepts.
-func ColorPresetsDir() string {
-	return filepath.Join(ConfigDir(), "init")
-}
-
-// ColorPresetPath resolves a preset name to its absolute file path
-// under ColorPresetsDir(). Doesn't check existence; callers test
-// with os.Stat so missing files surface a clear error.
-func ColorPresetPath(name string) string {
-	return filepath.Join(ColorPresetsDir(), name+".sh")
-}
+// ColorPresetsDir / ColorPresetPath moved to srv/internal/srvpath.
+// Use srvpath.ColorPresetsDir() / srvpath.ColorPreset(name).
 
 // ListColorPresets enumerates user-supplied theme files in
-// ColorPresetsDir() and returns their basenames (extension stripped).
+// srvpath.ColorPresetsDir() and returns their basenames (extension stripped).
 // Accepts .sh / .itermcolors / .toml. When several files share a
 // basename, only one entry appears -- loadColorPresetBody resolves
 // the precedence at use time.
@@ -220,7 +210,7 @@ func ColorPresetPath(name string) string {
 // Returns nil + nil when the dir doesn't exist; the directory is
 // created on demand by the user.
 func ListColorPresets() ([]string, error) {
-	dir := ColorPresetsDir()
+	dir := srvpath.ColorPresetsDir()
 	entries, err := os.ReadDir(dir)
 	if err != nil {
 		if os.IsNotExist(err) {

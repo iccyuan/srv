@@ -3,8 +3,9 @@ package main
 import (
 	"encoding/json"
 	"os"
-	"path/filepath"
 	"sort"
+
+	"srv/internal/srvpath"
 )
 
 // Tiny on-disk state for `srv ui` so the dashboard's notion of "the
@@ -17,7 +18,7 @@ type uiPersistedState struct {
 	LastProfile string `json:"last_profile,omitempty"`
 }
 
-func uiStateFile() string { return filepath.Join(ConfigDir(), "ui-state.json") }
+func uiStateFile() string { return srvpath.UIState() }
 
 func loadUIPersistedState() *uiPersistedState {
 	buf, err := os.ReadFile(uiStateFile())

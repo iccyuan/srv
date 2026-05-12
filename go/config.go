@@ -6,26 +6,15 @@ import (
 	"os"
 	"path/filepath"
 	"srv/internal/i18n"
+	"srv/internal/srvpath"
 	"srv/internal/srvutil"
 	"time"
 )
 
-// ConfigDir is the on-disk location of all srv state.
-// Honors $SRV_HOME; falls back to ~/.srv.
-func ConfigDir() string {
-	if v := os.Getenv("SRV_HOME"); v != "" {
-		return v
-	}
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return ".srv"
-	}
-	return filepath.Join(home, ".srv")
-}
-
-func ConfigFile() string   { return filepath.Join(ConfigDir(), "config.json") }
-func SessionsFile() string { return filepath.Join(ConfigDir(), "sessions.json") }
-func JobsFile() string     { return filepath.Join(ConfigDir(), "jobs.json") }
+// Path helpers (Dir / Config / Sessions / Jobs) live in
+// srv/internal/srvpath now -- everything that needs to know where
+// srv keeps its files imports srvpath directly rather than chaining
+// through package main.
 
 // Profile mirrors the Python profile dict. Keys with omitempty/zero-value
 // semantics:
@@ -214,27 +203,27 @@ func newConfig() *Config {
 
 // LoadConfig returns nil with nil error when the file doesn't exist yet.
 func LoadConfig() (*Config, error) {
-	data, err := os.ReadFile(ConfigFile())
+	data, err := os.ReadFile(srvpath.Config())
 	if err != nil {
 		if os.IsNotExist(err) {
 			return nil, nil
 		}
-		return nil, fmt.Errorf("read %s: %w", ConfigFile(), err)
+		return nil, fmt.Errorf("read %s: %w", srvpath.Config(), err)
 	}
 	cfg := newConfig()
 	if err := json.Unmarshal(data, cfg); err != nil {
-		return nil, fmt.Errorf("parse %s: %w", ConfigFile(), err)
+		return nil, fmt.Errorf("parse %s: %w", srvpath.Config(), err)
 	}
 	if cfg.Profiles == nil {
 		cfg.Profiles = map[string]*Profile{}
 	}
-	warnIfNewerSchema(ConfigFile(), cfg.Version)
+	warnIfNewerSchema(srvpath.Config(), cfg.Version)
 	return cfg, nil
 }
 
 func SaveConfig(cfg *Config) error {
 	cfg.Version = SchemaVersion
-	return writeJSONFile(ConfigFile(), cfg)
+	return writeJSONFile(srvpath.Config(), cfg)
 }
 
 // warnIfNewerSchema emits one stderr line when an on-disk file declares a

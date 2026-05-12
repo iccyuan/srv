@@ -11,6 +11,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"srv/internal/srvpath"
 	"srv/internal/srvtty"
 	"strings"
 	"sync"
@@ -201,7 +202,7 @@ const (
 )
 
 func daemonSocketPath() string {
-	return filepath.Join(ConfigDir(), "daemon.sock")
+	return filepath.Join(srvpath.Dir(), "daemon.sock")
 }
 
 // cmdDaemon starts the daemon listener (foreground). Ctrl-C stops it

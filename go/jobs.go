@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"sort"
+	"srv/internal/srvpath"
 	"strings"
 )
 
@@ -24,7 +25,7 @@ type jobsFile struct {
 }
 
 func loadJobsFile() *jobsFile {
-	data, err := os.ReadFile(JobsFile())
+	data, err := os.ReadFile(srvpath.Jobs())
 	j := &jobsFile{}
 	if err != nil {
 		return j
@@ -33,19 +34,19 @@ func loadJobsFile() *jobsFile {
 		// Helper used in MCP-reachable paths -- can't os.Exit.
 		// Treat a corrupt jobs file as empty; the user can `srv jobs`
 		// see the empty list and recover.
-		fmt.Fprintf(os.Stderr, "warning: %s is not valid JSON: %v\n", JobsFile(), err)
+		fmt.Fprintf(os.Stderr, "warning: %s is not valid JSON: %v\n", srvpath.Jobs(), err)
 		return j
 	}
 	if j.Jobs == nil {
 		j.Jobs = []*JobRecord{}
 	}
-	warnIfNewerSchema(JobsFile(), j.Version)
+	warnIfNewerSchema(srvpath.Jobs(), j.Version)
 	return j
 }
 
 func saveJobsFile(j *jobsFile) error {
 	j.Version = SchemaVersion
-	return writeJSONFile(JobsFile(), j)
+	return writeJSONFile(srvpath.Jobs(), j)
 }
 
 func findJob(j *jobsFile, idOrPrefix string) *JobRecord {

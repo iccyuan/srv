@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"srv/internal/srvpath"
 	"srv/internal/srvtty"
 	"strings"
 	"time"
@@ -171,7 +172,7 @@ func cacheKey(host, user, target string) string {
 	return hex.EncodeToString(h[:10])
 }
 
-func cacheDir() string { return filepath.Join(ConfigDir(), "cache") }
+func cacheDir() string { return filepath.Join(srvpath.Dir(), "cache") }
 
 func readLsCache(key string, ttl time.Duration) ([]string, bool) {
 	p := filepath.Join(cacheDir(), "ls-"+key+".txt")

@@ -3,7 +3,7 @@ package main
 import (
 	"fmt"
 	"os"
-	"path/filepath"
+	"srv/internal/srvpath"
 	"sync"
 	"time"
 )
@@ -37,13 +37,13 @@ var (
 	mcpLogPid  = os.Getpid()
 )
 
-func mcpLogPath() string { return filepath.Join(ConfigDir(), "mcp.log") }
+func mcpLogPath() string { return srvpath.MCPLog() }
 
 // mcpLogOpen lazily opens the log file on first write. Failure is
 // silent: logging must never disrupt the MCP request loop.
 func mcpLogOpen() *os.File {
 	mcpLogOnce.Do(func() {
-		_ = os.MkdirAll(ConfigDir(), 0o755)
+		_ = os.MkdirAll(srvpath.Dir(), 0o755)
 		path := mcpLogPath()
 		// Trim oversize log: read tail, rewrite. Cheap on disk because
 		// 256 KB is small; matters only when the file is e.g. 100 MB.

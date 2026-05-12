@@ -7,6 +7,7 @@ import (
 	"os"
 	"sort"
 	"srv/internal/i18n"
+	"srv/internal/srvpath"
 	"srv/internal/srvtty"
 	"srv/internal/srvutil"
 	"strconv"
@@ -53,7 +54,7 @@ func cmdInit(cfg *Config) error {
 	if err := SaveConfig(cfg); err != nil {
 		return exitErr(1, "error: %v", err)
 	}
-	fmt.Printf("saved profile %q to %s\n", name, ConfigFile())
+	fmt.Printf("saved profile %q to %s\n", name, srvpath.Config())
 	fmt.Println()
 	fmt.Println("next: verify connectivity with `srv check` (it'll tell you exactly")
 	fmt.Println("      what to fix if your key isn't in the server's authorized_keys).")

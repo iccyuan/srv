@@ -5,6 +5,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"srv/internal/srvpath"
 	"time"
 )
 
@@ -47,7 +48,7 @@ func spawnDaemonDetached() error {
 	}
 	cmd := exec.Command(self, "daemon")
 	cmd.Stdin = nil
-	_ = os.MkdirAll(ConfigDir(), 0o755)
+	_ = os.MkdirAll(srvpath.Dir(), 0o755)
 	if f, err := os.OpenFile(daemonLogPath(), os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600); err == nil {
 		cmd.Stdout = f
 		cmd.Stderr = f
@@ -67,5 +68,5 @@ func spawnDaemonDetached() error {
 }
 
 func daemonLogPath() string {
-	return filepath.Join(ConfigDir(), "daemon.log")
+	return filepath.Join(srvpath.Dir(), "daemon.log")
 }

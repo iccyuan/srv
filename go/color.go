@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"sort"
+	"srv/internal/srvpath"
 	"srv/internal/srvtty"
 	"strings"
 )
@@ -172,7 +173,7 @@ func colorPrologue() string {
 // supplied theme file at ~/.srv/init/<name><ext>, in precedence order.
 // "" when no file of that name exists.
 func userPresetExt(name string) string {
-	dir := ColorPresetsDir()
+	dir := srvpath.ColorPresetsDir()
 	for _, ext := range supportedThemeExts {
 		if _, err := os.Stat(filepath.Join(dir, name+ext)); err == nil {
 			return ext
@@ -192,7 +193,7 @@ func userPresetExt(name string) string {
 //
 // Empty string if nothing matches.
 func loadColorPresetBody(name string) string {
-	dir := ColorPresetsDir()
+	dir := srvpath.ColorPresetsDir()
 	for _, ext := range supportedThemeExts {
 		if body := loadThemeFile(filepath.Join(dir, name+ext)); body != "" {
 			return body
@@ -218,7 +219,7 @@ func applyColorPreset(name string) error {
 	if userExt == "" && !builtin {
 		return exitErr(1,
 			"color use: %q not found in %s (looked for *.sh / *.itermcolors / *.toml) and no built-in theme matches.\nlist available with `srv color list`.",
-			name, ColorPresetsDir())
+			name, srvpath.ColorPresetsDir())
 	}
 	sid, err := SetColorPreset(name)
 	if err != nil {
@@ -328,7 +329,7 @@ func cmdColor(args []string) error {
 			return "  "
 		}
 		if len(userPresets) > 0 {
-			fmt.Printf("user (%s):\n", ColorPresetsDir())
+			fmt.Printf("user (%s):\n", srvpath.ColorPresetsDir())
 			for _, p := range userPresets {
 				ext := userPresetExt(p)
 				fmt.Printf("  %s%-24s %s\n", mark(p), p, ext)
@@ -386,7 +387,7 @@ func cmdColor(args []string) error {
 			location := ""
 			if ext := userPresetExt(mode); ext != "" {
 				origin = "user " + ext
-				location = " at " + filepath.Join(ColorPresetsDir(), mode+ext)
+				location = " at " + filepath.Join(srvpath.ColorPresetsDir(), mode+ext)
 			} else if _, ok := builtinThemeContent(mode); ok {
 				origin = "built-in"
 			}

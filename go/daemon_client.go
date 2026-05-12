@@ -8,6 +8,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"srv/internal/srvpath"
 	"strings"
 	"time"
 )
@@ -288,7 +289,7 @@ func daemonClientLogs() int {
 }
 
 func daemonClientPruneCache() int {
-	dir := filepath.Join(ConfigDir(), "cache")
+	dir := filepath.Join(srvpath.Dir(), "cache")
 	if err := os.RemoveAll(dir); err != nil {
 		fmt.Fprintln(os.Stderr, "daemon prune-cache:", err)
 		return 1

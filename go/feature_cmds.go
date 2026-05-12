@@ -9,6 +9,7 @@ import (
 	"path"
 	"path/filepath"
 	"runtime"
+	"srv/internal/srvpath"
 	"strings"
 )
 
@@ -54,7 +55,7 @@ func doctorChecks(cfg *Config, profileOverride string) ([]map[string]any, bool) 
 		}
 	}
 	check("version", true, Version)
-	check("config", true, ConfigFile())
+	check("config", true, srvpath.Config())
 	check("profiles", len(cfg.Profiles) > 0, fmt.Sprintf("%d configured", len(cfg.Profiles)))
 	if cfg.DefaultProfile != "" {
 		check("default profile", true, cfg.DefaultProfile)
@@ -66,8 +67,8 @@ func doctorChecks(cfg *Config, profileOverride string) ([]map[string]any, bool) 
 	} else {
 		check("git", false, "needed for git-mode sync")
 	}
-	if _, err := os.Stat(filepath.Join(ConfigDir(), "cache")); err == nil {
-		check("completion cache", true, filepath.Join(ConfigDir(), "cache"))
+	if _, err := os.Stat(filepath.Join(srvpath.Dir(), "cache")); err == nil {
+		check("completion cache", true, filepath.Join(srvpath.Dir(), "cache"))
 	} else {
 		check("completion cache", true, "will be created on demand")
 	}
