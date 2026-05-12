@@ -221,23 +221,10 @@ func cmdUI(cfg *Config) error {
 		st.rows = buildSelectableRows(tunnelNames, jobs)
 		clampCursor(st)
 
-		var out string
-		row := st.currentRow()
-		if st.detailMode {
-			switch row.kind {
-			case "job":
-				if row.idx >= 0 && row.idx < len(jobs) {
-					out = renderJobDetail(jobs[row.idx], st)
-				}
-			case "tunnel":
-				if row.idx >= 0 && row.idx < len(tunnelNames) {
-					out = renderTunnelDetail(tunnelNames[row.idx], fresh, st)
-				}
-			}
-		}
-		if out == "" {
-			out = renderDashboard(fresh, jobs, tunnelNames, st)
-		}
+		// Detail is now part of the dashboard's right column,
+		// updated live as the cursor moves. No fullscreen modal --
+		// rendering always goes through renderDashboard.
+		out := renderDashboard(fresh, jobs, tunnelNames, st)
 		if st.forceRedraw || out != st.lastFrame {
 			// Alt-screen redraw: home the cursor, write the new
 			// frame, then clear from cursor to end-of-screen. The
@@ -398,21 +385,49 @@ func focusPrevPane(st *uiState) {
 	focusNextPane(st)
 }
 
+// moveFocusedRow moves the cursor in the focused pane by `delta`
+// (1 = down, -1 = up). At pane boundaries the cursor automatically
+// crosses into the next section (down past last tunnel jumps to
+// first job, up past first job jumps to last tunnel), so the user
+// can navigate every selectable row with j/k or arrow keys alone --
+// Tab is then just a fast-cross shortcut, not the only way.
 func moveFocusedRow(st *uiState, delta int) {
 	tunnels, jobs := countUIRows(st.rows)
+	if tunnels+jobs == 0 {
+		return
+	}
 	switch st.focusPane {
 	case "tunnel":
-		if tunnels == 0 {
-			return
+		next := st.tunnelCursor + delta
+		if next >= tunnels && jobs > 0 {
+			st.focusPane = "job"
+			st.jobCursor = 0
+		} else if next < 0 && jobs > 0 {
+			st.focusPane = "job"
+			st.jobCursor = jobs - 1
+		} else {
+			st.tunnelCursor = next
 		}
-		st.tunnelCursor += delta
 	case "job":
-		if jobs == 0 {
-			return
+		next := st.jobCursor + delta
+		if next >= jobs && tunnels > 0 {
+			st.focusPane = "tunnel"
+			st.tunnelCursor = 0
+		} else if next < 0 && tunnels > 0 {
+			st.focusPane = "tunnel"
+			st.tunnelCursor = tunnels - 1
+		} else {
+			st.jobCursor = next
 		}
-		st.jobCursor += delta
 	default:
-		return
+		// No focus set -- pick whichever pane has rows.
+		if tunnels > 0 {
+			st.focusPane = "tunnel"
+			st.tunnelCursor = 0
+		} else {
+			st.focusPane = "job"
+			st.jobCursor = 0
+		}
 	}
 	clampCursor(st)
 	st.forceRedraw = true
@@ -449,24 +464,10 @@ func handleUIKey(b byte, st *uiState, jobs []*JobRecord, tunnelNames []string, c
 
 	row := st.currentRow()
 
-	if st.detailMode {
-		switch b {
-		case 'K':
-			armConfirmFor(st, row, jobs, tunnelNames, cfg, 'K')
-		case ' ':
-			armConfirmFor(st, row, jobs, tunnelNames, cfg, ' ')
-		case 'x':
-			armConfirmFor(st, row, jobs, tunnelNames, cfg, 'x')
-		case 'q', '\x03', '\r', '\n', 0x1b:
-			st.detailMode = false
-			st.forceRedraw = true
-		default:
-			st.detailMode = false
-			st.forceRedraw = true
-		}
-		return true
-	}
-
+	// Detail is always visible on the right -- Enter no longer opens
+	// a modal, it's just a no-op now (or could be wired to trigger
+	// the "default action" per row in future). Keep the key sink so
+	// stray ⏎ presses don't fall through to other handlers.
 	switch b {
 	case 'q', '\x03': // q / Ctrl-C
 		return false
@@ -486,10 +487,9 @@ func handleUIKey(b byte, st *uiState, jobs []*JobRecord, tunnelNames []string, c
 	case 'k':
 		moveFocusedRow(st, -1)
 	case '\r', '\n':
-		if row.kind != "" {
-			st.detailMode = true
-			st.forceRedraw = true
-		}
+		// No-op: detail is already visible in the right column,
+		// nothing to "open". Sink the key so it doesn't drop into
+		// the catch-all default of other handlers.
 	case 'K', ' ', 'x':
 		armConfirmFor(st, row, jobs, tunnelNames, cfg, b)
 	case 0x1b: // ESC -- possibly an arrow-key sequence
@@ -747,18 +747,36 @@ func redrawDashboard(content string, prevLines int) {
 // `jobs` and `st` are nil for the non-TTY one-shot path; in that
 // mode the Jobs section renders without selection markers and the
 // footer drops the interactive-key hints.
-// renderDashboard draws every section as its own boxed panel. Each
-// btop* function owns its panel borders via boxTop / boxLine /
-// boxBottom; the focused panel (tunnels or jobs) gets a brighter
-// border and a `*` prefix on the title so the active pane is obvious
-// at a glance.
+// renderDashboard composes the full-screen layout: status panels on
+// top (full width), tunnels + jobs in a left column with the detail
+// panel auto-tracking the cursor on the right (ranger / mutt
+// idiom), MCP / groups / help underneath (full width again).
+//
+// Snapshot mode (st == nil) skips the side-by-side -- a piped
+// output of stacked boxes is more useful than ascii-art columns.
 func renderDashboard(cfg *Config, jobs []*JobRecord, tunnelNames []string, st *uiState) string {
 	var sb strings.Builder
 	btopHeader(&sb, st)
 	btopActive(&sb, cfg)
 	btopDaemon(&sb)
-	btopTunnels(&sb, cfg, tunnelNames, st)
-	btopJobs(&sb, jobs, st)
+
+	if st == nil {
+		btopTunnels(&sb, cfg, tunnelNames, st)
+		btopJobs(&sb, jobs, st)
+	} else {
+		leftW, rightW, gap := splitColumnsWidth(dashboardWidth)
+		var leftBuf strings.Builder
+		withDashboardWidth(leftW, func() {
+			btopTunnels(&leftBuf, cfg, tunnelNames, st)
+			btopJobs(&leftBuf, jobs, st)
+		})
+		var rightBuf strings.Builder
+		withDashboardWidth(rightW, func() {
+			btopDetail(&rightBuf, cfg, jobs, tunnelNames, st)
+		})
+		writeSideBySide(&sb, leftBuf.String(), rightBuf.String(), leftW, gap)
+	}
+
 	btopMCP(&sb)
 	btopGroups(&sb, cfg)
 	btopFooter(&sb, st)
@@ -766,6 +784,87 @@ func renderDashboard(cfg *Config, jobs []*JobRecord, tunnelNames []string, st *u
 		renderConfirmPopup(&sb, st.confirm)
 	}
 	return sb.String()
+}
+
+// splitColumnsWidth divides a full-width row into left/right
+// columns with a one-cell gap. Both halves get a floor so the
+// tunnel rows / detail panel don't end up unreadably narrow on a
+// 60-col window.
+func splitColumnsWidth(total int) (left, right, gap int) {
+	gap = 1
+	left = (total - gap) / 2
+	if left < 32 {
+		left = 32
+	}
+	right = total - left - gap
+	if right < 28 {
+		right = 28
+	}
+	return left, right, gap
+}
+
+// withDashboardWidth runs `fn` with the package-level
+// dashboardWidth / dashboardContentWidth temporarily clamped to
+// `w`, then restores. Lets the existing btop* renderers (which
+// read those globals) draw a smaller box for one column without
+// having to thread `width` through every helper signature.
+func withDashboardWidth(w int, fn func()) {
+	if w < 20 {
+		w = 20
+	}
+	savedW, savedC := dashboardWidth, dashboardContentWidth
+	dashboardWidth = w
+	dashboardContentWidth = w - 4
+	defer func() {
+		dashboardWidth = savedW
+		dashboardContentWidth = savedC
+	}()
+	fn()
+}
+
+// writeSideBySide zips two pre-rendered column blocks line-by-line,
+// padding the shorter side with blanks so the result stays
+// grid-aligned. visualWidth handles ANSI sequences so a coloured row
+// of N visible chars still occupies N cells.
+func writeSideBySide(sb *strings.Builder, left, right string, leftWidth, gap int) {
+	lLines := splitDashboardLines(left)
+	rLines := splitDashboardLines(right)
+	n := len(lLines)
+	if len(rLines) > n {
+		n = len(rLines)
+	}
+	gapStr := strings.Repeat(" ", gap)
+	blankLeft := strings.Repeat(" ", leftWidth)
+	for i := 0; i < n; i++ {
+		var l, r string
+		if i < len(lLines) {
+			l = lLines[i]
+			pad := leftWidth - visualWidth(l)
+			if pad > 0 {
+				l += strings.Repeat(" ", pad)
+			}
+		} else {
+			l = blankLeft
+		}
+		if i < len(rLines) {
+			r = rLines[i]
+		}
+		fmt.Fprintf(sb, "%s%s%s\n", l, gapStr, r)
+	}
+}
+
+// splitDashboardLines splits panel output and drops the trailing
+// empty line that each btop* writes for vertical separation
+// (irrelevant when stitching columns together).
+func splitDashboardLines(s string) []string {
+	if s == "" {
+		return nil
+	}
+	lines := strings.Split(s, "\n")
+	for len(lines) > 0 && lines[len(lines)-1] == "" {
+		lines = lines[:len(lines)-1]
+	}
+	return lines
 }
 
 // boxColor returns the ANSI escape used for a panel's border.
@@ -1034,6 +1133,100 @@ func btopJobs(sb *strings.Builder, jobs []*JobRecord, st *uiState) {
 		boxLineFocused(sb, row, focused)
 	}
 	boxBottomFocused(sb, focused)
+	fmt.Fprintln(sb)
+}
+
+// btopDetail is the right-column panel: a live view of whatever the
+// cursor currently highlights. Updates automatically on every j/k /
+// arrow / Tab event so the user doesn't have to press Enter to "open"
+// a row -- ranger / mutt / lazygit pattern. Falls back to a hint when
+// nothing is selected (empty tunnels + empty jobs).
+func btopDetail(sb *strings.Builder, cfg *Config, jobs []*JobRecord, tunnelNames []string, st *uiState) {
+	row := st.currentRow()
+	switch row.kind {
+	case "tunnel":
+		if row.idx >= 0 && row.idx < len(tunnelNames) {
+			btopTunnelDetailColumn(sb, tunnelNames[row.idx], cfg)
+			return
+		}
+	case "job":
+		if row.idx >= 0 && row.idx < len(jobs) {
+			btopJobDetailColumn(sb, jobs[row.idx])
+			return
+		}
+	}
+	boxTop(sb, "detail")
+	boxLine(sb, ansiDim+"(no row selected -- move cursor with j/k or arrow keys)"+ansiReset)
+	boxBottom(sb)
+	fmt.Fprintln(sb)
+}
+
+// btopJobDetailColumn renders job details fit for the right column.
+// Same fields as the old full-screen renderJobDetail, just laid out
+// against the narrower width.
+func btopJobDetailColumn(sb *strings.Builder, j *JobRecord) {
+	boxTop(sb, "job detail")
+	boxLine(sb, btopKV("id", dashName(j.ID)))
+	boxLine(sb, btopKV("profile", ansiCyan+j.Profile+ansiReset))
+	boxLine(sb, btopKV("pid", strconv.Itoa(j.Pid)))
+	started := j.Started
+	if t, ok := parseISOLike(j.Started); ok {
+		started = j.Started + dashMeta(" ("+fmtDuration(time.Since(t))+" ago)")
+	}
+	boxLine(sb, btopKV("started", started))
+	if j.Cwd != "" {
+		boxLine(sb, btopKV("cwd", dashPath(fitPlain(j.Cwd, dashboardContentWidth-10))))
+	}
+	if j.Log != "" {
+		boxLine(sb, btopKV("log", dashPath(fitPlain(j.Log, dashboardContentWidth-10))))
+	}
+	boxLine(sb, "")
+	boxLine(sb, ansiDim+"COMMAND:"+ansiReset)
+	for _, line := range wrapText(j.Cmd, dashboardContentWidth-2) {
+		boxLine(sb, "  "+line)
+	}
+	boxLine(sb, "")
+	boxLine(sb, ansiDim+"press "+ansiYellow+ansiBold+"K"+ansiReset+ansiDim+" to kill"+ansiReset)
+	boxBottom(sb)
+	fmt.Fprintln(sb)
+}
+
+// btopTunnelDetailColumn renders tunnel details for the right
+// column. Surfaces last-attempt errors prominently -- that's the
+// info the user most wants when something looks "stopped" but they
+// expected "running".
+func btopTunnelDetailColumn(sb *strings.Builder, name string, cfg *Config) {
+	def := cfg.Tunnels[name]
+	if def == nil {
+		boxTop(sb, "tunnel detail")
+		boxLine(sb, ansiRed+"tunnel "+name+" not found in config"+ansiReset)
+		boxBottom(sb)
+		fmt.Fprintln(sb)
+		return
+	}
+	boxTop(sb, "tunnel detail")
+	boxLine(sb, btopKV("name", dashName(name)))
+	boxLine(sb, btopKV("type", ansiMagenta+def.Type+ansiReset))
+	boxLine(sb, btopKV("spec", dashPath(def.Spec)))
+	boxLine(sb, btopKV("profile", ansiCyan+tunnelProfileLabel(def)+ansiReset))
+	boxLine(sb, btopKV("autostart", boolLabel(def.Autostart)))
+	active, errs := loadTunnelStatuses()
+	if a, ok := active[name]; ok {
+		boxLine(sb, btopKV("state", dashStatus("running", ansiGreen)))
+		boxLine(sb, btopKV("listen", dashPath(a.Listen)))
+	} else if msg, ok := errs[name]; ok {
+		boxLine(sb, btopKV("state", dashStatus("failed", ansiRed)))
+		boxLine(sb, "")
+		boxLine(sb, ansiRed+ansiBold+"ERROR:"+ansiReset)
+		for _, line := range wrapText(msg, dashboardContentWidth-2) {
+			boxLine(sb, "  "+ansiRed+line+ansiReset)
+		}
+	} else {
+		boxLine(sb, btopKV("state", dashStatus("stopped", ansiDim)))
+	}
+	boxLine(sb, "")
+	boxLine(sb, ansiDim+"press "+ansiYellow+ansiBold+"Space"+ansiReset+ansiDim+" up/down, "+ansiYellow+ansiBold+"x"+ansiReset+ansiDim+" remove"+ansiReset)
+	boxBottom(sb)
 	fmt.Fprintln(sb)
 }
 
