@@ -45,12 +45,15 @@ type mcpStatus struct {
 }
 
 // mcpToolCall summarises one `tool=NAME dur=Ds <ok|err>` log line.
-// All fields are derived from a single line; see parseToolLine.
+// All fields are derived from a single line. PID is the bracketed
+// process id from the log prefix -- lets the UI cross-reference
+// against ActivePIDs to flag "still alive" vs "previous session".
 type mcpToolCall struct {
 	When time.Time
 	Name string
 	Dur  string
 	OK   bool
+	PID  int
 }
 
 // mcpRecentToolsMax bounds the rolling history the dashboard keeps.
@@ -134,7 +137,7 @@ func readMCPStatus() mcpStatus {
 		case strings.HasPrefix(payload, "tool="):
 			name, dur, ok2 := parseToolLine(payload)
 			st.RecentTools = append(st.RecentTools, mcpToolCall{
-				When: ts, Name: name, Dur: dur, OK: ok2,
+				When: ts, Name: name, Dur: dur, OK: ok2, PID: pid,
 			})
 		}
 	}

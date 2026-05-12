@@ -1264,9 +1264,11 @@ func btopDetail(sb *strings.Builder, cfg *Config, jobs []*JobRecord, tunnelNames
 }
 
 // btopMCPDetailColumn renders one MCP tool call in the right column:
-// the parsed fields (name / dur / ok-or-err / when) plus a hint
-// pointing the user at `~/.srv/mcp.log` for the raw context if they
-// want the surrounding session output.
+// the parsed fields (name / dur / ok-or-err / when) plus the server
+// PID that handled it. We cross-reference against mcp.ActivePIDs so
+// the row reads "12345 (alive)" if that MCP server is still running,
+// or "12345 (previous session)" if it has since exited -- useful
+// when debugging "which Claude Code instance issued this call".
 func btopMCPDetailColumn(sb *strings.Builder, tc mcpToolCall, mcp mcpStatus) {
 	boxTop(sb, "mcp call detail")
 	boxLine(sb, btopKV("tool", ansiYellow+ansiBold+tc.Name+ansiReset))
@@ -1277,23 +1279,34 @@ func btopMCPDetailColumn(sb *strings.Builder, tc mcpToolCall, mcp mcpStatus) {
 	}
 	boxLine(sb, btopKV("result", status))
 	boxLine(sb, btopKV("when", tc.When.Format("2006-01-02 15:04:05")+dashMeta(" ("+fmtDuration(time.Since(tc.When))+" ago)")))
-	// Server context: which PID handled it (if still alive) or just
-	// "idle". MCP log doesn't always record the per-tool PID
-	// directly so this is a best-effort pointer.
-	if len(mcp.ActivePIDs) > 0 {
-		pids := make([]string, 0, len(mcp.ActivePIDs))
-		for _, p := range mcp.ActivePIDs {
-			pids = append(pids, strconv.Itoa(p))
-		}
-		boxLine(sb, btopKV("active", ansiGreen+strings.Join(pids, ", ")+ansiReset))
+
+	pidLabel := strconv.Itoa(tc.PID)
+	if tc.PID == 0 {
+		pidLabel = dashMeta("(unknown)")
+	} else if pidIsActive(tc.PID, mcp.ActivePIDs) {
+		pidLabel = ansiGreen + ansiBold + pidLabel + ansiReset + dashMeta(" (alive)")
 	} else {
-		boxLine(sb, btopKV("active", dashMeta("none -- previous session")))
+		pidLabel = pidLabel + dashMeta(" (previous session)")
 	}
+	boxLine(sb, btopKV("server pid", pidLabel))
+
 	boxLine(sb, "")
 	boxLine(sb, ansiDim+"raw log: ~/.srv/mcp.log"+ansiReset)
 	boxLine(sb, ansiDim+"(read-only -- no actions available here)"+ansiReset)
 	boxBottom(sb)
 	fmt.Fprintln(sb)
+}
+
+// pidIsActive reports whether `pid` is in the active-PID set the
+// daemon snapshot reported. Cheap linear scan -- the active set is
+// always tiny (concurrent MCP servers per machine).
+func pidIsActive(pid int, active []int) bool {
+	for _, p := range active {
+		if p == pid {
+			return true
+		}
+	}
+	return false
 }
 
 // btopJobDetailColumn renders job details fit for the right column.
