@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"srv/internal/mcplog"
+	"srv/internal/progress"
 	"srv/internal/project"
 	"strings"
 	"time"
@@ -41,6 +42,7 @@ func cmdMcp(cfg *Config) error {
 	mcpMode = true
 	i18n.SetMCPMode(true)
 	project.SetSilent(true)
+	progress.SetQuiet(true)
 	mcplog.Logf("start v=%s", Version)
 	rd := bufio.NewReader(os.Stdin)
 	for {

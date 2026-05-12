@@ -9,6 +9,7 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"srv/internal/progress"
 	"srv/internal/srvtty"
 	"strings"
 
@@ -352,9 +353,9 @@ func uploadFile(c *Client, local, remote string) error {
 	// Progress meter -- silent under MCP and on non-TTY stderr (CI / pipes).
 	// Resume mode pre-fills the counter so the bar shows the *true* total
 	// progress, not just bytes transferred this call.
-	meter := newProgressMeter("push  "+shortLabel(remote), localSize)
+	meter := progress.NewMeter("push  "+progress.ShortLabel(remote), localSize)
 	meter.Add(startOffset)
-	if _, err := io.Copy(dst, newProgressReader(src, meter)); err != nil {
+	if _, err := io.Copy(dst, progress.NewReader(src, meter)); err != nil {
 		meter.Done()
 		return err
 	}
@@ -458,9 +459,9 @@ func downloadFile(c *Client, remote, local string) error {
 	if startOffset > 0 {
 		warnNotMCP("srv pull: resuming %s from %d/%d bytes\n", local, startOffset, remoteSize)
 	}
-	meter := newProgressMeter("pull  "+shortLabel(local), remoteSize)
+	meter := progress.NewMeter("pull  "+progress.ShortLabel(local), remoteSize)
 	meter.Add(startOffset)
-	if _, err := io.Copy(dst, newProgressReader(src, meter)); err != nil {
+	if _, err := io.Copy(dst, progress.NewReader(src, meter)); err != nil {
 		meter.Done()
 		return err
 	}

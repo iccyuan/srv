@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"srv/internal/jobs"
+	"srv/internal/progress"
 	"srv/internal/session"
 	"srv/internal/srvtty"
 	"strconv"
@@ -1042,11 +1043,11 @@ func handleMCPPush(args map[string]any, cfg *Config, profileOverride string) too
 	duration := time.Since(start)
 	var bytes int64
 	if rc == 0 {
-		bytes = sumLocalSize(local)
+		bytes = progress.SumLocalSize(local)
 	}
 	var text string
 	if rc == 0 {
-		text = fmt.Sprintf("uploaded %s -> %s [exit 0]%s", local, finalRemote, fmtRate(bytes, duration))
+		text = fmt.Sprintf("uploaded %s -> %s [exit 0]%s", local, finalRemote, progress.FmtRate(bytes, duration))
 	} else {
 		text = fmt.Sprintf("upload FAILED %s -> %s [exit %d]", local, finalRemote, rc)
 		if perr != nil {
@@ -1093,11 +1094,11 @@ func handleMCPPull(args map[string]any, cfg *Config, profileOverride string) too
 	duration := time.Since(start)
 	var bytes int64
 	if rc == 0 {
-		bytes = sumLocalSize(finalLocal)
+		bytes = progress.SumLocalSize(finalLocal)
 	}
 	var text string
 	if rc == 0 {
-		text = fmt.Sprintf("downloaded %s -> %s [exit 0]%s", abs, finalLocal, fmtRate(bytes, duration))
+		text = fmt.Sprintf("downloaded %s -> %s [exit 0]%s", abs, finalLocal, progress.FmtRate(bytes, duration))
 	} else {
 		text = fmt.Sprintf("download FAILED %s -> %s [exit %d]", abs, finalLocal, rc)
 		if perr != nil {
@@ -1275,7 +1276,7 @@ func handleMCPSync(args map[string]any, cfg *Config, profileOverride string) too
 	}
 	var text string
 	if rc == 0 {
-		text = fmt.Sprintf("synced %d files to %s [exit 0]%s", len(files), remoteRoot, fmtRate(bytes, duration))
+		text = fmt.Sprintf("synced %d files to %s [exit 0]%s", len(files), remoteRoot, progress.FmtRate(bytes, duration))
 	} else {
 		text = fmt.Sprintf("sync FAILED to %s [exit %d]; %d files were NOT transferred -- verify with `run \"ls -la %s\"` before assuming",
 			remoteRoot, rc, len(files), remoteRoot)
