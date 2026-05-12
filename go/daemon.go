@@ -204,6 +204,15 @@ func cmdDaemon(args []string) error {
 			if rc := daemonClientStop(); rc != 0 {
 				return exitCode(rc)
 			}
+			// Wait for the old daemon to actually exit before
+			// spawning a new one. daemonClientStop only waits for
+			// the shutdown RPC's response, not for the daemon
+			// process to finish teardown. If we race ahead,
+			// ensureDaemon's ping might hit the still-listening
+			// dying daemon, declare success, and skip the spawn --
+			// at which point autostart tunnels never come back up
+			// because no fresh daemon ever runs startAutostartTunnels.
+			waitDaemonGone(3 * time.Second)
 			if ensureDaemon() {
 				fmt.Println("daemon: restarted")
 				return nil
@@ -817,10 +826,37 @@ func (s *daemonState) gc() {
 	}
 	idle := now.Sub(s.lastReq) > daemonIdleTTL
 	s.mu.Unlock()
+	// Idle-shutdown only when there's nothing the daemon is uniquely
+	// hosting. Active tunnels live inside the daemon process: if we
+	// exit, every forwarder dies and nothing auto-restarts them
+	// (autostart only fires at daemon boot, which won't happen again
+	// until some other srv command spawns a fresh daemon). Pooled
+	// SSH connections are different -- closing them is cheap because
+	// a future call just re-dials.
 	if idle {
+		s.tunnelsMu.Lock()
+		nTunnels := len(s.tunnels)
+		s.tunnelsMu.Unlock()
+		if nTunnels > 0 {
+			return
+		}
 		fmt.Fprintln(os.Stderr, "srv daemon: idle for",
 			daemonIdleTTL, "-- shutting down.")
 		s.requestStop()
+	}
+}
+
+// waitDaemonGone polls until daemonPing() reports no daemon, or the
+// deadline expires. Used after a shutdown RPC so a follow-up
+// ensureDaemon() definitely sees a clean slate instead of racing
+// with the old daemon's teardown.
+func waitDaemonGone(maxWait time.Duration) {
+	deadline := time.Now().Add(maxWait)
+	for time.Now().Before(deadline) {
+		if !daemonPing() {
+			return
+		}
+		time.Sleep(50 * time.Millisecond)
 	}
 }
 
