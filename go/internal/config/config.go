@@ -1,4 +1,4 @@
-package main
+package config
 
 import (
 	"encoding/json"
@@ -196,12 +196,12 @@ func (c *Config) HintsEnabled() bool {
 	return *c.Hints
 }
 
-func newConfig() *Config {
+func New() *Config {
 	return &Config{Profiles: map[string]*Profile{}}
 }
 
-// LoadConfig returns nil with nil error when the file doesn't exist yet.
-func LoadConfig() (*Config, error) {
+// Load returns nil with nil error when the file doesn't exist yet.
+func Load() (*Config, error) {
 	data, err := os.ReadFile(srvpath.Config())
 	if err != nil {
 		if os.IsNotExist(err) {
@@ -209,7 +209,7 @@ func LoadConfig() (*Config, error) {
 		}
 		return nil, fmt.Errorf("read %s: %w", srvpath.Config(), err)
 	}
-	cfg := newConfig()
+	cfg := New()
 	if err := json.Unmarshal(data, cfg); err != nil {
 		return nil, fmt.Errorf("parse %s: %w", srvpath.Config(), err)
 	}
@@ -220,7 +220,7 @@ func LoadConfig() (*Config, error) {
 	return cfg, nil
 }
 
-func SaveConfig(cfg *Config) error {
+func Save(cfg *Config) error {
 	cfg.Version = srvio.SchemaVersion
 	return srvio.WriteJSONFile(srvpath.Config(), cfg)
 }
@@ -228,14 +228,14 @@ func SaveConfig(cfg *Config) error {
 // srvio.WriteJSONFile / srvio.WriteFileAtomic / srvio.WarnIfNewerSchema / srvio.SchemaVersion
 // live in srv/internal/srvio now. Use srvio.WriteJSONFile etc.
 
-// ResolveProfile picks the active profile by precedence:
+// Resolve picks the active profile by precedence:
 // override > session pin > $SRV_PROFILE > .srv-project pin > config default.
 //
 // The `.srv-project` step slots in just before the global default so a
 // repo-level pin wins over "whatever profile happens to be default
 // today" but still respects the user's session-scoped or env-scoped
 // override. See findProjectFile for the lookup rules.
-func ResolveProfile(cfg *Config, override string) (string, *Profile, error) {
+func Resolve(cfg *Config, override string) (string, *Profile, error) {
 	name := override
 	if name == "" {
 		_, rec := session.Touch()
