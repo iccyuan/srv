@@ -427,16 +427,6 @@ func guardCheckRisky(tool, cmd string, confirm bool) *toolResult {
 	return &r
 }
 
-// streamShortFollowSec is the longest follow window we'll allow without
-// at least one output filter. Below this, the 64 KiB result cap is
-// enough rope; above it, a chatty source can emit megabytes of progress
-// notifications, which inflate the model's context regardless of the
-// final-result truncation. Tightening "short" any further (e.g. 2s)
-// would reject reasonable spot-check use; loosening it (e.g. 20s)
-// undermines the whole gate, since the per-tool MCP timeout sits at
-// 60s and we want a real lower threshold.
-const streamShortFollowSec = 5
-
 // emptyFilterRegex matches grep patterns that filter nothing in
 // practice -- a `.*` / `.` / `.+` / `[\s\S]*` "filter" is a bypass
 // dressed up as a regex. Anchored matches only after whitespace trim;
@@ -458,14 +448,16 @@ func isMeaningfulFilter(s string) bool {
 	return true
 }
 
-// requireStreamFilter is the gate that long-follow MCP streaming
-// tools call before kicking off a stream. It enforces "no unbounded
-// streaming without a constraint" so a model that asks for
-// follow_seconds=60 with no filter gets a clear rejection instead of
-// silently consuming a six-figure token bill on a busy log.
+// requireStreamFilter is the gate that follow-mode MCP streaming
+// tools call before kicking off a stream. Rule: any `follow_seconds
+// > 0` requires at least one meaningful output filter. Earlier
+// versions exempted "short" follows (≤5s), but a chatty log can flood
+// the per-call progress channel even in five seconds, and the
+// exemption left no incentive for the model to ever pass a filter.
+// Strict rule, no exemption.
 //
 //	toolName     for the error message
-//	follow       follow_seconds the caller passed (0 = one-shot)
+//	follow       follow_seconds the caller passed (0 = one-shot, no gate)
 //	filters      list of caller-supplied filter strings (grep, unit,
 //	             since, priority, ...); any meaningful entry counts.
 //	hint         single-line example the model can copy-paste to fix.
@@ -473,8 +465,8 @@ func isMeaningfulFilter(s string) bool {
 // Returns nil to proceed, or a populated toolResult that the caller
 // should `return *r`.
 func requireStreamFilter(toolName string, follow int, filters []string, hint string) *toolResult {
-	if follow <= streamShortFollowSec {
-		return nil
+	if follow <= 0 {
+		return nil // one-shot, not streaming
 	}
 	for _, f := range filters {
 		if isMeaningfulFilter(f) {
@@ -482,14 +474,13 @@ func requireStreamFilter(toolName string, follow int, filters []string, hint str
 		}
 	}
 	msg := fmt.Sprintf(
-		"streaming `%s` with follow_seconds=%d requires at least one output filter to keep token cost bounded. Add a constraint and retry.\n\nExample: %s",
+		"streaming `%s` (follow_seconds=%d) requires at least one output filter to keep token cost bounded. The cap on the final tool-result text does NOT cap the progress-notification stream, so even a short unfiltered follow can flood the conversation. Add a constraint and retry; or omit follow_seconds for a one-shot fetch.\n\nExample: %s",
 		toolName, follow, hint,
 	)
 	r := mcpTextErr(msg)
 	r.StructuredContent = map[string]any{
-		"rejected_reason":    "unbounded_streaming",
-		"follow_seconds":     follow,
-		"min_unfiltered_sec": streamShortFollowSec,
+		"rejected_reason": "unbounded_streaming",
+		"follow_seconds":  follow,
 	}
 	return &r
 }
@@ -677,11 +668,11 @@ func handleMCPTail(args map[string]any, cfg *Config, profileOverride string) too
 	var linesClamped bool
 	lines, linesClamped = clampLines(lines, 1000)
 
-	// Default follow is intentionally short -- streamShortFollowSec is
-	// the longest unfiltered window the token-economy gate allows, so
-	// a no-arg call gets a quick spot-check without needing grep.
-	// Longer follows must specify their own follow_seconds AND a grep.
-	follow := streamShortFollowSec
+	// Default is one-shot (no follow). A no-arg `tail {path}` call
+	// fetches the last `lines` of the file and returns. Models that
+	// want a live follow opt in via follow_seconds AND a grep filter
+	// -- the token-economy gate (below) enforces the pairing.
+	follow := 0
 	if v, ok := args["follow_seconds"].(float64); ok && v > 0 {
 		follow = int(v)
 	}
@@ -1702,7 +1693,7 @@ var mcpTools = []mcpTool{
 	{
 		def: toolDef{
 			Name:        "journal",
-			Description: "Read or follow systemd journal on the remote. Mirrors journalctl's flag shape: `unit` (-u), `since`, `priority` (-p), `lines` (-n), `grep` (-g, server-side). Pass `follow_seconds` > 0 to stream new lines via `notifications/progress` for that many seconds (cap 60); leave 0 for a one-shot read. Use this in place of `run \"journalctl ...\"` so the bounded-follow case has a real tool surface instead of getting rejected as a long-blocking pattern.\n\nToken-economy gate: follow_seconds > 5 REQUIRES at least one of unit / since / priority / grep -- a bare `journalctl -f` taps the whole system log and floods progress notifications. `lines` is clamped to 2000.",
+			Description: "Read or follow systemd journal on the remote. Mirrors journalctl's flag shape: `unit` (-u), `since`, `priority` (-p), `lines` (-n), `grep` (-g, server-side). Pass `follow_seconds` > 0 to stream new lines via `notifications/progress` for that many seconds (cap 60); leave 0 for a one-shot read. Use this in place of `run \"journalctl ...\"` so the bounded-follow case has a real tool surface instead of getting rejected as a long-blocking pattern.\n\nToken-economy gates (MCP only):\n  - ANY follow_seconds > 0 REQUIRES at least one of unit / since / priority / grep -- progress notifications during follow are unbounded by the result-text cap.\n  - `lines` is clamped to 2000.\n  - follow_seconds capped at 60s.",
 			InputSchema: map[string]any{
 				"type": "object",
 				"properties": map[string]any{
@@ -1721,14 +1712,14 @@ var mcpTools = []mcpTool{
 	{
 		def: toolDef{
 			Name:        "tail",
-			Description: "Follow a remote file for a bounded duration and stream new lines via `notifications/progress`. Replaces the rejected `run \"tail -F path\"` pattern for the live-log-watch case: synchronous `run` refuses never-terminating commands, but `tail` is explicitly bounded by follow_seconds (default 30s, cap 60s) so the call has a deterministic ceiling. Use this when you want to watch a log mid-deploy or see what a service is doing right now.\n\nToken-economy gate: follow_seconds > 5 REQUIRES a `grep` regex -- the final-result text is capped at 64 KiB but progress notifications during a long unfiltered follow can still flood the conversation. `lines` is clamped to 1000.",
+			Description: "Read the last N lines of a remote file. With follow_seconds > 0, also streams new lines via `notifications/progress` for that duration. Use the one-shot form for log spot-checks; use the follow form when you actually need to watch a log change mid-deploy.\n\nToken-economy gates (MCP only):\n  - ANY follow_seconds > 0 REQUIRES a `grep` regex. Even short follows can flood progress notifications; the 64 KiB final-result cap does NOT cap the progress stream.\n  - `lines` is clamped to 1000.\n  - follow_seconds capped at 60s.\n\nFor one-shot reads (default), no grep is required -- the `lines` cap is the bound.",
 			InputSchema: map[string]any{
 				"type": "object",
 				"properties": map[string]any{
 					"path":           strSchema("Remote file to follow."),
-					"lines":          intSchema(50, "Initial lines to backfill before following. Clamped at 1000."),
-					"follow_seconds": intSchema(streamShortFollowSec, "How long to follow before returning. Default 5s (the unfiltered ceiling). Values >5 require a `grep` filter (token-economy gate). Capped at 60s."),
-					"grep":           strSchema("Regex filter applied per line. Required for follow_seconds > 5."),
+					"lines":          intSchema(50, "Lines to fetch (initial backfill, or full slice when not following). Clamped at 1000."),
+					"follow_seconds": intSchema(0, "Follow for N seconds via progress notifications. 0 (default) = one-shot. ANY non-zero value REQUIRES a `grep` filter -- progress notifications are unbounded by the result-text cap. Capped at 60s."),
+					"grep":           strSchema("Regex filter applied per line. Mandatory whenever follow_seconds > 0."),
 					"profile":        strSchema(""),
 				},
 				"required": []string{"path"},

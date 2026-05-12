@@ -45,20 +45,33 @@ func TestRequireStreamFilter_NoFollow(t *testing.T) {
 	}
 }
 
-func TestRequireStreamFilter_ShortFollowAllowed(t *testing.T) {
-	// follow <= streamShortFollowSec is OK without filter.
-	for _, follow := range []int{1, 3, streamShortFollowSec} {
+func TestRequireStreamFilter_AnyFollowWithoutFilterRejected(t *testing.T) {
+	// Strict rule: ANY follow_seconds > 0 with no filter rejects.
+	// The earlier "short follow OK" exemption was removed -- even a
+	// 1-second window can flood progress notifications on a chatty
+	// source.
+	for _, follow := range []int{1, 3, 5, 10, 30, 60} {
 		r := requireStreamFilter("tail", follow, []string{""}, "(example)")
-		if r != nil {
-			t.Errorf("follow=%d should pass (under threshold), got reject", follow)
+		if r == nil {
+			t.Errorf("follow=%d with empty filter should reject", follow)
 		}
 	}
 }
 
-func TestRequireStreamFilter_LongFollowNoFilterRejected(t *testing.T) {
+func TestRequireStreamFilter_FollowWithFilterAllowed(t *testing.T) {
+	// A meaningful grep -- pass at any duration.
+	for _, follow := range []int{1, 30, 60} {
+		r := requireStreamFilter("tail", follow, []string{"ERROR"}, "(example)")
+		if r != nil {
+			t.Errorf("follow=%d with real filter should pass; got reject", follow)
+		}
+	}
+}
+
+func TestRequireStreamFilter_RejectionShape(t *testing.T) {
 	r := requireStreamFilter("tail", 30, []string{""}, `{ path: "x", grep: "ERROR" }`)
 	if r == nil {
-		t.Fatal("expected rejection for long follow without filter")
+		t.Fatal("expected rejection")
 	}
 	if !r.IsError {
 		t.Error("rejection should be IsError=true")
@@ -81,19 +94,13 @@ func TestRequireStreamFilter_LongFollowNoFilterRejected(t *testing.T) {
 	}
 }
 
-func TestRequireStreamFilter_LongFollowWithFilterAllowed(t *testing.T) {
-	// A meaningful grep -- pass.
-	r := requireStreamFilter("tail", 30, []string{"ERROR"}, "(example)")
-	if r != nil {
-		t.Errorf("real filter should pass; got rejection: %+v", r)
-	}
-}
-
 func TestRequireStreamFilter_BypassPatternRejected(t *testing.T) {
 	// grep=".*" should be treated as "no filter" even though non-empty.
-	r := requireStreamFilter("tail", 30, []string{".*"}, "(example)")
-	if r == nil {
-		t.Error("bypass pattern '.*' should still trigger rejection")
+	for _, follow := range []int{1, 30} {
+		r := requireStreamFilter("tail", follow, []string{".*"}, "(example)")
+		if r == nil {
+			t.Errorf("follow=%d with bypass pattern '.*' should still reject", follow)
+		}
 	}
 }
 
