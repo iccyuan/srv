@@ -1,4 +1,4 @@
-package main
+package syncx
 
 import (
 	"archive/tar"
@@ -10,42 +10,47 @@ import (
 	"os/exec"
 	"path/filepath"
 	"sort"
+	"srv/internal/clierr"
+	"srv/internal/config"
 	"srv/internal/mcplog"
+	"srv/internal/remote"
 	"srv/internal/srvtty"
 	"srv/internal/srvutil"
+	"srv/internal/sshx"
 	"strconv"
 	"strings"
 	"time"
 )
 
-var defaultSyncExcludes = []string{
+var DefaultExcludes = []string{
 	".git", "node_modules", "__pycache__", ".venv", "venv",
 	".idea", ".vscode", ".DS_Store", "*.pyc", "*.pyo", "*.swp",
 }
 
-type syncOpts struct {
-	remoteRoot  string
-	mode        string // git | mtime | glob | list (or empty = auto)
-	gitScope    string
-	noGit       bool
-	since       string
-	include     []string
-	exclude     []string
-	files       []string
-	root        string
-	dryRun      bool
-	watch       bool
-	delete      bool
-	yes         bool
-	deleteLimit int
+type Options struct {
+	RemoteRoot  string
+	Mode        string // git | mtime | glob | list (or empty = auto)
+	GitScope    string
+	NoGit       bool
+	Since       string
+	Include     []string
+	Exclude     []string
+	Files       []string
+	Root        string
+	DryRun      bool
+	Watch       bool
+	Delete      bool
+	Yes         bool
+	DeleteLimit int
 }
 
-func parseSyncOpts(args []string) *syncOpts {
-	o := &syncOpts{gitScope: "all"}
+func ParseOptions(args []string) *Options {
+	o := &Options{GitScope: "all"}
 	positional := []string{}
 	requireValue := func(option string, index int) string {
 		if index+1 >= len(args) {
-			fatal("error: %s requires a value.", option)
+			fmt.Fprintf(os.Stderr, "error: %s requires a value.\n", option)
+			os.Exit(1)
 		}
 		return args[index+1]
 	}
@@ -54,17 +59,17 @@ func parseSyncOpts(args []string) *syncOpts {
 		a := args[i]
 		switch {
 		case a == "--":
-			if o.mode == "" {
-				o.mode = "list"
+			if o.Mode == "" {
+				o.Mode = "list"
 			}
-			o.files = append(o.files, args[i+1:]...)
+			o.Files = append(o.Files, args[i+1:]...)
 			return o
 		case a == "--git":
-			o.mode = "git"
+			o.Mode = "git"
 			if i+1 < len(args) {
 				next := args[i+1]
 				if next == "all" || next == "staged" || next == "modified" || next == "untracked" {
-					o.gitScope = next
+					o.GitScope = next
 					i += 2
 					continue
 				}
@@ -72,103 +77,107 @@ func parseSyncOpts(args []string) *syncOpts {
 			i++
 			continue
 		case a == "--all" || a == "--staged" || a == "--modified" || a == "--untracked":
-			o.mode = "git"
-			o.gitScope = strings.TrimPrefix(a, "--")
+			o.Mode = "git"
+			o.GitScope = strings.TrimPrefix(a, "--")
 			i++
 			continue
 		case a == "--no-git":
-			o.noGit = true
+			o.NoGit = true
 			i++
 			continue
 		case a == "--since":
-			o.mode = "mtime"
-			o.since = requireValue(a, i)
+			o.Mode = "mtime"
+			o.Since = requireValue(a, i)
 			i += 2
 			continue
 		case strings.HasPrefix(a, "--since="):
-			o.mode = "mtime"
-			o.since = strings.TrimPrefix(a, "--since=")
+			o.Mode = "mtime"
+			o.Since = strings.TrimPrefix(a, "--since=")
 			i++
 			continue
 		case a == "--include":
-			o.mode = "glob"
-			o.include = append(o.include, requireValue(a, i))
+			o.Mode = "glob"
+			o.Include = append(o.Include, requireValue(a, i))
 			i += 2
 			continue
 		case strings.HasPrefix(a, "--include="):
-			o.mode = "glob"
-			o.include = append(o.include, strings.TrimPrefix(a, "--include="))
+			o.Mode = "glob"
+			o.Include = append(o.Include, strings.TrimPrefix(a, "--include="))
 			i++
 			continue
 		case a == "--exclude":
-			o.exclude = append(o.exclude, requireValue(a, i))
+			o.Exclude = append(o.Exclude, requireValue(a, i))
 			i += 2
 			continue
 		case strings.HasPrefix(a, "--exclude="):
-			o.exclude = append(o.exclude, strings.TrimPrefix(a, "--exclude="))
+			o.Exclude = append(o.Exclude, strings.TrimPrefix(a, "--exclude="))
 			i++
 			continue
 		case a == "--files":
-			o.mode = "list"
-			o.files = append(o.files, requireValue(a, i))
+			o.Mode = "list"
+			o.Files = append(o.Files, requireValue(a, i))
 			i += 2
 			continue
 		case a == "--root":
-			o.root = requireValue(a, i)
+			o.Root = requireValue(a, i)
 			i += 2
 			continue
 		case strings.HasPrefix(a, "--root="):
-			o.root = strings.TrimPrefix(a, "--root=")
+			o.Root = strings.TrimPrefix(a, "--root=")
 			i++
 			continue
 		case a == "--dry-run":
-			o.dryRun = true
+			o.DryRun = true
 			i++
 			continue
 		case a == "--watch":
-			o.watch = true
+			o.Watch = true
 			i++
 			continue
 		case a == "--delete":
-			o.delete = true
+			o.Delete = true
 			i++
 			continue
 		case a == "--yes" || a == "-y":
-			o.yes = true
+			o.Yes = true
 			i++
 			continue
 		case a == "--delete-limit":
 			n, err := strconv.Atoi(requireValue(a, i))
 			if err != nil || n < 0 {
-				fatal("error: --delete-limit requires a non-negative integer")
+				fmt.Fprintln(os.Stderr, "error: --delete-limit requires a non-negative integer")
+				os.Exit(1)
 			}
-			o.deleteLimit = n
+			o.DeleteLimit = n
 			i += 2
 			continue
 		case strings.HasPrefix(a, "--delete-limit="):
 			n, err := strconv.Atoi(strings.TrimPrefix(a, "--delete-limit="))
 			if err != nil || n < 0 {
-				fatal("error: --delete-limit requires a non-negative integer")
+				fmt.Fprintln(os.Stderr, "error: --delete-limit requires a non-negative integer")
+				os.Exit(1)
 			}
-			o.deleteLimit = n
+			o.DeleteLimit = n
 			i++
 			continue
 		case strings.HasPrefix(a, "-"):
-			fatal("error: unknown sync option %q", a)
+			fmt.Fprintf(os.Stderr, "error: unknown sync option %q\n", a)
+			os.Exit(1)
 		}
 		positional = append(positional, a)
 		i++
 	}
 	if len(positional) > 1 {
-		fatal("error: only one remote root accepted, got %v", positional)
+		fmt.Fprintf(os.Stderr, "error: only one remote root accepted, got %v\n", positional)
+		os.Exit(1)
 	}
 	if len(positional) == 1 {
-		o.remoteRoot = positional[0]
+		o.RemoteRoot = positional[0]
 	}
 	return o
 }
 
-func gitDeletedFiles(repoRoot string) ([]string, error) {
+func GitDeletedFiles(repoRoot string) ([]string, error) {
 	cmd := exec.Command("git", "-C", repoRoot, "ls-files", "--deleted", "-z")
 	b, err := cmd.CombinedOutput()
 	if err != nil {
@@ -188,9 +197,9 @@ func gitDeletedFiles(repoRoot string) ([]string, error) {
 	return out, nil
 }
 
-// findGitRoot walks upward from start until it finds a directory containing
+// FindGitRoot walks upward from start until it finds a directory containing
 // a .git entry. Returns "" if not in a repo.
-func findGitRoot(start string) string {
+func FindGitRoot(start string) string {
 	p, err := filepath.Abs(start)
 	if err != nil {
 		return ""
@@ -207,8 +216,8 @@ func findGitRoot(start string) string {
 	}
 }
 
-// gitChangedFiles runs `git ls-files`/`git diff` and returns relative paths.
-func gitChangedFiles(repoRoot, scope string) ([]string, error) {
+// GitChangedFiles runs `git ls-files`/`git diff` and returns relative paths.
+func GitChangedFiles(repoRoot, scope string) ([]string, error) {
 	out := map[string]struct{}{}
 	runGit := func(args ...string) ([]byte, error) {
 		cmd := exec.Command("git", args...)
@@ -465,28 +474,28 @@ func normalizeForTar(root, p string) string {
 	return filepath.ToSlash(rel)
 }
 
-func collectSyncFiles(o *syncOpts, localRoot string, allExcludes []string) ([]string, error) {
+func CollectFiles(o *Options, localRoot string, allExcludes []string) ([]string, error) {
 	var files []string
-	switch o.mode {
+	switch o.Mode {
 	case "git":
 		var err error
-		files, err = gitChangedFiles(localRoot, o.gitScope)
+		files, err = GitChangedFiles(localRoot, o.GitScope)
 		if err != nil {
 			return nil, err
 		}
 	case "mtime":
 		var err error
-		files, err = mtimeChangedFiles(localRoot, o.since, allExcludes)
+		files, err = mtimeChangedFiles(localRoot, o.Since, allExcludes)
 		if err != nil {
 			return nil, err
 		}
 	case "glob":
-		if len(o.include) == 0 {
+		if len(o.Include) == 0 {
 			return nil, fmt.Errorf("--include requires at least one pattern")
 		}
-		files = globFiles(localRoot, o.include)
+		files = globFiles(localRoot, o.Include)
 	case "list":
-		for _, p := range o.files {
+		for _, p := range o.Files {
 			rel := normalizeForTar(localRoot, p)
 			if rel == "" {
 				fmt.Fprintf(os.Stderr, "warning: skipping %q (outside local root)\n", p)
@@ -498,8 +507,8 @@ func collectSyncFiles(o *syncOpts, localRoot string, allExcludes []string) ([]st
 		return nil, fmt.Errorf("internal: no sync mode resolved")
 	}
 
-	excludes := o.exclude
-	if o.mode != "list" {
+	excludes := o.Exclude
+	if o.Mode != "list" {
 		excludes = allExcludes
 	}
 	if len(excludes) > 0 {
@@ -522,14 +531,14 @@ func collectSyncFiles(o *syncOpts, localRoot string, allExcludes []string) ([]st
 	return out, nil
 }
 
-func collectSyncDeletes(o *syncOpts, localRoot string, allExcludes []string) ([]string, error) {
-	if !o.delete {
+func CollectDeletes(o *Options, localRoot string, allExcludes []string) ([]string, error) {
+	if !o.Delete {
 		return nil, nil
 	}
-	if o.mode != "git" {
+	if o.Mode != "git" {
 		return nil, fmt.Errorf("--delete currently requires git mode")
 	}
-	deletes, err := gitDeletedFiles(localRoot)
+	deletes, err := GitDeletedFiles(localRoot)
 	if err != nil {
 		return nil, err
 	}
@@ -545,12 +554,12 @@ func collectSyncDeletes(o *syncOpts, localRoot string, allExcludes []string) ([]
 	return deletes, nil
 }
 
-// tarUploadStream builds a tar stream of files (rooted at localRoot) entirely
-// in Go and pipes it into a remote `tar -xf -` running in remoteRoot.
+// TarUploadStream builds a tar stream of files (rooted at localRoot) entirely
+// in Go and pipes it into a remote `tar -xf -` running in o.RemoteRoot.
 // Gzips the stream when profile.CompressSync is true (default) -- typical
 // 70% reduction on text/code, ~ms-level CPU cost.
-func tarUploadStream(profile *Profile, localRoot string, files []string, remoteRoot string) (int, error) {
-	c, err := Dial(profile)
+func TarUploadStream(profile *config.Profile, localRoot string, files []string, remoteRoot string) (int, error) {
+	c, err := sshx.Dial(profile)
 	if err != nil {
 		return 255, err
 	}
@@ -647,8 +656,8 @@ func tarUploadStream(profile *Profile, localRoot string, files []string, remoteR
 	return rc, runErr
 }
 
-func deleteRemoteFiles(profile *Profile, remoteRoot string, files []string) (int, error) {
-	c, err := Dial(profile)
+func DeleteRemoteFiles(profile *config.Profile, remoteRoot string, files []string) (int, error) {
+	c, err := sshx.Dial(profile)
 	if err != nil {
 		return 255, err
 	}
@@ -678,74 +687,74 @@ func deleteRemoteFiles(profile *Profile, remoteRoot string, files []string) (int
 	return 0, nil
 }
 
-func cmdSync(args []string, cfg *Config, profileOverride string) error {
-	o := parseSyncOpts(args)
-	name, profile, err := ResolveProfile(cfg, profileOverride)
+func Cmd(args []string, cfg *config.Config, profileOverride string) error {
+	o := ParseOptions(args)
+	name, profile, err := config.Resolve(cfg, profileOverride)
 	if err != nil {
-		return exitErr(1, "%v", err)
+		return clierr.Errf(1, "%v", err)
 	}
 
 	// local root
-	localRoot := o.root
+	localRoot := o.Root
 	if localRoot == "" {
-		if o.mode == "git" || (o.mode == "" && !o.noGit) {
-			localRoot = findGitRoot(mustCwd())
+		if o.Mode == "git" || (o.Mode == "" && !o.NoGit) {
+			localRoot = FindGitRoot(MustCwd())
 		}
 		if localRoot == "" {
-			localRoot = mustCwd()
+			localRoot = MustCwd()
 		}
 	}
 	abs, err := filepath.Abs(localRoot)
 	if err != nil {
-		return exitErr(1, "error: bad local root: %v", err)
+		return clierr.Errf(1, "error: bad local root: %v", err)
 	}
 	localRoot = abs
 	if st, err := os.Stat(localRoot); err != nil || !st.IsDir() {
-		return exitErr(1, "error: local root not a directory: %s", localRoot)
+		return clierr.Errf(1, "error: local root not a directory: %s", localRoot)
 	}
 
 	// auto-detect mode
-	if o.mode == "" {
-		if !o.noGit && findGitRoot(localRoot) != "" {
-			o.mode = "git"
+	if o.Mode == "" {
+		if !o.NoGit && FindGitRoot(localRoot) != "" {
+			o.Mode = "git"
 		} else {
 			reason := "not in a git repo"
-			if o.noGit {
+			if o.NoGit {
 				reason = "git auto-detect disabled (--no-git)"
 			}
-			return exitErr(1, "error: %s. Specify --include / --since / --files.", reason)
+			return clierr.Errf(1, "error: %s. Specify --include / --since / --files.", reason)
 		}
 	}
 
 	// remote root
-	cwd := GetCwd(name, profile)
-	remoteRoot := cwd
-	if o.remoteRoot != "" {
-		remoteRoot = resolveRemotePath(o.remoteRoot, cwd)
+	cwd := config.GetCwd(name, profile)
+	_ = cwd
+	if o.RemoteRoot != "" {
+		o.RemoteRoot = remote.ResolvePath(o.RemoteRoot, cwd)
 	} else if profile.SyncRoot != "" {
-		remoteRoot = resolveRemotePath(profile.SyncRoot, cwd)
+		o.RemoteRoot = remote.ResolvePath(profile.SyncRoot, cwd)
 	}
 
-	allExcludes := append([]string{}, o.exclude...)
+	allExcludes := append([]string{}, o.Exclude...)
 	allExcludes = append(allExcludes, profile.SyncExclude...)
-	allExcludes = append(allExcludes, defaultSyncExcludes...)
+	allExcludes = append(allExcludes, DefaultExcludes...)
 
-	files, err := collectSyncFiles(o, localRoot, allExcludes)
+	files, err := CollectFiles(o, localRoot, allExcludes)
 	if err != nil {
-		return exitErr(1, "error: %v", err)
+		return clierr.Errf(1, "error: %v", err)
 	}
 	var deletes []string
-	if o.delete {
-		limit := o.deleteLimit
+	if o.Delete {
+		limit := o.DeleteLimit
 		if limit == 0 {
 			limit = 20
 		}
-		deletes, err = collectSyncDeletes(o, localRoot, allExcludes)
+		deletes, err = CollectDeletes(o, localRoot, allExcludes)
 		if err != nil {
-			return exitErr(1, "error: %v", err)
+			return clierr.Errf(1, "error: %v", err)
 		}
-		if len(deletes) > limit && !o.dryRun && !o.yes {
-			return exitErr(1, "error: --delete would remove %d files (limit %d). Re-run with --dry-run, --yes, or --delete-limit N.", len(deletes), limit)
+		if len(deletes) > limit && !o.DryRun && !o.Yes {
+			return clierr.Errf(1, "error: --delete would remove %d files (limit %d). Re-run with --dry-run, --yes, or --delete-limit N.", len(deletes), limit)
 		}
 	}
 
@@ -753,15 +762,15 @@ func cmdSync(args []string, cfg *Config, profileOverride string) error {
 	if profile.User != "" {
 		target = profile.User + "@" + profile.Host
 	}
-	header := fmt.Sprintf("mode    : %s", o.mode)
-	if o.mode == "git" {
-		header += " (" + o.gitScope + ")"
-	} else if o.mode == "mtime" {
-		header += " since " + o.since
+	header := fmt.Sprintf("mode    : %s", o.Mode)
+	if o.Mode == "git" {
+		header += " (" + o.GitScope + ")"
+	} else if o.Mode == "mtime" {
+		header += " since " + o.Since
 	}
 	fmt.Fprintln(os.Stderr, header)
 	fmt.Fprintf(os.Stderr, "local   : %s\n", localRoot)
-	fmt.Fprintf(os.Stderr, "remote  : %s:%s\n", target, remoteRoot)
+	fmt.Fprintf(os.Stderr, "remote  : %s:%s\n", target, o.RemoteRoot)
 	fmt.Fprintf(os.Stderr, "files   : %d\n", len(files))
 	if len(deletes) > 0 {
 		fmt.Fprintf(os.Stderr, "delete  : %d\n", len(deletes))
@@ -783,33 +792,34 @@ func cmdSync(args []string, cfg *Config, profileOverride string) error {
 	for _, f := range deletes {
 		fmt.Fprintf(os.Stderr, "  delete %s\n", f)
 	}
-	if o.dryRun {
+	if o.DryRun {
 		fmt.Fprintln(os.Stderr, "(dry-run, not transferred)")
 		return nil
 	}
-	rc, err := tarUploadStream(profile, localRoot, files, remoteRoot)
+	rc, err := TarUploadStream(profile, localRoot, files, o.RemoteRoot)
 	if err != nil {
-		printDiagError(err, profile)
+		fmt.Fprintln(os.Stderr, err)
 	}
 	if rc == 0 && len(deletes) > 0 {
-		if drc, derr := deleteRemoteFiles(profile, remoteRoot, deletes); derr != nil {
-			printDiagError(derr, profile)
-			return exitCode(1)
+		if drc, derr := DeleteRemoteFiles(profile, o.RemoteRoot, deletes); derr != nil {
+			fmt.Fprintln(os.Stderr, derr)
+			return clierr.Code(1)
 		} else if drc != 0 {
-			return exitCode(drc)
+			return clierr.Code(drc)
 		}
 	}
-	if o.watch {
+	if o.Watch {
 		fmt.Fprintln(os.Stderr)
-		return exitCode(runSyncWatch(o, profile, localRoot, remoteRoot, allExcludes))
+		return clierr.Code(runWatch(o, profile, localRoot, o.RemoteRoot, allExcludes))
 	}
-	return exitCode(rc)
+	return clierr.Code(rc)
 }
 
-func mustCwd() string {
+func MustCwd() string {
 	wd, err := os.Getwd()
 	if err != nil {
-		fatal("error: %v", err)
+		fmt.Fprintf(os.Stderr, "error: %v\n", err)
+		os.Exit(1)
 	}
 	return wd
 }

@@ -1,4 +1,4 @@
-package main
+package syncx
 
 import (
 	"fmt"
@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"srv/internal/config"
 	"sync"
 	"syscall"
 	"time"
@@ -15,12 +16,12 @@ import (
 
 const watchDebounce = 250 * time.Millisecond
 
-// runSyncWatch enters a watch loop after the initial sync. It walks
+// runWatch enters a watch loop after the initial sync. It walks
 // localRoot once to install fsnotify watchers on every non-excluded
 // directory, then on each filesystem event schedules a sync after a
 // short debounce. Newly-created directories get watchers added on the
 // fly. Loops until SIGINT / SIGTERM.
-func runSyncWatch(o *syncOpts, profile *Profile, localRoot, remoteRoot string, allExcludes []string) int {
+func runWatch(o *Options, profile *config.Profile, localRoot, remoteRoot string, allExcludes []string) int {
 	w, err := fsnotify.NewWatcher()
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "watch: cannot create watcher:", err)
@@ -36,7 +37,7 @@ func runSyncWatch(o *syncOpts, profile *Profile, localRoot, remoteRoot string, a
 		target = profile.User + "@" + profile.Host
 	}
 	fmt.Fprintf(os.Stderr, "profile=%s  target=%s:%s  mode=%s\n",
-		profile.Name, target, remoteRoot, o.mode)
+		profile.Name, target, remoteRoot, o.Mode)
 
 	// Trigger / dedup. The timer is reset on every event so we sync once
 	// after a quiet period instead of on every tap.
@@ -68,7 +69,7 @@ func runSyncWatch(o *syncOpts, profile *Profile, localRoot, remoteRoot string, a
 			mu.Unlock()
 		}()
 		// Re-collect each round so we pick up new files / git status changes.
-		files, err := collectSyncFiles(o, localRoot, allExcludes)
+		files, err := CollectFiles(o, localRoot, allExcludes)
 		if err != nil {
 			fmt.Fprintln(os.Stderr, "watch: collect:", err)
 			return
@@ -79,9 +80,9 @@ func runSyncWatch(o *syncOpts, profile *Profile, localRoot, remoteRoot string, a
 			return
 		}
 		fmt.Fprintf(os.Stderr, "[%s] syncing %d files...\n", ts, len(files))
-		rc, err := tarUploadStream(profile, localRoot, files, remoteRoot)
+		rc, err := TarUploadStream(profile, localRoot, files, remoteRoot)
 		if err != nil {
-			printDiagError(err, profile)
+			fmt.Fprintln(os.Stderr, err)
 			return
 		}
 		fmt.Fprintf(os.Stderr, "[%s] done (exit %d)\n", time.Now().Format("15:04:05"), rc)

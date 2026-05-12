@@ -11,6 +11,7 @@ import (
 	"runtime"
 	"srv/internal/daemon"
 	"srv/internal/srvpath"
+	"srv/internal/syncx"
 	"strings"
 )
 
@@ -260,7 +261,7 @@ func diffLocalRemote(cfg *Config, profileOverride, local, remoteArg string) (str
 }
 
 func cmdDiffChanged(args []string, cfg *Config, profileOverride string) error {
-	root := findGitRoot(mustCwd())
+	root := syncx.FindGitRoot(syncx.MustCwd())
 	if root == "" {
 		fmt.Fprintln(os.Stderr, "srv diff --changed: not in a git repo")
 		return exitCode(2)
@@ -269,7 +270,7 @@ func cmdDiffChanged(args []string, cfg *Config, profileOverride string) error {
 	if len(args) > 0 {
 		scope = strings.TrimPrefix(args[0], "--")
 	}
-	files, err := gitChangedFiles(root, scope)
+	files, err := syncx.GitChangedFiles(root, scope)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "srv diff --changed:", err)
 		return exitCode(1)

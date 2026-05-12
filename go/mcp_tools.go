@@ -11,6 +11,7 @@ import (
 	"srv/internal/progress"
 	"srv/internal/session"
 	"srv/internal/srvtty"
+	"srv/internal/syncx"
 	"strconv"
 	"strings"
 	"sync"
@@ -1126,32 +1127,32 @@ func handleMCPSync(args map[string]any, cfg *Config, profileOverride string) too
 	if errResult != nil {
 		return *errResult
 	}
-	o := &syncOpts{gitScope: "all"}
+	o := &syncOpts{GitScope: "all"}
 	if v, ok := args["remote_root"].(string); ok {
-		o.remoteRoot = v
+		o.RemoteRoot = v
 	}
 	if v, ok := args["mode"].(string); ok {
-		o.mode = v
+		o.Mode = v
 	}
 	if v, ok := args["git_scope"].(string); ok {
-		o.gitScope = v
+		o.GitScope = v
 	}
 	if v, ok := args["since"].(string); ok {
-		o.since = v
+		o.Since = v
 	}
 	if v, ok := args["root"].(string); ok {
-		o.root = v
+		o.Root = v
 	}
 	if v, ok := args["dry_run"].(bool); ok {
-		o.dryRun = v
+		o.DryRun = v
 	}
 	if v, ok := args["delete"].(bool); ok {
-		o.delete = v
+		o.Delete = v
 	}
 	if v, ok := args["yes"].(bool); ok {
-		o.yes = v
+		o.Yes = v
 	}
-	if o.delete && !o.dryRun && session.GuardOn() {
+	if o.Delete && !o.DryRun && session.GuardOn() {
 		confirm, _ := args["confirm"].(bool)
 		if !confirm {
 			return guardBlocked("sync",
@@ -1159,59 +1160,59 @@ func handleMCPSync(args map[string]any, cfg *Config, profileOverride string) too
 		}
 	}
 	if v, ok := args["delete_limit"].(float64); ok {
-		o.deleteLimit = int(v)
+		o.DeleteLimit = int(v)
 	}
 	if v, ok := args["include"].([]any); ok {
 		for _, x := range v {
 			if s, ok := x.(string); ok {
-				o.include = append(o.include, s)
+				o.Include = append(o.Include, s)
 			}
 		}
 	}
 	if v, ok := args["exclude"].([]any); ok {
 		for _, x := range v {
 			if s, ok := x.(string); ok {
-				o.exclude = append(o.exclude, s)
+				o.Exclude = append(o.Exclude, s)
 			}
 		}
 	}
 	if v, ok := args["files"].([]any); ok {
 		for _, x := range v {
 			if s, ok := x.(string); ok {
-				o.files = append(o.files, s)
+				o.Files = append(o.Files, s)
 			}
 		}
 	}
-	localRoot := o.root
+	localRoot := o.Root
 	if localRoot == "" {
-		localRoot = findGitRoot(mustCwd())
+		localRoot = syncx.FindGitRoot(syncx.MustCwd())
 		if localRoot == "" {
-			localRoot = mustCwd()
+			localRoot = syncx.MustCwd()
 		}
 	}
-	if o.mode == "" {
-		if findGitRoot(localRoot) != "" {
-			o.mode = "git"
-		} else if len(o.include) > 0 {
-			o.mode = "glob"
-		} else if o.since != "" {
-			o.mode = "mtime"
-		} else if len(o.files) > 0 {
-			o.mode = "list"
+	if o.Mode == "" {
+		if syncx.FindGitRoot(localRoot) != "" {
+			o.Mode = "git"
+		} else if len(o.Include) > 0 {
+			o.Mode = "glob"
+		} else if o.Since != "" {
+			o.Mode = "mtime"
+		} else if len(o.Files) > 0 {
+			o.Mode = "list"
 		} else {
 			return mcpTextErr("no mode resolved (not a git repo and no include/since/files)")
 		}
 	}
 	cwd := GetCwd(profName, prof)
 	remoteRoot := cwd
-	if o.remoteRoot != "" {
-		remoteRoot = resolveRemotePath(o.remoteRoot, cwd)
+	if o.RemoteRoot != "" {
+		remoteRoot = resolveRemotePath(o.RemoteRoot, cwd)
 	} else if prof.SyncRoot != "" {
 		remoteRoot = resolveRemotePath(prof.SyncRoot, cwd)
 	}
-	allExcludes := append([]string{}, o.exclude...)
+	allExcludes := append([]string{}, o.Exclude...)
 	allExcludes = append(allExcludes, prof.SyncExclude...)
-	allExcludes = append(allExcludes, defaultSyncExcludes...)
+	allExcludes = append(allExcludes, syncx.DefaultExcludes...)
 	files, err := collectSyncFiles(o, localRoot, allExcludes)
 	if err != nil {
 		return mcpTextErr(err.Error())
@@ -1220,11 +1221,11 @@ func handleMCPSync(args map[string]any, cfg *Config, profileOverride string) too
 	if err != nil {
 		return mcpTextErr(err.Error())
 	}
-	limit := o.deleteLimit
+	limit := o.DeleteLimit
 	if limit == 0 {
 		limit = 20
 	}
-	if len(deletes) > limit && !o.dryRun && !o.yes {
+	if len(deletes) > limit && !o.DryRun && !o.Yes {
 		return mcpTextErr(fmt.Sprintf("sync delete would remove %d files (limit %d). Re-run dry_run=true, yes=true, or set delete_limit.", len(deletes), limit))
 	}
 	if len(files) == 0 && len(deletes) == 0 {
@@ -1233,7 +1234,7 @@ func handleMCPSync(args map[string]any, cfg *Config, profileOverride string) too
 			StructuredContent: map[string]any{"files": []string{}, "deletes": deletes, "remote_root": remoteRoot, "exit_code": 0},
 		}
 	}
-	if o.dryRun {
+	if o.DryRun {
 		text := fmt.Sprintf("would sync %d files to %s\n", len(files), remoteRoot)
 		lim := len(files)
 		if lim > 200 {
@@ -1244,7 +1245,7 @@ func handleMCPSync(args map[string]any, cfg *Config, profileOverride string) too
 			text += fmt.Sprintf("\n... (%d more)", len(files)-200)
 		}
 		if len(deletes) > 0 {
-			text += "\nwould delete:\n" + strings.Join(deletes, "\n")
+			text += "\nwould Delete:\n" + strings.Join(deletes, "\n")
 		}
 		return toolResult{
 			Content: []toolContent{{Type: "text", Text: text}},
@@ -1308,15 +1309,15 @@ func handleMCPSyncDeleteDryRun(args map[string]any, cfg *Config, profileOverride
 	}
 	root, _ := args["root"].(string)
 	if root == "" {
-		root = findGitRoot(mustCwd())
+		root = syncx.FindGitRoot(syncx.MustCwd())
 	}
 	if root == "" {
 		return mcpTextErr("not in a git repo")
 	}
 	root, _ = filepath.Abs(root)
-	o := &syncOpts{mode: "git", gitScope: "all", delete: true, dryRun: true}
+	o := &syncOpts{Mode: "git", GitScope: "all", Delete: true, DryRun: true}
 	allExcludes := append([]string{}, prof.SyncExclude...)
-	allExcludes = append(allExcludes, defaultSyncExcludes...)
+	allExcludes = append(allExcludes, syncx.DefaultExcludes...)
 	deletes, err := collectSyncDeletes(o, root, allExcludes)
 	if err != nil {
 		return mcpTextErr(err.Error())

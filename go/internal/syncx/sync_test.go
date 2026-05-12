@@ -1,7 +1,8 @@
-package main
+package syncx
 
 import (
 	"reflect"
+	"srv/internal/remote"
 	"srv/internal/srvutil"
 	"srv/internal/sshx"
 	"testing"
@@ -118,48 +119,48 @@ func TestResolveRemotePath(t *testing.T) {
 		{"dir", "/opt/", "/opt/dir"}, // trailing slash on cwd handled
 	}
 	for _, tc := range cases {
-		got := resolveRemotePath(tc.remote, tc.cwd)
+		got := remote.ResolvePath(tc.remote, tc.cwd)
 		if got != tc.want {
-			t.Errorf("resolveRemotePath(%q, %q) = %q; want %q",
+			t.Errorf("remote.ResolvePath(%q, %q) = %q; want %q",
 				tc.remote, tc.cwd, got, tc.want)
 		}
 	}
 }
 
 func TestParseSyncOpts(t *testing.T) {
-	o := parseSyncOpts([]string{"--staged", "--exclude", "*.log", "/opt/app"})
-	if o.mode != "git" || o.gitScope != "staged" {
+	o := ParseOptions([]string{"--staged", "--exclude", "*.log", "/opt/app"})
+	if o.Mode != "git" || o.GitScope != "staged" {
 		t.Errorf("--staged didn't set git/staged: %+v", o)
 	}
-	if !reflect.DeepEqual(o.exclude, []string{"*.log"}) {
-		t.Errorf("--exclude not captured: %v", o.exclude)
+	if !reflect.DeepEqual(o.Exclude, []string{"*.log"}) {
+		t.Errorf("--exclude not captured: %v", o.Exclude)
 	}
-	if o.remoteRoot != "/opt/app" {
-		t.Errorf("remoteRoot not captured: %q", o.remoteRoot)
+	if o.RemoteRoot != "/opt/app" {
+		t.Errorf("remoteRoot not captured: %q", o.RemoteRoot)
 	}
 
-	o = parseSyncOpts([]string{"--include", "src/**/*.go", "--include=*.md"})
-	if o.mode != "glob" || len(o.include) != 2 {
+	o = ParseOptions([]string{"--include", "src/**/*.go", "--include=*.md"})
+	if o.Mode != "glob" || len(o.Include) != 2 {
 		t.Errorf("--include capture: %+v", o)
 	}
 
-	o = parseSyncOpts([]string{"--since", "2h"})
-	if o.mode != "mtime" || o.since != "2h" {
+	o = ParseOptions([]string{"--since", "2h"})
+	if o.Mode != "mtime" || o.Since != "2h" {
 		t.Errorf("--since: %+v", o)
 	}
 
-	o = parseSyncOpts([]string{"--", "a.go", "b.go"})
-	if o.mode != "list" || !reflect.DeepEqual(o.files, []string{"a.go", "b.go"}) {
+	o = ParseOptions([]string{"--", "a.go", "b.go"})
+	if o.Mode != "list" || !reflect.DeepEqual(o.Files, []string{"a.go", "b.go"}) {
 		t.Errorf("`--` files: %+v", o)
 	}
 
-	o = parseSyncOpts([]string{"--delete", "--yes", "--delete-limit", "50"})
-	if !o.delete || !o.yes || o.deleteLimit != 50 {
+	o = ParseOptions([]string{"--delete", "--yes", "--delete-limit", "50"})
+	if !o.Delete || !o.Yes || o.DeleteLimit != 50 {
 		t.Errorf("--delete safety options: %+v", o)
 	}
 
-	o = parseSyncOpts([]string{"--delete-limit=7"})
-	if o.deleteLimit != 7 {
+	o = ParseOptions([]string{"--delete-limit=7"})
+	if o.DeleteLimit != 7 {
 		t.Errorf("--delete-limit= capture: %+v", o)
 	}
 }
