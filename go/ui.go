@@ -7,6 +7,7 @@ import (
 	"srv/internal/ansi"
 	"srv/internal/jobs"
 	"srv/internal/mcplog"
+	"srv/internal/project"
 	"srv/internal/srvtty"
 	"strconv"
 	"strings"
@@ -89,7 +90,7 @@ type uiState struct {
 	snapDaemonResp   *daemonResponse
 	snapTunnelActive map[string]tunnelInfo
 	snapTunnelErrs   map[string]string
-	snapProject      *ProjectFile
+	snapProject      *project.File
 	snapAt           time.Time
 }
 
@@ -269,7 +270,7 @@ func cmdUI(cfg *Config) error {
 			}
 			st.snapDaemonResp = fetchDaemonStatusForUI()
 			st.snapTunnelActive, st.snapTunnelErrs = loadTunnelStatuses()
-			st.snapProject = resolveProjectFile()
+			st.snapProject = project.Resolve()
 			st.snapAt = time.Now()
 		}
 		fresh := st.snapCfg
@@ -1261,11 +1262,11 @@ func panelActive(sb *strings.Builder, cfg *Config, st *uiState) {
 	if prof.GetPort() != 22 {
 		target += ":" + strconv.Itoa(prof.GetPort())
 	}
-	var pf *ProjectFile
+	var pf *project.File
 	if st != nil {
 		pf = st.snapProject
 	} else {
-		pf = resolveProjectFile()
+		pf = project.Resolve()
 	}
 	cwd := uiCwd(prof, pf)
 	parts := []string{
@@ -1289,7 +1290,7 @@ func panelActive(sb *strings.Builder, cfg *Config, st *uiState) {
 // also dominated the per-render cost, so skipping it makes profile
 // switches feel instant. Order of precedence: $SRV_CWD env > pinned
 // project file > profile.default_cwd.
-func uiCwd(prof *Profile, pf *ProjectFile) string {
+func uiCwd(prof *Profile, pf *project.File) string {
 	if env := os.Getenv("SRV_CWD"); env != "" {
 		return env
 	}
@@ -2111,7 +2112,7 @@ func dashActive(sb *strings.Builder, cfg *Config) {
 	dashField(sb, "target", ansi.Cyan+target+ansi.Reset)
 	cwd := GetCwd(name, prof)
 	dashField(sb, "cwd", dashPath(cwd))
-	if pf := resolveProjectFile(); pf != nil {
+	if pf := project.Resolve(); pf != nil {
 		dashField(sb, "pinned", dashPath(pf.Path))
 	}
 	fmt.Fprintln(sb)

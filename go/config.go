@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"srv/internal/project"
 	"srv/internal/session"
 	"time"
 
@@ -246,7 +247,7 @@ func ResolveProfile(cfg *Config, override string) (string, *Profile, error) {
 		name = os.Getenv("SRV_PROFILE")
 	}
 	if name == "" {
-		if pf := resolveProjectFile(); pf != nil && pf.Profile != "" {
+		if pf := project.Resolve(); pf != nil && pf.Profile != "" {
 			name = pf.Profile
 		}
 	}
@@ -282,7 +283,7 @@ func GetCwd(profileName string, profile *Profile) string {
 	if env := os.Getenv("SRV_CWD"); env != "" {
 		return env
 	}
-	if pf := resolveProjectFile(); pf != nil && pf.Cwd != "" {
+	if pf := project.Resolve(); pf != nil && pf.Cwd != "" {
 		return pf.Cwd
 	}
 	return profile.GetDefaultCwd()

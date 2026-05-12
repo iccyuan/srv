@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"srv/internal/mcplog"
+	"srv/internal/project"
 	"strings"
 	"time"
 
@@ -39,6 +40,7 @@ func currentProgressTokenFn() any { return currentProgressToken }
 func cmdMcp(cfg *Config) error {
 	mcpMode = true
 	i18n.SetMCPMode(true)
+	project.SetSilent(true)
 	mcplog.Logf("start v=%s", Version)
 	rd := bufio.NewReader(os.Stdin)
 	for {

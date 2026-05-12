@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"srv/internal/completion"
 	"srv/internal/install"
+	"srv/internal/project"
 
 	"srv/internal/i18n"
 )
@@ -118,7 +119,7 @@ var subcommands = []subcommand{
 	{name: "guard", handler: func(c cmdCtx) error { return cmdGuard(c.args) }},
 	{name: "color", handler: func(c cmdCtx) error { return cmdColor(c.args) }},
 	{name: "daemon", handler: func(c cmdCtx) error { return cmdDaemon(c.args) }},
-	{name: "project", noConfig: true, handler: func(c cmdCtx) error { return cmdProject(c.args) }},
+	{name: "project", noConfig: true, handler: func(c cmdCtx) error { return project.Cmd(c.args) }},
 	{name: "group", handler: func(c cmdCtx) error { return cmdGroup(c.args, c.cfg) }},
 	{name: "sudo", handler: func(c cmdCtx) error {
 		return cmdSudo(c.args, c.cfg, globalOpts{profile: c.profileOverride})
