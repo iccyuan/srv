@@ -8,6 +8,7 @@ import (
 	"path"
 	"path/filepath"
 	"runtime"
+	"srv/internal/transfer"
 	"strings"
 )
 
@@ -80,7 +81,7 @@ func cmdEdit(args []string, cfg *Config, profileOverride string) error {
 	}
 	localPath := filepath.Join(tmpDir, base)
 
-	if err := downloadFile(c, resolved, localPath); err != nil {
+	if err := transfer.Download(c, resolved, localPath); err != nil {
 		fmt.Fprintln(os.Stderr, "srv edit: download:", err)
 		return exitCode(1)
 	}
@@ -129,7 +130,7 @@ func cmdEdit(args []string, cfg *Config, profileOverride string) error {
 		return exitCode(1)
 	}
 
-	if err := uploadFile(c, localPath, resolved); err != nil {
+	if err := transfer.Upload(c, localPath, resolved); err != nil {
 		fmt.Fprintln(os.Stderr, "srv edit: upload:", err)
 		return exitCode(1)
 	}

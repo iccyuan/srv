@@ -1,4 +1,4 @@
-package main
+package transfer
 
 import (
 	"crypto/sha256"
@@ -8,23 +8,25 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"srv/internal/config"
 	"srv/internal/progress"
 	"srv/internal/srvtty"
+	"srv/internal/sshx"
 	"strings"
 
 	"github.com/pkg/sftp"
 )
 
 // expandRemoteHome resolves a leading "~" by asking the remote `echo $HOME`
-// once and substituting. Cached on the *Client.
+// once and substituting. Cached on the *sshx.Client.
 
-// pushPath uploads a local file or directory (recursive) to a remote
+// PushPath uploads a local file or directory (recursive) to a remote
 // path. Returns (exitCode, finalRemotePath, err); finalRemotePath is the
 // actual landing location after tilde-expansion and scp-style dir
 // adjustment, so callers (CLI confirmation lines, MCP responses) can
 // surface where the file really went rather than the user's raw input.
-func pushPath(profile *Profile, local, remote string, recursive bool) (int, string, error) {
-	c, err := Dial(profile)
+func PushPath(profile *config.Profile, local, remote string, recursive bool) (int, string, error) {
+	c, err := sshx.Dial(profile)
 	if err != nil {
 		return 255, remote, err
 	}
@@ -53,7 +55,7 @@ func pushPath(profile *Profile, local, remote string, recursive bool) (int, stri
 	// `srv push foo.exe /existing-dir` calls SFTP Create("/existing-dir")
 	// which returns the unhelpful "Failure" (SSH_FX_FAILURE) -- the SFTP
 	// server can't overwrite a directory with a file. Mirrors the
-	// symmetric handling pullPath has had since v1.
+	// symmetric handling PullPath has had since v1.
 	if rstat, statErr := s.Stat(resolved); statErr == nil && rstat.IsDir() {
 		resolved = path.Join(resolved, path.Base(local))
 	}
@@ -62,20 +64,20 @@ func pushPath(profile *Profile, local, remote string, recursive bool) (int, stri
 			return 1, resolved, err
 		}
 	} else {
-		if err := uploadFile(c, local, resolved); err != nil {
+		if err := Upload(c, local, resolved); err != nil {
 			return 1, resolved, err
 		}
 	}
 	return 0, resolved, nil
 }
 
-// pullPath downloads a remote file or directory to a local path. Returns
+// PullPath downloads a remote file or directory to a local path. Returns
 // (exitCode, finalLocalPath, err); finalLocalPath is the actual landing
 // location after the "remote-source-name appended when local is an
 // existing dir" rule fires, so callers can stat it to report transfer
 // size or surface to the user where bytes really ended up.
-func pullPath(profile *Profile, remote, local string, recursive bool) (int, string, error) {
-	c, err := Dial(profile)
+func PullPath(profile *config.Profile, remote, local string, recursive bool) (int, string, error) {
+	c, err := sshx.Dial(profile)
 	if err != nil {
 		return 255, local, err
 	}
@@ -108,13 +110,13 @@ func pullPath(profile *Profile, remote, local string, recursive bool) (int, stri
 		}
 		return 0, finalLocal, nil
 	}
-	if err := downloadFile(c, resolved, finalLocal); err != nil {
+	if err := Download(c, resolved, finalLocal); err != nil {
 		return 1, finalLocal, err
 	}
 	return 0, finalLocal, nil
 }
 
-// uploadFile copies local -> remote via SFTP. If a partial remote file
+// Upload copies local -> remote via SFTP. If a partial remote file
 // exists (size strictly between 0 and the local file's size), it first
 // verifies that the remote bytes are an exact prefix of the local file
 // (via remote sha256 of the first N bytes -- ~80 byte network cost,
@@ -122,7 +124,7 @@ func pullPath(profile *Profile, remote, local string, recursive bool) (int, stri
 // partials are overwritten from scratch. Same-size remote files trigger
 // the same prefix check; matching content is a no-op skip (with chmod
 // sync so an unrelated permission change still lands).
-func uploadFile(c *Client, local, remote string) error {
+func Upload(c *sshx.Client, local, remote string) error {
 	s, err := c.SFTP()
 	if err != nil {
 		return err
@@ -210,7 +212,7 @@ func uploadFile(c *Client, local, remote string) error {
 	return nil
 }
 
-func uploadDir(c *Client, local, remote string) error {
+func uploadDir(c *sshx.Client, local, remote string) error {
 	s, err := c.SFTP()
 	if err != nil {
 		return err
@@ -231,15 +233,15 @@ func uploadDir(c *Client, local, remote string) error {
 		if info.IsDir() {
 			return s.MkdirAll(dst)
 		}
-		return uploadFile(c, p, dst)
+		return Upload(c, p, dst)
 	})
 }
 
-// downloadFile mirrors uploadFile's resume logic in the other direction.
+// Download mirrors Upload's resume logic in the other direction.
 // If the local file is a strict prefix of the remote (size 0 < L < R),
 // verify the prefix matches via remote sha256 then append the rest.
 // Mismatched partials are overwritten from scratch.
-func downloadFile(c *Client, remote, local string) error {
+func Download(c *sshx.Client, remote, local string) error {
 	s, err := c.SFTP()
 	if err != nil {
 		return err
@@ -320,7 +322,7 @@ func downloadFile(c *Client, remote, local string) error {
 // replaces had to ship n bytes back across the network just to verify
 // -- a 5GB resume would download 5GB just to confirm the partial was
 // a real prefix. The hash version keeps that on-disk.
-func samePrefix(c *Client, remote, local string, n int64) (bool, error) {
+func samePrefix(c *sshx.Client, remote, local string, n int64) (bool, error) {
 	rh, err := remoteHashFirstN(c, remote, n)
 	if err != nil {
 		return false, err
@@ -341,7 +343,7 @@ const sha256EmptyHex = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b
 // shasum -a 256 → openssl so it works on Linux, BSD/macOS, and minimal
 // Alpine-style images. The grep filter strips the formatting noise each
 // tool prints alongside the hex (e.g. `<hex>  -` vs `(stdin)= <hex>`).
-func remoteHashFirstN(c *Client, p string, n int64) (string, error) {
+func remoteHashFirstN(c *sshx.Client, p string, n int64) (string, error) {
 	if n == 0 {
 		return sha256EmptyHex, nil
 	}
@@ -376,17 +378,26 @@ func localHashFirstN(p string, n int64) (string, error) {
 	return hex.EncodeToString(h.Sum(nil)), nil
 }
 
-// warnNotMCP prints to stderr, but stays silent when running as MCP --
-// the client there reads stderr as part of the tool result and noisy
+// quiet is set true under MCP so progress-style stderr noise
+// ("restarting partial upload at X", etc.) doesn't leak into tool
+// results. mcp_loop.go pins this on startup via SetQuiet.
+var quiet bool
+
+// SetQuiet pins warn output off; called from the MCP server's
+// startup alongside i18n.SetMCPMode / progress.SetQuiet.
+func SetQuiet(q bool) { quiet = q }
+
+// warnNotMCP prints to stderr, but stays silent under MCP -- the
+// client there reads stderr as part of the tool result and noisy
 // "restarting" / "resuming" lines pollute the model's context.
 func warnNotMCP(format string, args ...any) {
-	if mcpMode {
+	if quiet {
 		return
 	}
 	fmt.Fprintf(os.Stderr, format, args...)
 }
 
-func downloadDir(c *Client, remote, local string) error {
+func downloadDir(c *sshx.Client, remote, local string) error {
 	s, err := c.SFTP()
 	if err != nil {
 		return err
@@ -413,7 +424,7 @@ func downloadDir(c *Client, remote, local string) error {
 			}
 			continue
 		}
-		if err := downloadFile(c, p, dst); err != nil {
+		if err := Download(c, p, dst); err != nil {
 			return err
 		}
 	}
