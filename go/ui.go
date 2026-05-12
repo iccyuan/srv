@@ -9,6 +9,7 @@ import (
 	"srv/internal/mcplog"
 	"srv/internal/project"
 	"srv/internal/srvtty"
+	"srv/internal/tunnel"
 	"strconv"
 	"strings"
 	"time"
@@ -269,7 +270,7 @@ func cmdUI(cfg *Config) error {
 				st.snapMCP.RecentTools = kept
 			}
 			st.snapDaemonResp = fetchDaemonStatusForUI()
-			st.snapTunnelActive, st.snapTunnelErrs = loadTunnelStatuses()
+			st.snapTunnelActive, st.snapTunnelErrs = tunnel.LoadStatuses()
 			st.snapProject = project.Resolve()
 			st.snapAt = time.Now()
 		}
@@ -760,7 +761,7 @@ func armConfirmFor(st *uiState, row uiRow, jobs []*jobs.Record, tunnelNames []st
 		if def == nil {
 			return
 		}
-		active := loadActiveTunnels()
+		active := tunnel.LoadActive()
 		_, isUp := active[name]
 		switch key {
 		case ' ':
@@ -1471,7 +1472,7 @@ func panelTunnels(sb *strings.Builder, cfg *Config, names []string, st *uiState)
 		active = st.snapTunnelActive
 		errs = st.snapTunnelErrs
 	} else {
-		active, errs = loadTunnelStatuses()
+		active, errs = tunnel.LoadStatuses()
 	}
 	title := fmt.Sprintf("tunnels %d", len(names))
 	boxTopFocused(sb, title, focused)
@@ -1671,7 +1672,7 @@ func panelTunnelDetail(sb *strings.Builder, name string, cfg *Config, st *uiStat
 		active = st.snapTunnelActive
 		errs = st.snapTunnelErrs
 	} else {
-		active, errs = loadTunnelStatuses()
+		active, errs = tunnel.LoadStatuses()
 	}
 	if a, ok := active[name]; ok {
 		boxLine(sb, kvLine("state", dashStatus("running", ansi.Green)))
@@ -1903,7 +1904,7 @@ func renderTunnelDetail(name string, cfg *Config, st *uiState) string {
 	dashField(&sb, "spec", dashPath(def.Spec))
 	dashField(&sb, "profile", ansi.Cyan+tunnelProfileLabel(def)+ansi.Reset)
 	dashField(&sb, "autostart", boolLabel(def.Autostart))
-	active, errs := loadTunnelStatuses()
+	active, errs := tunnel.LoadStatuses()
 	if a, ok := active[name]; ok {
 		dashField(&sb, "state", dashStatus("running", ansi.Green))
 		dashField(&sb, "listen", dashPath(a.Listen))
@@ -2173,7 +2174,7 @@ func dashTunnels(sb *strings.Builder, cfg *Config, names []string, st *uiState) 
 	if len(names) == 0 {
 		return
 	}
-	active, errs := loadTunnelStatuses()
+	active, errs := tunnel.LoadStatuses()
 	dashSectionCount(sb, "Tunnels", len(names))
 	dashTableHeader(sb, "  NAME          TYPE     SPEC / STATE")
 	for i, n := range names {

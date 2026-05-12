@@ -1,16 +1,18 @@
-package main
+package tunnel
 
 import (
 	"fmt"
 	"net"
 	"os"
 	"os/signal"
+	"srv/internal/clierr"
+	"srv/internal/config"
 	"srv/internal/sshx"
 	"strconv"
 	"syscall"
 )
 
-// cmdTunnel dispatches between three forms:
+// Cmd dispatches between three forms:
 //
 //	srv tunnel <spec>           -- legacy one-shot, blocks until Ctrl-C
 //	srv tunnel -R <spec>        -- same, reverse direction
@@ -19,29 +21,29 @@ import (
 // The action keywords are chosen to never collide with valid port specs
 // (which start with a digit or `-R`), so the old form keeps working
 // without a flag.
-func cmdTunnel(args []string, cfg *Config, profileOverride string) error {
+func Cmd(args []string, cfg *config.Config, profileOverride string) error {
 	if len(args) == 0 {
-		printTunnelUsage()
-		return exitCode(2)
+		printUsage()
+		return clierr.Code(2)
 	}
 	switch args[0] {
 	case "add":
-		return tunnelAdd(args[1:], cfg, profileOverride)
+		return cmdAdd(args[1:], cfg, profileOverride)
 	case "remove", "rm":
-		return tunnelRemove(args[1:], cfg)
+		return cmdRemove(args[1:], cfg)
 	case "list", "ls":
-		return tunnelList(cfg)
+		return cmdList(cfg)
 	case "show":
-		return tunnelShow(args[1:], cfg)
+		return cmdShow(args[1:], cfg)
 	case "up":
-		return tunnelUp(args[1:])
+		return cmdUp(args[1:])
 	case "down":
-		return tunnelDown(args[1:])
+		return cmdDown(args[1:])
 	}
-	return cmdTunnelOneShot(args, cfg, profileOverride)
+	return cmdOneShot(args, cfg, profileOverride)
 }
 
-func printTunnelUsage() {
+func printUsage() {
 	fmt.Fprintln(os.Stderr, "Forms:")
 	fmt.Fprintln(os.Stderr, "  srv tunnel [-R] <port-spec>           one-shot (blocks until Ctrl-C)")
 	fmt.Fprintln(os.Stderr, "  srv tunnel add <name> [-R] <spec> [-P <profile>] [--autostart]")
@@ -56,34 +58,34 @@ func printTunnelUsage() {
 	fmt.Fprintln(os.Stderr, "  L:host:R      local 127.0.0.1:L -> host:R (resolved on remote)")
 }
 
-// cmdTunnelOneShot is the legacy `srv tunnel <spec>` foreground form.
+// cmdOneShot is the legacy `srv tunnel <spec>` foreground form.
 // Kept verbatim so existing muscle memory keeps working; the new saved-
 // tunnel surface is opt-in via the `add` / `up` action keywords.
-func cmdTunnelOneShot(args []string, cfg *Config, profileOverride string) error {
+func cmdOneShot(args []string, cfg *config.Config, profileOverride string) error {
 	reverse := false
 	if args[0] == "-R" || args[0] == "--reverse" {
 		reverse = true
 		args = args[1:]
 	}
 	if len(args) == 0 {
-		printTunnelUsage()
-		return exitCode(2)
+		printUsage()
+		return clierr.Code(2)
 	}
 	lp, rh, rp, err := sshx.ParseTunnelSpec(args[0])
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "srv tunnel:", err)
-		return exitCode(2)
+		return clierr.Code(2)
 	}
 
-	_, profile, err := ResolveProfile(cfg, profileOverride)
+	_, profile, err := config.Resolve(cfg, profileOverride)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)
-		return exitCode(1)
+		return clierr.Code(1)
 	}
-	c, err := Dial(profile)
+	c, err := sshx.Dial(profile)
 	if err != nil {
-		printDiagError(err, profile)
-		return exitCode(255)
+		fmt.Fprintf(os.Stderr, "srv tunnel: ssh dial %s: %v\n", profile.Host, err)
+		return clierr.Code(255)
 	}
 	defer c.Close()
 
@@ -118,7 +120,7 @@ func cmdTunnelOneShot(args []string, cfg *Config, profileOverride string) error 
 	}
 	if runErr != nil {
 		fmt.Fprintln(os.Stderr, "srv tunnel:", runErr)
-		return exitCode(1)
+		return clierr.Code(1)
 	}
 	return nil
 }

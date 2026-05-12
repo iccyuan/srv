@@ -6,6 +6,7 @@ import (
 	"srv/internal/install"
 	"srv/internal/project"
 	"srv/internal/theme"
+	"srv/internal/tunnel"
 
 	"srv/internal/i18n"
 )
@@ -109,7 +110,7 @@ var subcommands = []subcommand{
 	{name: "diff", handler: func(c cmdCtx) error { return cmdDiff(c.args, c.cfg, c.profileOverride) }},
 
 	// Tunnel / jobs / sessions.
-	{name: "tunnel", handler: func(c cmdCtx) error { return cmdTunnel(c.args, c.cfg, c.profileOverride) }},
+	{name: "tunnel", handler: func(c cmdCtx) error { return tunnel.Cmd(c.args, c.cfg, c.profileOverride) }},
 	{name: "jobs", handler: func(c cmdCtx) error { return cmdJobs(c.cfg, c.profileOverride) }},
 	{name: "logs", handler: func(c cmdCtx) error { return cmdLogs(c.args, c.cfg, c.profileOverride) }},
 	{name: "kill", handler: func(c cmdCtx) error { return cmdKill(c.args, c.cfg, c.profileOverride) }},
