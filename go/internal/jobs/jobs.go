@@ -123,3 +123,37 @@ func CheckLiveness(rs []*Record, list ExitMarkerLister) map[string]bool {
 	}
 	return out
 }
+
+// RemoteExitMarkersFn is the dependency-injection seam to read the
+// remote's `.exit` marker filenames -- the caller provides a runner
+// that does `runRemoteCapture(prof, ...)` so internal/jobs doesn't
+// have to import remote / sshx.
+type RemoteCaptureFn func(cmd string) (stdout string, exitCode int, ok bool)
+
+// RemoteExitMarkers asks the profile (via captureFn) for the set of
+// `.exit` files under ~/.srv-jobs/. Returns a map jobID -> true for
+// each present marker, or nil on SSH failure. We use `ls` rather
+// than `find` / `stat` because it's a single round-trip and the
+// directory is small.
+func RemoteExitMarkers(captureFn RemoteCaptureFn) map[string]bool {
+	stdout, exitCode, ok := captureFn("ls -1 ~/.srv-jobs/ 2>/dev/null")
+	if !ok {
+		return nil
+	}
+	if exitCode != 0 && stdout == "" {
+		return map[string]bool{}
+	}
+	out := map[string]bool{}
+	for _, line := range strings.Split(stdout, "\n") {
+		line = strings.TrimSpace(line)
+		if !strings.HasSuffix(line, ".exit") {
+			continue
+		}
+		id := strings.TrimSuffix(line, ".exit")
+		if id == "" {
+			continue
+		}
+		out[id] = true
+	}
+	return out
+}

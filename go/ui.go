@@ -298,7 +298,14 @@ func cmdUI(cfg *Config) error {
 				if !ok {
 					return nil, false
 				}
-				markers := remoteExitMarkers(prof)
+				capture := func(cmd string) (string, int, bool) {
+					res, err := runRemoteCapture(prof, "", cmd)
+					if err != nil || res == nil {
+						return "", 0, false
+					}
+					return res.Stdout, res.ExitCode, true
+				}
+				markers := jobs.RemoteExitMarkers(capture)
 				return markers, markers != nil
 			}
 			st.liveness = jobs.CheckLiveness(allJobs, lister)
