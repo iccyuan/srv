@@ -11,17 +11,36 @@ import (
 	"golang.org/x/term"
 )
 
+// uiState tracks dashboard interactivity: which job row is currently
+// highlighted, whether we're in a full-screen detail view, and
+// whether a "press Y to kill" prompt is up. Kept in one struct so
+// the renderers can read it without each one growing a parameter.
+type uiState struct {
+	selectedJob int    // index into the rendered jobs list; -1 = no jobs
+	detailMode  bool   // showing the per-job detail panel
+	killPrompt  bool   // armed for confirmation; next 'y' actually kills
+	statusMsg   string // transient line in the footer (kill result, etc.)
+	lastFrame   string
+	prevLines   int
+	forceRedraw bool
+}
+
 // cmdUI is `srv ui` -- a one-screen dashboard showing the bits of srv
 // state that usually require five separate subcommands to inspect:
 // active profile / cwd, daemon health, saved profile groups, saved
-// tunnels (with live up/down state), detached jobs, MCP servers,
-// recent sessions.
+// tunnels (with live up/down state), MCP servers, detached jobs.
 //
-// Read-only by design. Adding inline edit (kill a job, toggle a
-// tunnel) is tempting but invites a UX rabbit hole (confirmation
-// dialogs, undo, error display) for actions the user can run as one
-// subcommand in another terminal pane. The win here is "see
-// everything at a glance" -- not "be a full TUI app".
+// Sessions are intentionally not surfaced: the active session is
+// already implicit in the Active section, and the rest of `sessions.json`
+// is "other shells" -- not what a dashboard rooted in *this* shell
+// should foreground. `srv sessions list` is still there for the full
+// view.
+//
+// Jobs are interactive: select with ↑/↓ (or j/k), Enter for the full
+// detail panel, K to kill the selected job (one-key Y confirmation).
+// Everything else is read-only; no inline tunnel toggle / group edit
+// because those have clean subcommand surfaces and would invite the
+// undo / confirmation rabbit hole.
 //
 // Refresh policy: ticks every 2 seconds, but only writes to the
 // terminal when the rendered content actually changed. That keeps
@@ -29,16 +48,26 @@ import (
 // flicker) while still picking up changes from `srv group set` etc.
 // in another shell within ~2s.
 //
-// Keys:
+// Keys (dashboard mode):
 //
 //	q / Ctrl-C    exit
-//	r             force a redraw even if data is unchanged
+//	r             force a redraw
+//	j / ↓         select next job
+//	k / ↑         select previous job
+//	Enter         open the detail panel for the selected job
+//	K             kill the selected job (arms a Y/N confirm)
+//
+// Keys (detail mode):
+//
+//	q / any       back to dashboard
+//	K             kill (still requires Y confirm)
 func cmdUI(cfg *Config) error {
 	if !isStdinTTY() {
 		// Without a TTY there's no way to read keys; degrade to a
 		// one-shot print of the snapshot so `srv ui | less` still
-		// works (or piped into a script).
-		fmt.Print(renderDashboard(cfg))
+		// works (or piped into a script). Jobs are still listed --
+		// just without the selection markers and key hints.
+		fmt.Print(renderDashboard(cfg, currentJobs(), nil))
 		return nil
 	}
 	fd := int(os.Stdin.Fd())
@@ -51,39 +80,206 @@ func cmdUI(cfg *Config) error {
 	defer fmt.Fprint(os.Stderr, ansiShow)
 
 	kr := newKeyReader()
-	var lastFrame string
-	prevLines := 0
+	st := &uiState{forceRedraw: true, selectedJob: 0}
 	const refreshEvery = 2 * time.Second
-	forceRedraw := true
 
 	for {
-		// Reload config each loop so profile / group / tunnel edits
-		// from another terminal show up on the next refresh.
+		// Reload config and jobs each loop so edits from another
+		// terminal show up on the next refresh.
 		fresh, _ := LoadConfig()
 		if fresh == nil {
 			fresh = cfg
 		}
+		jobs := currentJobs()
+		clampJobSelection(st, len(jobs))
 
-		out := renderDashboard(fresh)
-		if forceRedraw || out != lastFrame {
-			redrawDashboard(out, prevLines)
-			lastFrame = out
-			prevLines = strings.Count(out, "\n")
-			forceRedraw = false
+		var out string
+		if st.detailMode && st.selectedJob >= 0 && st.selectedJob < len(jobs) {
+			out = renderJobDetail(jobs[st.selectedJob], st)
+		} else {
+			out = renderDashboard(fresh, jobs, st)
+		}
+		if st.forceRedraw || out != st.lastFrame {
+			redrawDashboard(out, st.prevLines)
+			st.lastFrame = out
+			st.prevLines = strings.Count(out, "\n")
+			st.forceRedraw = false
 		}
 
 		b, ok := kr.readWithTimeout(refreshEvery)
 		if !ok {
-			continue // timeout -> recheck data
+			// 2s tick: clear any one-shot status message so the
+			// footer doesn't carry "killed 20260510" forever.
+			if st.statusMsg != "" {
+				st.statusMsg = ""
+				st.forceRedraw = true
+			}
+			continue
 		}
-		switch b {
-		case 'q', 0x03: // q / Ctrl-C
-			clearPicker(prevLines)
+		if !handleUIKey(b, st, jobs, fresh, kr) {
+			clearPicker(st.prevLines)
 			return nil
-		case 'r':
-			forceRedraw = true
 		}
 	}
+}
+
+// currentJobs loads jobs.json and returns the slice (nil-safe).
+// Pulled out so the main loop and the key handler share one source.
+func currentJobs() []*JobRecord {
+	jf := loadJobsFile()
+	if jf == nil {
+		return nil
+	}
+	return jf.Jobs
+}
+
+// clampJobSelection keeps st.selectedJob in [0, n) when n>0, or -1
+// when there are no jobs. Called every tick because jobs can vanish
+// out from under us (we killed one; another shell killed one).
+func clampJobSelection(st *uiState, n int) {
+	if n == 0 {
+		st.selectedJob = -1
+		return
+	}
+	if st.selectedJob < 0 {
+		st.selectedJob = 0
+	}
+	if st.selectedJob >= n {
+		st.selectedJob = n - 1
+	}
+}
+
+// handleUIKey is the input dispatcher. Returns false when the user
+// asked to exit (q / Ctrl-C in dashboard mode); true to keep the
+// loop running. State mutations flow through st; side effects (the
+// remote kill, status messages) are confined here.
+func handleUIKey(b byte, st *uiState, jobs []*JobRecord, cfg *Config, kr *keyReader) bool {
+	// Kill confirmation is the highest-precedence mode: any key
+	// resolves it (Y/y = do it, anything else = cancel) before normal
+	// dashboard / detail keys run.
+	if st.killPrompt {
+		st.killPrompt = false
+		st.forceRedraw = true
+		if (b == 'y' || b == 'Y') && st.selectedJob >= 0 && st.selectedJob < len(jobs) {
+			j := jobs[st.selectedJob]
+			if msg, err := uiKillJob(j, cfg); err != nil {
+				st.statusMsg = ansiRed + "kill " + j.ID + " failed: " + err.Error() + ansiReset
+			} else {
+				st.statusMsg = ansiGreen + "kill " + j.ID + ": " + msg + ansiReset
+			}
+			st.detailMode = false
+		} else {
+			st.statusMsg = ansiDim + "kill cancelled" + ansiReset
+		}
+		return true
+	}
+
+	if st.detailMode {
+		switch b {
+		case 'K':
+			if st.selectedJob >= 0 && st.selectedJob < len(jobs) {
+				st.killPrompt = true
+				st.forceRedraw = true
+			}
+		case 'q', '\x03', '\r', '\n', 0x1b:
+			st.detailMode = false
+			st.forceRedraw = true
+		default:
+			st.detailMode = false
+			st.forceRedraw = true
+		}
+		return true
+	}
+
+	switch b {
+	case 'q', '\x03': // q / Ctrl-C
+		return false
+	case 'r':
+		st.forceRedraw = true
+	case 'j':
+		if st.selectedJob >= 0 && st.selectedJob+1 < len(jobs) {
+			st.selectedJob++
+			st.forceRedraw = true
+		}
+	case 'k':
+		if st.selectedJob > 0 {
+			st.selectedJob--
+			st.forceRedraw = true
+		}
+	case '\r', '\n':
+		if st.selectedJob >= 0 && st.selectedJob < len(jobs) {
+			st.detailMode = true
+			st.forceRedraw = true
+		}
+	case 'K':
+		if st.selectedJob >= 0 && st.selectedJob < len(jobs) {
+			st.killPrompt = true
+			st.forceRedraw = true
+		}
+	case 0x1b: // ESC -- possibly an arrow-key sequence
+		b2, ok := kr.readWithTimeout(80 * time.Millisecond)
+		if !ok {
+			// bare ESC -- treat as quit so it's consistent with the picker
+			return false
+		}
+		if b2 != '[' {
+			return true
+		}
+		b3, ok := kr.readWithTimeout(20 * time.Millisecond)
+		if !ok {
+			return true
+		}
+		switch b3 {
+		case 'A':
+			if st.selectedJob > 0 {
+				st.selectedJob--
+				st.forceRedraw = true
+			}
+		case 'B':
+			if st.selectedJob >= 0 && st.selectedJob+1 < len(jobs) {
+				st.selectedJob++
+				st.forceRedraw = true
+			}
+		}
+	}
+	return true
+}
+
+// uiKillJob is the dashboard-side kill: same wire shape as `srv kill
+// <id>` (`kill -TERM <pid>` on the remote, then drop the local record
+// on success). Returns the remote's response line ("killed" / "no
+// such pid ...") so the caller can put it in the footer. Errors flow
+// back to surface in the dashboard, NOT to stderr -- the screen is
+// in raw mode and stray writes break the layout.
+func uiKillJob(j *JobRecord, cfg *Config) (string, error) {
+	prof, ok := cfg.Profiles[j.Profile]
+	if !ok {
+		return "", fmt.Errorf("profile %q not found", j.Profile)
+	}
+	cmd := fmt.Sprintf("kill -TERM %d 2>/dev/null && echo killed || echo 'no such pid'", j.Pid)
+	res, err := runRemoteCapture(prof, "", cmd)
+	if err != nil {
+		return "", err
+	}
+	out := strings.TrimSpace(res.Stdout)
+	if out == "" {
+		out = strings.TrimSpace(res.Stderr)
+	}
+	// Drop the local record regardless of whether the remote pid
+	// existed -- a "no such pid" usually means the job already exited
+	// and we just hadn't cleaned up.
+	jf := loadJobsFile()
+	if jf != nil {
+		kept := jf.Jobs[:0]
+		for _, x := range jf.Jobs {
+			if x.ID != j.ID {
+				kept = append(kept, x)
+			}
+		}
+		jf.Jobs = kept
+		_ = saveJobsFile(jf)
+	}
+	return out, nil
 }
 
 // redrawDashboard is a thin alias over the shared redrawInPlace
@@ -99,29 +295,121 @@ func redrawDashboard(content string, prevLines int) {
 // the same renderer. The output is deterministic from the inputs (no
 // per-call timestamp embedded) so the refresh loop can hash-compare
 // frames and skip redraws when nothing changed.
-func renderDashboard(cfg *Config) string {
+//
+// `jobs` and `st` are nil for the non-TTY one-shot path; in that
+// mode the Jobs section renders without selection markers and the
+// footer drops the interactive-key hints.
+func renderDashboard(cfg *Config, jobs []*JobRecord, st *uiState) string {
 	var sb strings.Builder
-	dashHeader(&sb)
+	dashHeader(&sb, st)
 	dashActive(&sb, cfg)
 	dashDaemon(&sb)
 	dashMCP(&sb)
 	dashGroups(&sb, cfg)
 	dashTunnels(&sb, cfg)
-	dashJobs(&sb)
-	dashSessions(&sb)
-	dashFooter(&sb)
+	dashJobs(&sb, jobs, st)
+	dashFooter(&sb, st)
 	return sb.String()
+}
+
+// renderJobDetail is the full-screen view that replaces the
+// dashboard when the user hits Enter on a job row. Shows every
+// field of the JobRecord plus the local references the user might
+// need to act on it (`srv logs`, `srv kill`).
+func renderJobDetail(j *JobRecord, st *uiState) string {
+	var sb strings.Builder
+	fmt.Fprintf(&sb, "%sJOB DETAIL%s  %s%s%s\n",
+		ansiBold+ansiMagenta, ansiReset, ansiDim, j.ID, ansiReset)
+	fmt.Fprintf(&sb, "%s%s%s\n\n", ansiDim, dashboardRule, ansiReset)
+
+	dashField(&sb, "id", dashName(j.ID))
+	dashField(&sb, "profile", ansiCyan+j.Profile+ansiReset)
+	dashField(&sb, "pid", strconv.Itoa(j.Pid))
+	started := j.Started
+	if t, ok := parseISOLike(j.Started); ok {
+		started = j.Started + dashMeta(" ("+fmtDuration(time.Since(t))+" ago)")
+	}
+	dashField(&sb, "started", started)
+	if j.Cwd != "" {
+		dashField(&sb, "cwd", dashPath(j.Cwd))
+	}
+	if j.Log != "" {
+		dashField(&sb, "log", dashPath(j.Log))
+	}
+	fmt.Fprintln(&sb)
+	fmt.Fprintf(&sb, "  %sCOMMAND:%s\n", ansiDim, ansiReset)
+	// Wrap the command across multiple lines so a long pipeline
+	// stays visible without horizontal scrolling.
+	for _, line := range wrapText(j.Cmd, 76) {
+		fmt.Fprintf(&sb, "    %s\n", line)
+	}
+	fmt.Fprintln(&sb)
+
+	fmt.Fprintf(&sb, "%s%s%s\n", ansiDim, dashboardRule, ansiReset)
+	if st != nil && st.killPrompt {
+		fmt.Fprintf(&sb, "%skill %s? press %sY%s to confirm, any other key cancels%s\n",
+			ansiRed+ansiBold, j.ID, ansiYellow+ansiBold, ansiRed+ansiBold, ansiReset)
+		return sb.String()
+	}
+	fmt.Fprintf(&sb, "Keys: %sq%s back   %sK%s kill   %ssrv logs %s -f%s tails remotely\n",
+		ansiYellow+ansiBold, ansiReset,
+		ansiYellow+ansiBold, ansiReset,
+		ansiDim, j.ID, ansiReset)
+	if st != nil && st.statusMsg != "" {
+		fmt.Fprintf(&sb, "%s\n", st.statusMsg)
+	}
+	return sb.String()
+}
+
+// wrapText breaks `s` into lines of at most `width` bytes, splitting
+// on whitespace when possible. Single tokens longer than width are
+// emitted unbroken (we don't try to hyphenate / split a 200-byte
+// path mid-token).
+func wrapText(s string, width int) []string {
+	if width <= 0 || len(s) <= width {
+		return []string{s}
+	}
+	words := strings.Fields(s)
+	if len(words) == 0 {
+		return []string{s}
+	}
+	var lines []string
+	cur := words[0]
+	for _, w := range words[1:] {
+		if len(cur)+1+len(w) > width {
+			lines = append(lines, cur)
+			cur = w
+		} else {
+			cur += " " + w
+		}
+	}
+	if cur != "" {
+		lines = append(lines, cur)
+	}
+	return lines
 }
 
 const dashboardRule = "================================================================"
 const dashboardSubRule = "----------------------------------------------------------------"
 
-func dashHeader(sb *strings.Builder) {
-	fmt.Fprintf(sb, "%sSRV UI%s  %sread-only control dashboard%s\n",
+func dashHeader(sb *strings.Builder, st *uiState) {
+	fmt.Fprintf(sb, "%sSRV UI%s  %scurrent-shell view, jobs are global%s\n",
 		ansiBold+ansiMagenta, ansiReset, ansiDim, ansiReset)
 	fmt.Fprintf(sb, "%s%s%s\n", ansiDim, dashboardRule, ansiReset)
-	fmt.Fprintf(sb, "Keys: %sq%s quit   %sr%s redraw   %sauto refresh on data change%s\n\n",
-		ansiYellow+ansiBold, ansiReset, ansiYellow+ansiBold, ansiReset, ansiDim, ansiReset)
+	if st == nil {
+		// Non-TTY snapshot mode: no interactive keys to advertise.
+		fmt.Fprintf(sb, "%ssnapshot mode (no tty)%s\n\n", ansiDim, ansiReset)
+		return
+	}
+	fmt.Fprintf(sb,
+		"Keys: %sq%s quit   %sr%s redraw   %sjk%s/%s↑↓%s select   %s⏎%s detail   %sK%s kill\n\n",
+		ansiYellow+ansiBold, ansiReset,
+		ansiYellow+ansiBold, ansiReset,
+		ansiYellow+ansiBold, ansiReset,
+		ansiYellow+ansiBold, ansiReset,
+		ansiYellow+ansiBold, ansiReset,
+		ansiYellow+ansiBold, ansiReset,
+	)
 }
 
 func dashSection(sb *strings.Builder, title string) {
@@ -269,14 +557,17 @@ func dashTunnels(sb *strings.Builder, cfg *Config) {
 	fmt.Fprintln(sb)
 }
 
-func dashJobs(sb *strings.Builder) {
-	jf := loadJobsFile()
-	if jf == nil || len(jf.Jobs) == 0 {
+// dashJobs renders the jobs table. When `st` is non-nil and the
+// caller has a valid selection (st.selectedJob in range), the
+// matching row gets a `>` marker + reverse video so the user can
+// see what their next Enter / K will target.
+func dashJobs(sb *strings.Builder, jobs []*JobRecord, st *uiState) {
+	if len(jobs) == 0 {
 		return
 	}
-	dashSectionCount(sb, "Jobs", len(jf.Jobs))
-	dashTableHeader(sb, "ID            PROFILE     PID       AGE       COMMAND")
-	for _, j := range jf.Jobs {
+	dashSectionCount(sb, "Jobs", len(jobs))
+	dashTableHeader(sb, "  ID            PROFILE     PID       AGE       COMMAND")
+	for i, j := range jobs {
 		cmd := j.Cmd
 		if len(cmd) > 60 {
 			cmd = cmd[:57] + "..."
@@ -285,59 +576,29 @@ func dashJobs(sb *strings.Builder) {
 		if t, ok := parseISOLike(j.Started); ok {
 			started = fmtDuration(time.Since(t)) + " ago"
 		}
-		fmt.Fprintf(sb, "  %-12s  %-10s  %-8d  %-8s  %s\n",
+		marker := "   "
+		selected := st != nil && st.selectedJob == i
+		if selected {
+			marker = ansiBold + ansiYellow + " > " + ansiReset
+		}
+		row := fmt.Sprintf("%-12s  %-10s  %-8d  %-8s  %s",
 			dashName(truncID(j.ID)), ansiCyan+j.Profile+ansiReset, j.Pid, dashMeta(started), cmd)
+		if selected {
+			// Reverse-video the row content so the selection is
+			// readable on terminals that drop the cursor marker.
+			fmt.Fprintf(sb, "%s%s%s%s\n", marker, ansiReverse, row, ansiReset)
+		} else {
+			fmt.Fprintf(sb, "%s%s\n", marker, row)
+		}
 	}
 	fmt.Fprintln(sb)
 }
 
-func dashSessions(sb *strings.Builder) {
-	sf := loadSessionsFile()
-	if sf == nil || len(sf.Sessions) == 0 {
-		return
-	}
-	// Only sessions that have actually pinned a profile are
-	// dashboard-worthy. Unpinned sessions are created on every srv
-	// invocation by TouchSession() -- they are noise, not state.
-	// Users who want the full list still have `srv sessions list`.
-	type row struct {
-		sid     string
-		rec     *SessionRecord
-		seen    time.Time
-		hasSeen bool
-	}
-	rows := make([]row, 0, len(sf.Sessions))
-	for sid, rec := range sf.Sessions {
-		if rec.Profile == nil || *rec.Profile == "" {
-			continue
-		}
-		r := row{sid: sid, rec: rec}
-		if t, ok := parseISOLike(rec.LastSeen); ok {
-			r.seen = t
-			r.hasSeen = true
-		}
-		rows = append(rows, r)
-	}
-	if len(rows) == 0 {
-		return
-	}
-	sort.Slice(rows, func(i, j int) bool { return rows[i].seen.After(rows[j].seen) })
-	if len(rows) > 5 {
-		rows = rows[:5]
-	}
-	dashSectionCount(sb, "Sessions", len(rows))
-	dashTableHeader(sb, "SESSION               PINNED PROFILE  LAST SEEN")
-	for _, r := range rows {
-		prof := *r.rec.Profile
-		age := "?"
-		if r.hasSeen {
-			age = fmtDuration(time.Since(r.seen)) + " ago"
-		}
-		fmt.Fprintf(sb, "  %-20s  %-14s  %s\n",
-			dashName(truncID(r.sid)), ansiCyan+prof+ansiReset, dashMeta(age))
-	}
-	fmt.Fprintln(sb)
-}
+// dashSessions intentionally removed: the active session's profile +
+// cwd is already in the Active section, and a "top N sessions"
+// listing pulled in records owned by *other* shells, which isn't
+// what a current-shell dashboard should foreground. The full view
+// still lives in `srv sessions list`.
 
 // dashMCP shows whether any MCP server processes are alive (parsed
 // from the tail of mcp.log) plus the trailing N tool calls. Useful
@@ -386,10 +647,30 @@ func dashMCP(sb *strings.Builder) {
 	fmt.Fprintln(sb)
 }
 
-func dashFooter(sb *strings.Builder) {
+func dashFooter(sb *strings.Builder, st *uiState) {
 	fmt.Fprintf(sb, "%s%s%s\n", ansiDim, dashboardRule, ansiReset)
-	fmt.Fprintf(sb, "Keys: %sq%s quit   %sr%s force-redraw\n",
-		ansiYellow+ansiBold, ansiReset, ansiYellow+ansiBold, ansiReset)
+	if st == nil {
+		fmt.Fprintf(sb, "%ssnapshot complete%s\n", ansiDim, ansiReset)
+		return
+	}
+	// Kill prompt takes over the bottom line so the model / user
+	// can see exactly what's about to happen.
+	if st.killPrompt {
+		fmt.Fprintf(sb, "%skill selected job? press %sY%s to confirm, any other key cancels%s\n",
+			ansiRed+ansiBold, ansiYellow+ansiBold, ansiRed+ansiBold, ansiReset)
+		return
+	}
+	fmt.Fprintf(sb, "Keys: %sq%s quit   %sr%s redraw   %sjk%s/%s↑↓%s move   %s⏎%s detail   %sK%s kill\n",
+		ansiYellow+ansiBold, ansiReset,
+		ansiYellow+ansiBold, ansiReset,
+		ansiYellow+ansiBold, ansiReset,
+		ansiYellow+ansiBold, ansiReset,
+		ansiYellow+ansiBold, ansiReset,
+		ansiYellow+ansiBold, ansiReset,
+	)
+	if st.statusMsg != "" {
+		fmt.Fprintf(sb, "%s\n", st.statusMsg)
+	}
 }
 
 // parseISOLike accepts the timestamp formats srv writes -- nowISO()

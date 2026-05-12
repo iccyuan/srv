@@ -60,6 +60,65 @@ func TestParseISOLike(t *testing.T) {
 	}
 }
 
+func TestClampJobSelection(t *testing.T) {
+	cases := []struct {
+		name    string
+		initial int
+		n       int
+		want    int
+	}{
+		{"no jobs forces -1", 0, 0, -1},
+		{"no jobs forces -1 from positive", 5, 0, -1},
+		{"negative becomes 0", -1, 3, 0},
+		{"in range untouched", 2, 5, 2},
+		{"past end clamps to n-1", 9, 3, 2},
+		{"single job: 0 stays 0", 0, 1, 0},
+		{"single job: high clamps to 0", 5, 1, 0},
+	}
+	for _, c := range cases {
+		st := &uiState{selectedJob: c.initial}
+		clampJobSelection(st, c.n)
+		if st.selectedJob != c.want {
+			t.Errorf("%s: got %d, want %d", c.name, st.selectedJob, c.want)
+		}
+	}
+}
+
+func TestWrapText(t *testing.T) {
+	cases := []struct {
+		in    string
+		width int
+		want  []string
+	}{
+		// Short string -- one line.
+		{"short", 20, []string{"short"}},
+		// Exact width -- one line.
+		{"abcde", 5, []string{"abcde"}},
+		// Two words that fit on one line.
+		{"foo bar", 20, []string{"foo bar"}},
+		// Two-word wrap.
+		{"foo bar", 5, []string{"foo", "bar"}},
+		// Token longer than width -- emitted unbroken.
+		{"verylongword", 5, []string{"verylongword"}},
+		// Empty input passes through.
+		{"", 10, []string{""}},
+		// Width <= 0 -- no wrapping.
+		{"a b c d", 0, []string{"a b c d"}},
+	}
+	for _, c := range cases {
+		got := wrapText(c.in, c.width)
+		if len(got) != len(c.want) {
+			t.Errorf("wrapText(%q, %d): %v, want %v", c.in, c.width, got, c.want)
+			continue
+		}
+		for i := range got {
+			if got[i] != c.want[i] {
+				t.Errorf("wrapText(%q, %d)[%d]=%q, want %q", c.in, c.width, i, got[i], c.want[i])
+			}
+		}
+	}
+}
+
 func TestTruncID(t *testing.T) {
 	cases := []struct {
 		in, want string
