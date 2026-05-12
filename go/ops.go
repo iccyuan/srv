@@ -153,26 +153,6 @@ func resolveRemotePath(remote, cwd string) string {
 
 // expandRemoteHome resolves a leading "~" by asking the remote `echo $HOME`
 // once and substituting. Cached on the *Client.
-func (c *Client) expandRemoteHome(p string) (string, error) {
-	if !strings.HasPrefix(p, "~") {
-		return p, nil
-	}
-	res, err := c.RunCapture("echo $HOME", "")
-	if err != nil {
-		return p, err
-	}
-	if res.ExitCode != 0 {
-		return p, fmt.Errorf("remote $HOME lookup failed: %s", strings.TrimSpace(res.Stderr))
-	}
-	home := strings.TrimSpace(res.Stdout)
-	if home == "" {
-		return p, fmt.Errorf("remote $HOME empty")
-	}
-	if p == "~" {
-		return home, nil
-	}
-	return home + p[1:], nil
-}
 
 // pushPath uploads a local file or directory (recursive) to a remote
 // path. Returns (exitCode, finalRemotePath, err); finalRemotePath is the
@@ -194,7 +174,7 @@ func pushPath(profile *Profile, local, remote string, recursive bool) (int, stri
 		recursive = true
 	}
 
-	resolved, err := c.expandRemoteHome(remote)
+	resolved, err := c.ExpandRemoteHome(remote)
 	if err != nil {
 		return 1, remote, err
 	}
@@ -237,7 +217,7 @@ func pullPath(profile *Profile, remote, local string, recursive bool) (int, stri
 	}
 	defer c.Close()
 
-	resolved, err := c.expandRemoteHome(remote)
+	resolved, err := c.ExpandRemoteHome(remote)
 	if err != nil {
 		return 1, local, err
 	}

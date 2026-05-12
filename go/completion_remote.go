@@ -139,7 +139,7 @@ func remoteListTarget(dirPart, cwd string) string {
 // completes), `.` and `..` are skipped.
 func remoteList(profile *Profile, target string, timeout time.Duration) ([]string, error) {
 	cmd := fmt.Sprintf("ls -1Ap -- %s", srvtty.ShQuotePath(target))
-	c, err := DialOpts(profile, dialOpts{timeout: timeout})
+	c, err := DialOpts(profile, DialOptions{Timeout: timeout})
 	if err != nil {
 		return nil, fmt.Errorf("dial: %w", err)
 	}

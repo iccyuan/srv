@@ -1,4 +1,4 @@
-package main
+package sshx
 
 import (
 	"bufio"
@@ -9,6 +9,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"srv/internal/config"
 	"srv/internal/srvtty"
 	"srv/internal/srvutil"
 	"strconv"
@@ -27,7 +28,7 @@ import (
 // hosts, the intermediate ssh.Client objects are stashed in `chain` so
 // Close() can tear them down in reverse order without leaking sockets.
 type Client struct {
-	Profile *Profile
+	Profile *config.Profile
 	Conn    *ssh.Client
 	chain   []*ssh.Client
 	sftpMu  sync.Mutex
@@ -42,31 +43,31 @@ type Client struct {
 }
 
 // dialOpts controls the auth/host-key behavior for one Dial call.
-type dialOpts struct {
-	// strictHostKey: if true, only accept hosts already in known_hosts.
-	// If false (default), accept-new -- writes back to known_hosts on first
-	// connect. Unknown-key on existing entry always rejects.
-	strictHostKey bool
-	// timeout overrides profile.connect_timeout if non-zero.
-	timeout time.Duration
+type DialOptions struct {
+	// StrictHostKey: if true, only accept hosts already in known_hosts.
+	// If false (default), accept-new -- writes back to known_hosts on
+	// first connect. Unknown-key on existing entry always rejects.
+	StrictHostKey bool
+	// Timeout overrides profile.connect_timeout if non-zero.
+	Timeout time.Duration
 }
 
 // Dial connects to the host described by profile, returning a *Client whose
 // .Close() must be called when done.
-func Dial(profile *Profile) (*Client, error) {
-	return DialOpts(profile, dialOpts{})
+func Dial(profile *config.Profile) (*Client, error) {
+	return DialOpts(profile, DialOptions{})
 }
 
-func DialOpts(profile *Profile, opts dialOpts) (*Client, error) {
+func DialOpts(profile *config.Profile, opts DialOptions) (*Client, error) {
 	auths, err := buildAuthMethods(profile)
 	if err != nil {
 		return nil, err
 	}
-	hkc, err := buildHostKeyCallback(opts.strictHostKey)
+	hkc, err := buildHostKeyCallback(opts.StrictHostKey)
 	if err != nil {
 		return nil, err
 	}
-	timeout := opts.timeout
+	timeout := opts.Timeout
 	if timeout == 0 {
 		timeout = time.Duration(profile.GetConnectTimeout()) * time.Second
 	}
@@ -98,7 +99,7 @@ func DialOpts(profile *Profile, opts dialOpts) (*Client, error) {
 		}
 		// Auth / host-key errors don't get any better with retries -- fail
 		// fast so the user sees the real cause.
-		if !isRetryableDialErr(err) {
+		if !IsRetryableDialErr(err) {
 			return nil, err
 		}
 		lastErr = err
@@ -121,7 +122,7 @@ func DialOpts(profile *Profile, opts dialOpts) (*Client, error) {
 // the final hop. Each TCP-level dial gets OS keepalive enabled so a
 // silently-dead conn shows up as an EOF inside seconds rather than
 // blocking forever on a write.
-func dialOnce(profile *Profile, defaultUser string, mkConfig func(string) *ssh.ClientConfig, timeout time.Duration) (*Client, error) {
+func dialOnce(profile *config.Profile, defaultUser string, mkConfig func(string) *ssh.ClientConfig, timeout time.Duration) (*Client, error) {
 	var chain []*ssh.Client
 	var err error
 	for _, spec := range profile.Jump {
@@ -189,11 +190,11 @@ func sshDialTCP(addr string, cfg *ssh.ClientConfig, timeout time.Duration) (*ssh
 	return ssh.NewClient(cc, chans, reqs), nil
 }
 
-// isRetryableDialErr decides which errors are worth a backoff + redial.
+// IsRetryableDialErr decides which errors are worth a backoff + redial.
 // Auth and host-key errors are deterministic from the client's point of
 // view -- another round trip won't change the answer, so let them fail
 // immediately with the real diagnosis.
-func isRetryableDialErr(err error) bool {
+func IsRetryableDialErr(err error) bool {
 	if err == nil {
 		return false
 	}
@@ -343,7 +344,7 @@ type RunCaptureResult struct {
 // is non-empty), capturing both stdout and stderr. Returns a result struct
 // with the exit code populated even on non-zero exits.
 func (c *Client) RunCapture(command string, cwd string) (*RunCaptureResult, error) {
-	full := wrapWithCwd(command, cwd)
+	full := WrapWithCwd(command, cwd)
 	sess, err := c.Conn.NewSession()
 	if err != nil {
 		return nil, err
@@ -380,7 +381,7 @@ func (c *Client) RunCapture(command string, cwd string) (*RunCaptureResult, erro
 // If tty is true, allocates a pseudo-terminal on the remote (for vim, htop,
 // sudo password prompt, etc.). Returns the remote exit code.
 func (c *Client) RunInteractive(command string, cwd string, tty bool) (int, error) {
-	full := wrapWithCwd(command, cwd)
+	full := WrapWithCwd(command, cwd)
 	sess, err := c.Conn.NewSession()
 	if err != nil {
 		return -1, err
@@ -554,7 +555,7 @@ const (
 // while the command is still executing, sidestepping the MCP per-tool
 // timeout for medium-length commands (20-50s builds/tests).
 func (c *Client) RunStream(command string, cwd string, onChunk func(kind StreamChunkKind, line string)) (int, string, string, error) {
-	full := wrapWithCwd(command, cwd)
+	full := WrapWithCwd(command, cwd)
 	sess, err := c.Conn.NewSession()
 	if err != nil {
 		return -1, "", "", err
@@ -638,14 +639,14 @@ func (c *Client) RunStreamStdin(command string, stdin io.Reader) (int, error) {
 	return 0, nil
 }
 
-// wrapWithCwd wraps `command` with `cd <cwd> && (...)` when cwd is non-empty.
+// WrapWithCwd wraps `command` with `cd <cwd> && (...)` when cwd is non-empty.
 //
 // The leading and trailing newlines inside the subshell are deliberate:
 // they keep heredoc terminators (e.g. `EOF`) on their own line even when
 // the user's command doesn't end with a newline. Without them, a command
 // like `bash <<EOF\n...EOF` would get wrapped as `(bash <<EOF\n...EOF)`,
 // putting `EOF)` on one line and breaking heredoc termination.
-func wrapWithCwd(command, cwd string) string {
+func WrapWithCwd(command, cwd string) string {
 	if cwd == "" {
 		return command
 	}
@@ -663,7 +664,7 @@ func cwdOrTilde(cwd string) string {
 //   - SSH agent (if SSH_AUTH_SOCK set)
 //   - profile.identity_file (if set)
 //   - common defaults: ~/.ssh/id_ed25519, ~/.ssh/id_rsa
-func buildAuthMethods(profile *Profile) ([]ssh.AuthMethod, error) {
+func buildAuthMethods(profile *config.Profile) ([]ssh.AuthMethod, error) {
 	var methods []ssh.AuthMethod
 
 	if sock := os.Getenv("SSH_AUTH_SOCK"); sock != "" {
@@ -775,4 +776,35 @@ func appendKnownHost(path, hostname string, remote net.Addr, key ssh.PublicKey) 
 	defer f.Close()
 	_, err = f.WriteString(line + "\n")
 	return err
+}
+
+// ExpandRemoteHome resolves a path with leading "~" to the remote
+// user's $HOME via a single `echo $HOME` round-trip. Pure ~ returns
+// just $HOME; "~/path" returns $HOME + path[1:]. No leading ~ means
+// p is returned untouched.
+//
+// Lives on Client (and not as a free helper) because the lookup
+// reuses the same SSH session the caller is already operating on --
+// keeping that locality saves a re-Dial in code paths like push/pull/
+// edit that hit ExpandRemoteHome once per file and would otherwise
+// duplicate the connection setup.
+func (c *Client) ExpandRemoteHome(p string) (string, error) {
+	if !strings.HasPrefix(p, "~") {
+		return p, nil
+	}
+	res, err := c.RunCapture("echo $HOME", "")
+	if err != nil {
+		return p, err
+	}
+	if res.ExitCode != 0 {
+		return p, fmt.Errorf("remote $HOME lookup failed: %s", strings.TrimSpace(res.Stderr))
+	}
+	home := strings.TrimSpace(res.Stdout)
+	if home == "" {
+		return p, fmt.Errorf("remote $HOME empty")
+	}
+	if p == "~" {
+		return home, nil
+	}
+	return home + p[1:], nil
 }

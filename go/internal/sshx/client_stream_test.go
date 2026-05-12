@@ -1,4 +1,4 @@
-package main
+package sshx
 
 import (
 	"bytes"
@@ -85,11 +85,4 @@ func TestForwardStreamReader_NilCallbackStillBuffers(t *testing.T) {
 	if buf.String() != "a\nb\n" {
 		t.Errorf("buf=%q", buf.String())
 	}
-}
-
-func TestMcpProgress_NilTokenNoOp(t *testing.T) {
-	// We can't easily assert "no write to stdout" without redirecting,
-	// but we can at least verify the call doesn't panic. The contract
-	// is that nil token is a no-op (caller didn't opt into streaming).
-	mcpProgress(nil, 1, "hello")
 }

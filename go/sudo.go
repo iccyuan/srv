@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"srv/internal/srvtty"
+	"srv/internal/sshx"
 	"strings"
 	"time"
 
@@ -147,7 +148,7 @@ func runRemoteSudo(profile *Profile, cwd, cmd, password string) (int, error) {
 		return 255, err
 	}
 	defer c.Close()
-	full := wrapWithCwd("sudo -S -p '' "+cmd, cwd)
+	full := sshx.WrapWithCwd("sudo -S -p '' "+cmd, cwd)
 	return c.RunStreamStdin(full, strings.NewReader(password+"\n"))
 }
 

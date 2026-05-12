@@ -38,9 +38,9 @@ func runCheck(profile *Profile) *CheckResult {
 
 	done := make(chan *CheckResult, 1)
 	go func() {
-		c, err := DialOpts(profile, dialOpts{
-			strictHostKey: false, // accept-new like the Python version
-			timeout:       dialTimeout,
+		c, err := DialOpts(profile, DialOptions{
+			StrictHostKey: false, // accept-new like the Python version
+			Timeout:       dialTimeout,
 		})
 		if err != nil {
 			done <- &CheckResult{
@@ -334,7 +334,7 @@ func runRTTProbe(profile *Profile, name string, count int, interval time.Duratio
 	}
 	fmt.Printf("rtt probe %s: %s:%d  (%d samples, %v interval)\n\n", name, target, profile.GetPort(), count, interval)
 
-	c, err := DialOpts(profile, dialOpts{strictHostKey: false})
+	c, err := DialOpts(profile, DialOptions{StrictHostKey: false})
 	if err != nil {
 		printDiagError(err, profile)
 		return 1

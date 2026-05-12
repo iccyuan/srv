@@ -556,7 +556,7 @@ func tarUploadStream(profile *Profile, localRoot string, files []string, remoteR
 	}
 	defer c.Close()
 
-	expanded, err := c.expandRemoteHome(remoteRoot)
+	expanded, err := c.ExpandRemoteHome(remoteRoot)
 	if err != nil {
 		return 1, err
 	}
@@ -653,7 +653,7 @@ func deleteRemoteFiles(profile *Profile, remoteRoot string, files []string) (int
 		return 255, err
 	}
 	defer c.Close()
-	expanded, err := c.expandRemoteHome(remoteRoot)
+	expanded, err := c.ExpandRemoteHome(remoteRoot)
 	if err != nil {
 		return 1, err
 	}

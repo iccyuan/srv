@@ -6,6 +6,7 @@ import (
 	"os/signal"
 	"regexp"
 	"srv/internal/srvtty"
+	"srv/internal/sshx"
 	"strconv"
 	"strings"
 	"sync"
@@ -151,7 +152,7 @@ func streamWithReconnect(profile *Profile, remoteCmd string, onChunk func(Stream
 			// Auth / host-key errors are deterministic -- another redial
 			// won't change the answer, so we surface immediately rather
 			// than spin forever.
-			if !isRetryableDialErr(err) {
+			if !sshx.IsRetryableDialErr(err) {
 				return exitErr(1, "tail: dial: %v", err)
 			}
 			fmt.Fprintf(os.Stderr, "srv tail: dial failed: %v (retry in %s)\n", err, backoff)

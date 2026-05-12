@@ -44,7 +44,7 @@ func cmdEdit(args []string, cfg *Config, profileOverride string) error {
 	}
 	defer c.Close()
 
-	resolved, err := c.expandRemoteHome(abs)
+	resolved, err := c.ExpandRemoteHome(abs)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "srv edit:", err)
 		return exitCode(1)
