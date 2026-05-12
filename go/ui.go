@@ -113,15 +113,67 @@ func renderDashboard(cfg *Config) string {
 	return sb.String()
 }
 
+const dashboardRule = "================================================================"
+const dashboardSubRule = "----------------------------------------------------------------"
+
 func dashHeader(sb *strings.Builder) {
-	fmt.Fprintf(sb, "%ssrv ui%s\n\n", ansiBold, ansiReset)
+	fmt.Fprintf(sb, "%sSRV UI%s  %sread-only control dashboard%s\n",
+		ansiBold+ansiMagenta, ansiReset, ansiDim, ansiReset)
+	fmt.Fprintf(sb, "%s%s%s\n", ansiDim, dashboardRule, ansiReset)
+	fmt.Fprintf(sb, "Keys: %sq%s quit   %sr%s redraw   %sauto refresh on data change%s\n\n",
+		ansiYellow+ansiBold, ansiReset, ansiYellow+ansiBold, ansiReset, ansiDim, ansiReset)
+}
+
+func dashSection(sb *strings.Builder, title string) {
+	fmt.Fprintf(sb, "%s== %s ==%s\n", ansiBold+ansiCyan, strings.ToUpper(title), ansiReset)
+}
+
+func dashSectionCount(sb *strings.Builder, title string, count int) {
+	fmt.Fprintf(sb, "%s== %s %s(%d)%s ==%s\n",
+		ansiBold+ansiCyan, strings.ToUpper(title), ansiDim, count, ansiReset+ansiBold+ansiCyan, ansiReset)
+}
+
+func dashField(sb *strings.Builder, key, value string) {
+	fmt.Fprintf(sb, "  %-10s %s\n", strings.ToUpper(key)+":", value)
+}
+
+func dashStatus(label, color string) string {
+	return color + ansiBold + "[" + strings.ToUpper(label) + "]" + ansiReset
+}
+
+func dashName(s string) string {
+	return ansiYellow + ansiBold + s + ansiReset
+}
+
+func dashMeta(s string) string {
+	if s == "" {
+		return ""
+	}
+	return ansiDim + s + ansiReset
+}
+
+func dashPath(s string) string {
+	return ansiGreen + s + ansiReset
+}
+
+func dashTableHeader(sb *strings.Builder, cols ...string) {
+	fmt.Fprint(sb, "  ")
+	for i, col := range cols {
+		if i > 0 {
+			fmt.Fprint(sb, "  ")
+		}
+		fmt.Fprintf(sb, "%s%s%s", ansiDim, col, ansiReset)
+	}
+	fmt.Fprintln(sb)
+	fmt.Fprintf(sb, "  %s%s%s\n", ansiDim, dashboardSubRule, ansiReset)
 }
 
 func dashActive(sb *strings.Builder, cfg *Config) {
-	fmt.Fprintf(sb, "%sActive%s\n", ansiBold, ansiReset)
+	dashSection(sb, "Active")
 	name, prof, err := ResolveProfile(cfg, "")
 	if err != nil {
-		fmt.Fprintf(sb, "  %s(no active profile)%s\n\n", ansiDim, ansiReset)
+		dashField(sb, "state", dashStatus("no profile", ansiDim))
+		fmt.Fprintln(sb)
 		return
 	}
 	target := prof.Host
@@ -131,32 +183,36 @@ func dashActive(sb *strings.Builder, cfg *Config) {
 	if prof.GetPort() != 22 {
 		target += ":" + strconv.Itoa(prof.GetPort())
 	}
-	fmt.Fprintf(sb, "  profile  %s%s%s  %s\n", ansiYellow, name, ansiReset, target)
+	dashField(sb, "profile", dashName(name))
+	dashField(sb, "target", ansiCyan+target+ansiReset)
 	cwd := GetCwd(name, prof)
-	fmt.Fprintf(sb, "  cwd      %s\n", cwd)
+	dashField(sb, "cwd", dashPath(cwd))
 	if pf := resolveProjectFile(); pf != nil {
-		fmt.Fprintf(sb, "  pinned by %s\n", pf.Path)
+		dashField(sb, "pinned", dashPath(pf.Path))
 	}
 	fmt.Fprintln(sb)
 }
 
 func dashDaemon(sb *strings.Builder) {
-	fmt.Fprintf(sb, "%sDaemon%s\n", ansiBold, ansiReset)
+	dashSection(sb, "Daemon")
 	conn := daemonDial(300 * time.Millisecond)
 	if conn == nil {
-		fmt.Fprintf(sb, "  %sstopped%s\n\n", ansiDim, ansiReset)
+		dashField(sb, "state", dashStatus("stopped", ansiDim))
+		fmt.Fprintln(sb)
 		return
 	}
 	defer conn.Close()
 	resp, err := daemonCall(conn, daemonRequest{Op: "status"}, time.Second)
 	if err != nil || resp == nil || !resp.OK {
-		fmt.Fprintf(sb, "  %sunreachable%s\n\n", ansiDim, ansiReset)
+		dashField(sb, "state", dashStatus("unreachable", ansiRed))
+		fmt.Fprintln(sb)
 		return
 	}
-	fmt.Fprintf(sb, "  running  uptime %s, %d pooled\n",
-		fmtDuration(time.Duration(resp.Uptime)*time.Second), len(resp.Profiles))
+	dashField(sb, "state", dashStatus("running", ansiGreen))
+	dashField(sb, "uptime", fmtDuration(time.Duration(resp.Uptime)*time.Second))
+	dashField(sb, "pooled", strconv.Itoa(len(resp.Profiles)))
 	if len(resp.Profiles) > 0 {
-		fmt.Fprintf(sb, "  pooled   %s\n", strings.Join(resp.Profiles, ", "))
+		dashField(sb, "profiles", ansiCyan+strings.Join(resp.Profiles, ", ")+ansiReset)
 	}
 	fmt.Fprintln(sb)
 }
@@ -165,15 +221,17 @@ func dashGroups(sb *strings.Builder, cfg *Config) {
 	if len(cfg.Groups) == 0 {
 		return
 	}
-	fmt.Fprintf(sb, "%sGroups (%d)%s\n", ansiBold, len(cfg.Groups), ansiReset)
+	dashSectionCount(sb, "Groups", len(cfg.Groups))
 	names := make([]string, 0, len(cfg.Groups))
 	for n := range cfg.Groups {
 		names = append(names, n)
 	}
 	sort.Strings(names)
+	dashTableHeader(sb, "NAME          SIZE  MEMBERS")
 	for _, n := range names {
 		members := cfg.Groups[n]
-		fmt.Fprintf(sb, "  %-12s  %d: %s\n", n, len(members), strings.Join(members, ", "))
+		fmt.Fprintf(sb, "  %-12s  %s%2d%s  %s\n",
+			dashName(n), ansiMagenta+ansiBold, len(members), ansiReset, ansiCyan+strings.Join(members, ", ")+ansiReset)
 	}
 	fmt.Fprintln(sb)
 }
@@ -183,26 +241,30 @@ func dashTunnels(sb *strings.Builder, cfg *Config) {
 		return
 	}
 	active := loadActiveTunnels()
-	fmt.Fprintf(sb, "%sTunnels (%d)%s\n", ansiBold, len(cfg.Tunnels), ansiReset)
+	dashSectionCount(sb, "Tunnels", len(cfg.Tunnels))
 	names := make([]string, 0, len(cfg.Tunnels))
 	for n := range cfg.Tunnels {
 		names = append(names, n)
 	}
 	sort.Strings(names)
+	dashTableHeader(sb, "NAME          TYPE     SPEC / STATE")
 	for _, n := range names {
 		def := cfg.Tunnels[n]
-		status := ansiDim + "stopped" + ansiReset
+		status := dashStatus("stopped", ansiDim)
 		extra := ""
 		if a, ok := active[n]; ok {
-			status = ansiYellow + "running" + ansiReset
+			status = dashStatus("running", ansiGreen)
 			extra = "  listen=" + a.Listen
 		}
 		flag := ""
 		if def.Autostart {
-			flag = " " + ansiCyan + "[autostart]" + ansiReset
+			flag = " " + dashStatus("autostart", ansiCyan)
 		}
-		fmt.Fprintf(sb, "  %-12s  %-7s %s  %s%s%s\n",
-			n, def.Type, def.Spec, status, extra, flag)
+		if extra != "" {
+			extra = ansiDim + extra + ansiReset
+		}
+		fmt.Fprintf(sb, "  %-12s  %-7s  %s  %s%s%s\n",
+			dashName(n), ansiMagenta+def.Type+ansiReset, dashPath(def.Spec), status, extra, flag)
 	}
 	fmt.Fprintln(sb)
 }
@@ -212,7 +274,8 @@ func dashJobs(sb *strings.Builder) {
 	if jf == nil || len(jf.Jobs) == 0 {
 		return
 	}
-	fmt.Fprintf(sb, "%sJobs (%d)%s\n", ansiBold, len(jf.Jobs), ansiReset)
+	dashSectionCount(sb, "Jobs", len(jf.Jobs))
+	dashTableHeader(sb, "ID            PROFILE     PID       AGE       COMMAND")
 	for _, j := range jf.Jobs {
 		cmd := j.Cmd
 		if len(cmd) > 60 {
@@ -222,8 +285,8 @@ func dashJobs(sb *strings.Builder) {
 		if t, ok := parseISOLike(j.Started); ok {
 			started = fmtDuration(time.Since(t)) + " ago"
 		}
-		fmt.Fprintf(sb, "  %-12s  %-10s  pid=%-6d  %s  %s\n",
-			truncID(j.ID), j.Profile, j.Pid, ansiDim+started+ansiReset, cmd)
+		fmt.Fprintf(sb, "  %-12s  %-10s  %-8d  %-8s  %s\n",
+			dashName(truncID(j.ID)), ansiCyan+j.Profile+ansiReset, j.Pid, dashMeta(started), cmd)
 	}
 	fmt.Fprintln(sb)
 }
@@ -262,14 +325,16 @@ func dashSessions(sb *strings.Builder) {
 	if len(rows) > 5 {
 		rows = rows[:5]
 	}
-	fmt.Fprintf(sb, "%sSessions (top %d)%s\n", ansiBold, len(rows), ansiReset)
+	dashSectionCount(sb, "Sessions", len(rows))
+	dashTableHeader(sb, "SESSION               PINNED PROFILE  LAST SEEN")
 	for _, r := range rows {
 		prof := *r.rec.Profile
 		age := "?"
 		if r.hasSeen {
 			age = fmtDuration(time.Since(r.seen)) + " ago"
 		}
-		fmt.Fprintf(sb, "  %-20s  pin=%-12s  %s\n", truncID(r.sid), prof, ansiDim+age+ansiReset)
+		fmt.Fprintf(sb, "  %-20s  %-14s  %s\n",
+			dashName(truncID(r.sid)), ansiCyan+prof+ansiReset, dashMeta(age))
 	}
 	fmt.Fprintln(sb)
 }
@@ -288,41 +353,43 @@ func dashMCP(sb *strings.Builder) {
 		// show. Don't print an empty section.
 		return
 	}
-	fmt.Fprintf(sb, "%sMCP%s\n", ansiBold, ansiReset)
+	dashSection(sb, "MCP")
 	if len(st.ActivePIDs) == 0 {
 		// Log exists but no recent activity / no live pid. Show that
 		// MCP is idle plus the most recent activity for context.
 		if !st.LastActive.IsZero() {
-			fmt.Fprintf(sb, "  %sidle%s     last activity %s ago\n",
-				ansiDim, ansiReset, fmtDuration(time.Since(st.LastActive)))
+			dashField(sb, "state", dashStatus("idle", ansiDim))
+			dashField(sb, "last", fmtDuration(time.Since(st.LastActive))+" ago")
 		} else {
-			fmt.Fprintf(sb, "  %sidle%s\n", ansiDim, ansiReset)
+			dashField(sb, "state", dashStatus("idle", ansiDim))
 		}
 	} else {
 		pids := make([]string, 0, len(st.ActivePIDs))
 		for _, p := range st.ActivePIDs {
 			pids = append(pids, strconv.Itoa(p))
 		}
-		fmt.Fprintf(sb, "  %srunning%s  pids %s\n",
-			ansiYellow, ansiReset, strings.Join(pids, ", "))
+		dashField(sb, "state", dashStatus("running", ansiGreen))
+		dashField(sb, "pids", strings.Join(pids, ", "))
 	}
 	if len(st.RecentTools) > 0 {
-		fmt.Fprintf(sb, "  %srecent%s\n", ansiDim, ansiReset)
+		fmt.Fprintln(sb)
+		dashTableHeader(sb, "TOOL                  DUR      STATE    AGE")
 		for _, tc := range st.RecentTools {
-			status := ansiYellow + "ok" + ansiReset
+			status := dashStatus("ok", ansiGreen)
 			if !tc.OK {
-				status = "\x1b[31m" + "err" + ansiReset
+				status = dashStatus("err", ansiRed)
 			}
-			age := ansiDim + fmtDuration(time.Since(tc.When)) + " ago" + ansiReset
-			fmt.Fprintf(sb, "    %-18s %-7s %s  %s\n", tc.Name, tc.Dur, status, age)
+			age := dashMeta(fmtDuration(time.Since(tc.When)) + " ago")
+			fmt.Fprintf(sb, "  %-20s  %-7s  %-7s  %s\n", ansiYellow+tc.Name+ansiReset, ansiMagenta+tc.Dur+ansiReset, status, age)
 		}
 	}
 	fmt.Fprintln(sb)
 }
 
 func dashFooter(sb *strings.Builder) {
-	fmt.Fprintf(sb, "%sq quit  r force-redraw  (auto-redraws on data change, ~2s)%s\n",
-		ansiDim, ansiReset)
+	fmt.Fprintf(sb, "%s%s%s\n", ansiDim, dashboardRule, ansiReset)
+	fmt.Fprintf(sb, "Keys: %sq%s quit   %sr%s force-redraw\n",
+		ansiYellow+ansiBold, ansiReset, ansiYellow+ansiBold, ansiReset)
 }
 
 // parseISOLike accepts the timestamp formats srv writes -- nowISO()

@@ -32,7 +32,11 @@ const (
 	ansiBold    = "\x1b[1m"
 	ansiDim     = "\x1b[2m"
 	ansiReverse = "\x1b[7m"
+	ansiRed     = "\x1b[31m"
+	ansiGreen   = "\x1b[32m"
 	ansiYellow  = "\x1b[33m"
+	ansiBlue    = "\x1b[34m"
+	ansiMagenta = "\x1b[35m"
 	ansiCyan    = "\x1b[36m"
 	ansiHide    = "\x1b[?25l"
 	ansiShow    = "\x1b[?25h"
@@ -259,7 +263,7 @@ func drawPicker(prompt string, items []*pickerItem, cursor int, filter string, f
 	w := os.Stderr
 	lines := 0
 
-	fmt.Fprintf(w, "%s\r\n", prompt)
+	fmt.Fprintf(w, "%s%s%s\r\n", ansiBold+ansiCyan, prompt, ansiReset)
 	lines++
 
 	if filterMode {
@@ -285,7 +289,7 @@ func drawPicker(prompt string, items []*pickerItem, cursor int, filter string, f
 	for i, it := range items {
 		marker := "  "
 		if i == cursor {
-			marker = ansiBold + "> " + ansiReset
+			marker = ansiCyan + ansiBold + "> " + ansiReset
 		}
 		row := fmt.Sprintf("%-*s  %s", maxName, it.name, it.meta)
 		if it.isPinned {
@@ -295,14 +299,14 @@ func drawPicker(prompt string, items []*pickerItem, cursor int, filter string, f
 			row += " " + ansiCyan + ansiBold + "[" + labels.def + "]" + ansiReset
 		}
 		if i == cursor {
-			fmt.Fprintf(w, "%s%s%s%s\r\n", marker, ansiReverse, row, ansiReset)
+			fmt.Fprintf(w, "%s%s%s%s\r\n", marker, ansiReverse+ansiBold, row, ansiReset)
 		} else {
 			fmt.Fprintf(w, "%s%s\r\n", marker, row)
 		}
 		lines++
 	}
 
-	hint := "↑/↓ or j/k  ENTER select  / filter  q cancel"
+	hint := "up/down or j/k  ENTER select  / filter  q cancel"
 	if filterMode {
 		hint = "type to filter  ENTER select  ESC exit filter  Ctrl-C cancel"
 	}
