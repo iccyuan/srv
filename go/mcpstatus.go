@@ -37,14 +37,26 @@ type mcpStatus struct {
 	// LastActive is the timestamp of the most recent line in the log
 	// (any pid). Zero if log empty / unreadable.
 	LastActive time.Time
-	// LastTool / LastToolDur / LastToolOK summarise the most recent
-	// `tool=<name> dur=<dur> <ok|err>` line. LastTool is "" when no
-	// such line exists in the tail window.
-	LastTool    string
-	LastToolDur string
-	LastToolOK  bool
-	LastToolAt  time.Time
+	// RecentTools is the trailing slice of tool calls (most-recent
+	// last) parsed from the tail window. Bounded by mcpRecentToolsMax
+	// so the dashboard never grows unbounded. Empty when no
+	// `tool=...` line is present.
+	RecentTools []mcpToolCall
 }
+
+// mcpToolCall summarises one `tool=NAME dur=Ds <ok|err>` log line.
+// All fields are derived from a single line; see parseToolLine.
+type mcpToolCall struct {
+	When time.Time
+	Name string
+	Dur  string
+	OK   bool
+}
+
+// mcpRecentToolsMax bounds the rolling history the dashboard keeps.
+// Five is enough to see "what the model has been doing lately"
+// without making the section dominate the screen.
+const mcpRecentToolsMax = 5
 
 // readMCPStatus reads the tail of mcp.log and condenses it into the
 // dashboard view. Robust to a missing / truncated / empty log -- in
@@ -121,14 +133,16 @@ func readMCPStatus() mcpStatus {
 			ps.exited = true
 		case strings.HasPrefix(payload, "tool="):
 			name, dur, ok2 := parseToolLine(payload)
-			// Always take the most recent tool line.
-			if ts.After(st.LastToolAt) {
-				st.LastTool = name
-				st.LastToolDur = dur
-				st.LastToolOK = ok2
-				st.LastToolAt = ts
-			}
+			st.RecentTools = append(st.RecentTools, mcpToolCall{
+				When: ts, Name: name, Dur: dur, OK: ok2,
+			})
 		}
+	}
+
+	// Keep only the trailing window. Log is read forward so the slice
+	// is already chronological -- last element is most recent.
+	if n := len(st.RecentTools); n > mcpRecentToolsMax {
+		st.RecentTools = st.RecentTools[n-mcpRecentToolsMax:]
 	}
 
 	now := time.Now()

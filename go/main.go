@@ -91,6 +91,8 @@ Integrations:
                                          run cmd via remote sudo; password prompted locally (no echo),
                                          cached in the daemon for ~5min by default
   srv ui                                 one-screen dashboard (profiles, daemon, tunnels, jobs, sessions)
+  srv tail [-n LINES] [--grep RE] <remote-path>...
+                                         live-follow remote file(s) with auto-reconnect on SSH drop
   srv mcp                                run as a stdio MCP server
   srv guard [on|off|status]              MCP confirmation guard for high-risk ops (default off)
   srv color [on|off|use [name]|list|status]
@@ -195,6 +197,8 @@ const helpZH = `srv - 跨平台 SSH 远端命令工具,持久 cwd / 连接复用
   srv sudo [--no-cache] [--cache-ttl <dur>] <cmd>
                                          远程 sudo 执行;本地无回显输入密码,daemon 默认缓存 5 分钟
   srv ui                                 一屏总览(profile / daemon / tunnel / job / session)
+  srv tail [-n LINES] [--grep RE] <remote-path>...
+                                         实时跟踪远端文件,SSH 断了自动重连
   srv mcp                                以 stdio MCP server 跑
   srv guard [on|off|status]              MCP 高危操作确认开关(默认关闭,可针对当前 shell 开启)
   srv color [on|off|use [name]|list|status]

@@ -2,12 +2,14 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
 	"regexp"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -415,6 +417,118 @@ func handleMCPRunStream(args map[string]any, cfg *Config, profileOverride string
 	return toolResult{
 		Content:           []toolContent{{Type: "text", Text: text}},
 		IsError:           exitCode != 0,
+		StructuredContent: structured,
+	}
+}
+
+// handleMCPTail follows a remote file for a bounded duration and
+// streams new lines to the client via `notifications/progress`. The
+// final tools/call response returns the full accumulated output
+// (capped at mcpRunTextMax) plus structured metadata.
+//
+// Why not just use `run` with `tail -F`: synchronous `run` rejects
+// long-blocking patterns including `tail -f` for the MCP timeout
+// reason. `tail` here is the explicit, bounded-time version: stream
+// for up to follow_seconds (max 60s), then return -- the model gets
+// real-time progress mid-call AND a deterministic upper bound on the
+// turn duration.
+func handleMCPTail(args map[string]any, cfg *Config, profileOverride string) toolResult {
+	path, _ := args["path"].(string)
+	if path == "" {
+		return mcpTextErr("path is required")
+	}
+	lines := 50
+	if v, ok := args["lines"].(float64); ok && v > 0 {
+		lines = int(v)
+	}
+	follow := 30
+	if v, ok := args["follow_seconds"].(float64); ok && v > 0 {
+		follow = int(v)
+	}
+	// Hard cap on follow_seconds. The MCP per-tool timeout (Claude Code
+	// default 60s) is the binding constraint; progress notifications
+	// reset it but we still want a deterministic ceiling.
+	if follow > 60 {
+		follow = 60
+	}
+
+	grep, _ := args["grep"].(string)
+	var re *regexp.Regexp
+	if grep != "" {
+		r, err := regexp.Compile(grep)
+		if err != nil {
+			return mcpTextErr(fmt.Sprintf("bad regex %q: %v", grep, err))
+		}
+		re = r
+	}
+
+	_, prof, errResult := resolveMCPProfile(cfg, profileOverride)
+	if errResult != nil {
+		return *errResult
+	}
+
+	c, err := Dial(prof)
+	if err != nil {
+		return mcpTextErr(fmt.Sprintf("dial: %v", err))
+	}
+	defer c.Close()
+
+	remoteCmd := fmt.Sprintf("tail -F -n %d %s", lines, shQuotePath(path))
+	token := currentProgressTokenFn()
+
+	// Bound the call: close the SSH client after follow_seconds so
+	// RunStream returns. The model sees a stream that politely ends
+	// instead of one that runs until the MCP timeout hits.
+	timer := time.NewTimer(time.Duration(follow) * time.Second)
+	defer timer.Stop()
+	stopOnce := sync.Once{}
+	stop := func() { stopOnce.Do(func() { _ = c.Close() }) }
+	go func() {
+		<-timer.C
+		stop()
+	}()
+
+	var capturedBytes int
+	var capped bool
+	var buf strings.Builder
+	onChunk := func(_ StreamChunkKind, line string) {
+		if re != nil && !re.MatchString(line) {
+			return
+		}
+		// Accumulate up to the run-text cap; further chunks still
+		// stream via progress (model sees them in real time) but the
+		// final result text gets a truncation marker.
+		if capturedBytes+len(line) <= mcpRunTextMax {
+			buf.WriteString(line)
+			capturedBytes += len(line)
+		} else {
+			capped = true
+		}
+		mcpProgress(token, capturedBytes, line)
+	}
+
+	_, _, _, runErr := c.RunStream(remoteCmd, "", onChunk)
+	// runErr is expected when we close the client to end the follow;
+	// that's the normal exit path. Surface only as info, never as
+	// IsError.
+
+	text := buf.String()
+	if capped {
+		text += fmt.Sprintf("\n[output cap %d bytes; further lines streamed via progress only]\n", mcpRunTextMax)
+	}
+	text += fmt.Sprintf("\n[followed %s for %ds, %d bytes captured]", path, follow, capturedBytes)
+	structured := map[string]any{
+		"path":           path,
+		"follow_seconds": follow,
+		"bytes_captured": capturedBytes,
+		"capped":         capped,
+		"end_reason":     "timer",
+	}
+	if runErr != nil && !errors.Is(runErr, os.ErrClosed) {
+		structured["transport_error"] = runErr.Error()
+	}
+	return toolResult{
+		Content:           []toolContent{{Type: "text", Text: text}},
 		StructuredContent: structured,
 	}
 }
@@ -1330,6 +1444,24 @@ var mcpTools = []mcpTool{
 			},
 		},
 		handler: handleMCPRun,
+	},
+	{
+		def: toolDef{
+			Name:        "tail",
+			Description: "Follow a remote file for a bounded duration and stream new lines via `notifications/progress`. Replaces the rejected `run \"tail -F path\"` pattern for the live-log-watch case: synchronous `run` refuses never-terminating commands, but `tail` is explicitly bounded by follow_seconds (default 30s, cap 60s) so the call has a deterministic ceiling. Use this when you want to watch a log mid-deploy or see what a service is doing right now.",
+			InputSchema: map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"path":           strSchema("Remote file to follow."),
+					"lines":          intSchema(50, "Initial lines to backfill before following."),
+					"follow_seconds": intSchema(30, "How long to follow before returning. Capped at 60."),
+					"grep":           strSchema("Optional regex filter applied per line."),
+					"profile":        strSchema(""),
+				},
+				"required": []string{"path"},
+			},
+		},
+		handler: handleMCPTail,
 	},
 	{
 		def: toolDef{

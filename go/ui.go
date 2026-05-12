@@ -292,10 +292,12 @@ func dashSessions(sb *strings.Builder) {
 }
 
 // dashMCP shows whether any MCP server processes are alive (parsed
-// from the tail of mcp.log) plus the most recent tool call. Useful
+// from the tail of mcp.log) plus the trailing N tool calls. Useful
 // when the dashboard sits in one terminal pane while a Claude Code
 // session in another runs MCP tools -- you can watch tool=... lines
-// arrive in near real time.
+// arrive in near real time, and a small history (default 5) gives
+// the "what's been happening" context that a single last-line view
+// missed.
 func dashMCP(sb *strings.Builder) {
 	st := readMCPStatus()
 	if !st.LogExists {
@@ -321,14 +323,16 @@ func dashMCP(sb *strings.Builder) {
 		fmt.Fprintf(sb, "  %srunning%s  pids %s\n",
 			ansiYellow, ansiReset, strings.Join(pids, ", "))
 	}
-	if st.LastTool != "" {
-		status := ansiYellow + "ok" + ansiReset
-		if !st.LastToolOK {
-			status = "\x1b[31m" + "err" + ansiReset
+	if len(st.RecentTools) > 0 {
+		fmt.Fprintf(sb, "  %srecent%s\n", ansiDim, ansiReset)
+		for _, tc := range st.RecentTools {
+			status := ansiYellow + "ok" + ansiReset
+			if !tc.OK {
+				status = "\x1b[31m" + "err" + ansiReset
+			}
+			age := ansiDim + fmtDuration(time.Since(tc.When)) + " ago" + ansiReset
+			fmt.Fprintf(sb, "    %-18s %-7s %s  %s\n", tc.Name, tc.Dur, status, age)
 		}
-		fmt.Fprintf(sb, "  last     tool=%s dur=%s %s  %s\n",
-			st.LastTool, st.LastToolDur, status,
-			ansiDim+fmtDuration(time.Since(st.LastToolAt))+" ago"+ansiReset)
 	}
 	fmt.Fprintln(sb)
 }

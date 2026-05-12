@@ -65,6 +65,7 @@ var compSpecs = map[string]compSpec{
 	"diff": {positions: []argSlot{{typ: argLocalFile}, {typ: argRemotePath}}},
 	"run":  {rest: argRemotePath},
 	"exec": {rest: argRemotePath},
+	"tail": {rest: argRemotePath},
 
 	"use": {positions: []argSlot{{typ: argEnumProfile, choices: []string{"--clear"}}}},
 
