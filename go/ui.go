@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"sort"
+	"srv/internal/ansi"
 	"srv/internal/srvtty"
 	"strconv"
 	"strings"
@@ -202,8 +203,8 @@ func cmdUI(cfg *Config) error {
 	// rustnet: type the command, the whole window becomes the UI;
 	// quit, the shell is exactly as you left it. Cursor stays hidden
 	// for the duration.
-	fmt.Fprint(os.Stderr, altScreenOn+ansiHide+clearScreen+cursorHome)
-	defer fmt.Fprint(os.Stderr, ansiShow+altScreenOff)
+	fmt.Fprint(os.Stderr, altScreenOn+ansi.Hide+clearScreen+cursorHome)
+	defer fmt.Fprint(os.Stderr, ansi.Show+altScreenOff)
 
 	kr := newKeyReader()
 	st := &uiState{
@@ -641,9 +642,9 @@ func handleUIKey(b byte, st *uiState, jobs []*JobRecord, tunnelNames []string, c
 		if yes && action != nil {
 			msg, err := action()
 			if err != nil {
-				st.statusMsg = ansiRed + title + " failed: " + err.Error() + ansiReset
+				st.statusMsg = ansi.Red + title + " failed: " + err.Error() + ansi.Reset
 			} else {
-				st.statusMsg = ansiGreen + title + ": " + msg + ansiReset
+				st.statusMsg = ansi.Green + title + ": " + msg + ansi.Reset
 			}
 			st.detailMode = false
 			// Destructive action just touched jobs/tunnels on disk;
@@ -651,7 +652,7 @@ func handleUIKey(b byte, st *uiState, jobs []*JobRecord, tunnelNames []string, c
 			// instead of waiting up to snapTTL.
 			st.snapAt = time.Time{}
 		} else {
-			st.statusMsg = ansiDim + title + " cancelled" + ansiReset
+			st.statusMsg = ansi.Dim + title + " cancelled" + ansi.Reset
 		}
 		st.statusSetAt = time.Now()
 		return true
@@ -1077,9 +1078,9 @@ func splitDashboardLines(s string) []string {
 // spot rather than every box* call site.
 func boxColor(focused bool) string {
 	if focused {
-		return ansiCyan + ansiBold
+		return ansi.Cyan + ansi.Bold
 	}
-	return ansiDim
+	return ansi.Dim
 }
 
 // boxTop / boxBottom / boxLine are the default-unfocused variants
@@ -1100,14 +1101,14 @@ func boxTopWithHint(sb *strings.Builder, title, hint string, focused bool) {
 	if title != "" {
 		t := strings.ToUpper(title)
 		if focused {
-			label = " " + ansiReset + ansiBold + ansiYellow + "▸ " + t + ansiReset + border + " "
+			label = " " + ansi.Reset + ansi.Bold + ansi.Yellow + "▸ " + t + ansi.Reset + border + " "
 		} else {
-			label = " " + ansiReset + ansiBold + ansiCyan + t + ansiReset + border + " "
+			label = " " + ansi.Reset + ansi.Bold + ansi.Cyan + t + ansi.Reset + border + " "
 		}
 	}
 	hintLabel := ""
 	if hint != "" {
-		hintLabel = " " + ansiReset + ansiDim + hint + ansiReset + border + " "
+		hintLabel = " " + ansi.Reset + ansi.Dim + hint + ansi.Reset + border + " "
 	}
 	labelVis := visualWidth(label)
 	hintVis := visualWidth(hintLabel)
@@ -1126,7 +1127,7 @@ func boxTopWithHint(sb *strings.Builder, title, hint string, focused bool) {
 		label,
 		strings.Repeat("─", right),
 		hintLabel,
-		border, ansiReset)
+		border, ansi.Reset)
 }
 
 // boxTopFocused draws a rounded-corner panel header with the title
@@ -1139,9 +1140,9 @@ func boxTopFocused(sb *strings.Builder, title string, focused bool) {
 	if title != "" {
 		t := strings.ToUpper(title)
 		if focused {
-			label = " " + ansiReset + ansiBold + ansiYellow + "▸ " + t + ansiReset + border + " "
+			label = " " + ansi.Reset + ansi.Bold + ansi.Yellow + "▸ " + t + ansi.Reset + border + " "
 		} else {
-			label = " " + ansiReset + ansiBold + ansiCyan + t + ansiReset + border + " "
+			label = " " + ansi.Reset + ansi.Bold + ansi.Cyan + t + ansi.Reset + border + " "
 		}
 	}
 	labelVis := visualWidth(label)
@@ -1159,18 +1160,18 @@ func boxTopFocused(sb *strings.Builder, title string, focused bool) {
 		strings.Repeat("─", left),
 		label,
 		strings.Repeat("─", right),
-		border, ansiReset)
+		border, ansi.Reset)
 }
 
 func boxBottomFocused(sb *strings.Builder, focused bool) {
 	border := boxColor(focused)
-	fmt.Fprintf(sb, "%s╰%s╯%s\n", border, strings.Repeat("─", dashboardWidth-2), ansiReset)
+	fmt.Fprintf(sb, "%s╰%s╯%s\n", border, strings.Repeat("─", dashboardWidth-2), ansi.Reset)
 }
 
 func boxLineFocused(sb *strings.Builder, content string, focused bool) {
 	border := boxColor(focused)
 	fmt.Fprintf(sb, "%s│%s %s %s│%s\n",
-		border, ansiReset, padAnsiRight(content, dashboardContentWidth), border, ansiReset)
+		border, ansi.Reset, padAnsiRight(content, dashboardContentWidth), border, ansi.Reset)
 }
 
 func padAnsiRight(s string, width int) string {
@@ -1192,7 +1193,7 @@ func fitPlain(s string, width int) string {
 }
 
 func kvLine(key, value string) string {
-	return ansiDim + fmt.Sprintf("%-9s", strings.ToUpper(key)+":") + ansiReset + " " + value
+	return ansi.Dim + fmt.Sprintf("%-9s", strings.ToUpper(key)+":") + ansi.Reset + " " + value
 }
 
 func kvPair(leftLabel, leftValue, rightLabel, rightValue string) string {
@@ -1207,20 +1208,20 @@ func kvPair(leftLabel, leftValue, rightLabel, rightValue string) string {
 
 func panelHeader(sb *strings.Builder, st *uiState) {
 	boxTop(sb, "srv")
-	boxLine(sb, ansiBold+ansiMagenta+"SRV UI"+ansiReset+"  "+ansiDim+"windowed control dashboard"+ansiReset)
+	boxLine(sb, ansi.Bold+ansi.Magenta+"SRV UI"+ansi.Reset+"  "+ansi.Dim+"windowed control dashboard"+ansi.Reset)
 	if st == nil {
-		boxLine(sb, ansiDim+"snapshot mode (no tty)"+ansiReset)
+		boxLine(sb, ansi.Dim+"snapshot mode (no tty)"+ansi.Reset)
 		boxBottom(sb)
 		fmt.Fprintln(sb)
 		return
 	}
 	boxLine(sb, fmt.Sprintf("keys: %sq%s quit  %sr%s redraw  %stab/h/l%s window  %s↑/↓%s row  %sp%s profile  %sk%s kill",
-		ansiYellow+ansiBold, ansiReset,
-		ansiYellow+ansiBold, ansiReset,
-		ansiYellow+ansiBold, ansiReset,
-		ansiYellow+ansiBold, ansiReset,
-		ansiYellow+ansiBold, ansiReset,
-		ansiYellow+ansiBold, ansiReset))
+		ansi.Yellow+ansi.Bold, ansi.Reset,
+		ansi.Yellow+ansi.Bold, ansi.Reset,
+		ansi.Yellow+ansi.Bold, ansi.Reset,
+		ansi.Yellow+ansi.Bold, ansi.Reset,
+		ansi.Yellow+ansi.Bold, ansi.Reset,
+		ansi.Yellow+ansi.Bold, ansi.Reset))
 	boxBottom(sb)
 	fmt.Fprintln(sb)
 }
@@ -1236,7 +1237,7 @@ func panelActive(sb *strings.Builder, cfg *Config, st *uiState) {
 	boxTopWithHint(sb, "active", "p switch", false)
 	name, prof := lookupSelectedProfile(cfg, st)
 	if prof == nil {
-		boxLine(sb, ansiDim+"no profile selected"+ansiReset)
+		boxLine(sb, ansi.Dim+"no profile selected"+ansi.Reset)
 		boxBottom(sb)
 		fmt.Fprintln(sb)
 		return
@@ -1256,14 +1257,14 @@ func panelActive(sb *strings.Builder, cfg *Config, st *uiState) {
 	}
 	cwd := uiCwd(prof, pf)
 	parts := []string{
-		ansiYellow + ansiBold + name + ansiReset,
-		ansiCyan + target + ansiReset,
+		ansi.Yellow + ansi.Bold + name + ansi.Reset,
+		ansi.Cyan + target + ansi.Reset,
 	}
 	if cwd != "" {
 		parts = append(parts, dashPath(cwd))
 	}
 	if pf != nil {
-		parts = append(parts, ansiDim+"pinned "+ansiReset+dashPath(pf.Path))
+		parts = append(parts, ansi.Dim+"pinned "+ansi.Reset+dashPath(pf.Path))
 	}
 	boxLine(sb, fitInlineParts(parts, "", dashboardContentWidth))
 	boxBottom(sb)
@@ -1316,7 +1317,7 @@ func lookupSelectedProfile(cfg *Config, st *uiState) (string, *Profile) {
 // it overflows `width`. Used by the single-line panels so a long path
 // or profile-list shrinks instead of wrapping.
 func fitInlineParts(parts []string, tail string, width int) string {
-	sep := ansiDim + " · " + ansiReset
+	sep := ansi.Dim + " · " + ansi.Reset
 	body := strings.Join(parts, sep)
 	tailW := visualWidth(tail)
 	bodyW := visualWidth(body)
@@ -1373,7 +1374,7 @@ func ellipsisAnsiRight(s string, w int) string {
 		seen++
 	}
 	out.WriteString("...")
-	out.WriteString(ansiReset)
+	out.WriteString(ansi.Reset)
 	return out.String()
 }
 
@@ -1391,18 +1392,18 @@ func panelDaemon(sb *strings.Builder, st *uiState) {
 		resp = fetchDaemonStatusForUI()
 	}
 	if resp == nil {
-		boxLine(sb, dashStatus("stopped", ansiDim))
+		boxLine(sb, dashStatus("stopped", ansi.Dim))
 		boxBottom(sb)
 		fmt.Fprintln(sb)
 		return
 	}
 	parts := []string{
-		dashStatus("running", ansiGreen),
-		ansiDim + "up " + ansiReset + fmtDuration(time.Duration(resp.Uptime)*time.Second),
-		ansiDim + "pooled " + ansiReset + strconv.Itoa(len(resp.Profiles)),
+		dashStatus("running", ansi.Green),
+		ansi.Dim + "up " + ansi.Reset + fmtDuration(time.Duration(resp.Uptime)*time.Second),
+		ansi.Dim + "pooled " + ansi.Reset + strconv.Itoa(len(resp.Profiles)),
 	}
 	if len(resp.Profiles) > 0 {
-		parts = append(parts, ansiCyan+strings.Join(resp.Profiles, ", ")+ansiReset)
+		parts = append(parts, ansi.Cyan+strings.Join(resp.Profiles, ", ")+ansi.Reset)
 	}
 	boxLine(sb, fitInlineParts(parts, "", dashboardContentWidth))
 	boxBottom(sb)
@@ -1430,8 +1431,8 @@ func panelGroups(sb *strings.Builder, cfg *Config) {
 		return
 	}
 	boxTop(sb, fmt.Sprintf("groups %d", len(cfg.Groups)))
-	boxLine(sb, ansiDim+"NAME          SIZE  MEMBERS"+ansiReset)
-	boxLine(sb, ansiDim+strings.Repeat("-", dashboardContentWidth)+ansiReset)
+	boxLine(sb, ansi.Dim+"NAME          SIZE  MEMBERS"+ansi.Reset)
+	boxLine(sb, ansi.Dim+strings.Repeat("-", dashboardContentWidth)+ansi.Reset)
 	names := make([]string, 0, len(cfg.Groups))
 	for n := range cfg.Groups {
 		names = append(names, n)
@@ -1440,7 +1441,7 @@ func panelGroups(sb *strings.Builder, cfg *Config) {
 	for _, n := range names {
 		members := cfg.Groups[n]
 		boxLine(sb, fmt.Sprintf("%-12s  %s%2d%s  %s",
-			dashName(n), ansiMagenta+ansiBold, len(members), ansiReset, ansiCyan+fitPlain(strings.Join(members, ", "), 56)+ansiReset))
+			dashName(n), ansi.Magenta+ansi.Bold, len(members), ansi.Reset, ansi.Cyan+fitPlain(strings.Join(members, ", "), 56)+ansi.Reset))
 	}
 	boxBottom(sb)
 	fmt.Fprintln(sb)
@@ -1461,34 +1462,34 @@ func panelTunnels(sb *strings.Builder, cfg *Config, names []string, st *uiState)
 	}
 	title := fmt.Sprintf("tunnels %d", len(names))
 	boxTopFocused(sb, title, focused)
-	boxLineFocused(sb, ansiDim+"  NAME          TYPE     SPEC / STATE"+ansiReset, focused)
-	boxLineFocused(sb, ansiDim+strings.Repeat("-", dashboardContentWidth)+ansiReset, focused)
+	boxLineFocused(sb, ansi.Dim+"  NAME          TYPE     SPEC / STATE"+ansi.Reset, focused)
+	boxLineFocused(sb, ansi.Dim+strings.Repeat("-", dashboardContentWidth)+ansi.Reset, focused)
 	for i, n := range names {
 		def := cfg.Tunnels[n]
-		status := dashStatus("stopped", ansiDim)
+		status := dashStatus("stopped", ansi.Dim)
 		extra := ""
 		errMsg := ""
 		if a, ok := active[n]; ok {
-			status = dashStatus("running", ansiGreen)
+			status = dashStatus("running", ansi.Green)
 			extra = " listen=" + a.Listen
 		} else if msg, ok := errs[n]; ok {
-			status = dashStatus("failed", ansiRed)
+			status = dashStatus("failed", ansi.Red)
 			errMsg = msg
 		}
 		flag := ""
 		if def.Autostart {
-			flag = " " + dashStatus("autostart", ansiCyan)
+			flag = " " + dashStatus("autostart", ansi.Cyan)
 		}
 		marker := "  "
 		row := fmt.Sprintf("%s%-12s  %-7s  %s  %s%s%s",
-			marker, dashName(n), ansiMagenta+def.Type+ansiReset, dashPath(fitPlain(def.Spec, 32)), status, ansiDim+extra+ansiReset, flag)
+			marker, dashName(n), ansi.Magenta+def.Type+ansi.Reset, dashPath(fitPlain(def.Spec, 32)), status, ansi.Dim+extra+ansi.Reset, flag)
 		selected := st != nil && st.isSelected("tunnel", i)
 		if selected {
-			row = ansiYellow + ansiBold + "> " + ansiReset + ansiReverse + row[2:] + ansiReset
+			row = ansi.Yellow + ansi.Bold + "> " + ansi.Reset + ansi.Reverse + row[2:] + ansi.Reset
 		}
 		boxLineFocused(sb, row, focused)
 		if errMsg != "" {
-			boxLineFocused(sb, "    "+ansiRed+fitPlain(errMsg, 76)+ansiReset, focused)
+			boxLineFocused(sb, "    "+ansi.Red+fitPlain(errMsg, 76)+ansi.Reset, focused)
 		}
 	}
 	boxBottomFocused(sb, focused)
@@ -1510,13 +1511,13 @@ func panelJobs(sb *strings.Builder, jobs []*JobRecord, st *uiState) {
 	}
 	boxTopFocused(sb, title, focused)
 	if len(jobs) == 0 {
-		boxLineFocused(sb, ansiDim+"nothing running; `srv jobs` lists completed entries"+ansiReset, focused)
+		boxLineFocused(sb, ansi.Dim+"nothing running; `srv jobs` lists completed entries"+ansi.Reset, focused)
 		boxBottomFocused(sb, focused)
 		fmt.Fprintln(sb)
 		return
 	}
-	boxLineFocused(sb, ansiDim+"  ID            PROFILE     PID       AGE       COMMAND"+ansiReset, focused)
-	boxLineFocused(sb, ansiDim+strings.Repeat("-", dashboardContentWidth)+ansiReset, focused)
+	boxLineFocused(sb, ansi.Dim+"  ID            PROFILE     PID       AGE       COMMAND"+ansi.Reset, focused)
+	boxLineFocused(sb, ansi.Dim+strings.Repeat("-", dashboardContentWidth)+ansi.Reset, focused)
 	for i, j := range jobs {
 		cmd := fitPlain(j.Cmd, 42)
 		started := j.Started
@@ -1524,9 +1525,9 @@ func panelJobs(sb *strings.Builder, jobs []*JobRecord, st *uiState) {
 			started = fmtDuration(time.Since(t)) + " ago"
 		}
 		row := fmt.Sprintf("  %-12s  %-10s  %-8d  %-8s  %s",
-			dashName(truncID(j.ID)), ansiCyan+j.Profile+ansiReset, j.Pid, dashMeta(started), cmd)
+			dashName(truncID(j.ID)), ansi.Cyan+j.Profile+ansi.Reset, j.Pid, dashMeta(started), cmd)
 		if st != nil && st.isSelected("job", i) {
-			row = ansiYellow + ansiBold + "> " + ansiReset + ansiReverse + row[2:] + ansiReset
+			row = ansi.Yellow + ansi.Bold + "> " + ansi.Reset + ansi.Reverse + row[2:] + ansi.Reset
 		}
 		boxLineFocused(sb, row, focused)
 	}
@@ -1559,7 +1560,7 @@ func panelDetail(sb *strings.Builder, cfg *Config, jobs []*JobRecord, tunnelName
 		}
 	}
 	boxTop(sb, "detail")
-	boxLine(sb, ansiDim+"(no row selected -- move cursor with ↑/↓)"+ansiReset)
+	boxLine(sb, ansi.Dim+"(no row selected -- move cursor with ↑/↓)"+ansi.Reset)
 	boxBottom(sb)
 	fmt.Fprintln(sb)
 }
@@ -1572,11 +1573,11 @@ func panelDetail(sb *strings.Builder, cfg *Config, jobs []*JobRecord, tunnelName
 // when debugging "which Claude Code instance issued this call".
 func panelMCPDetail(sb *strings.Builder, tc mcpToolCall, mcp mcpStatus) {
 	boxTop(sb, "mcp call detail")
-	boxLine(sb, kvLine("tool", ansiYellow+ansiBold+tc.Name+ansiReset))
-	boxLine(sb, kvLine("duration", ansiMagenta+tc.Dur+ansiReset))
-	status := dashStatus("ok", ansiGreen)
+	boxLine(sb, kvLine("tool", ansi.Yellow+ansi.Bold+tc.Name+ansi.Reset))
+	boxLine(sb, kvLine("duration", ansi.Magenta+tc.Dur+ansi.Reset))
+	status := dashStatus("ok", ansi.Green)
 	if !tc.OK {
-		status = dashStatus("err", ansiRed)
+		status = dashStatus("err", ansi.Red)
 	}
 	boxLine(sb, kvLine("result", status))
 	boxLine(sb, kvLine("when", tc.When.Format("2006-01-02 15:04:05")+dashMeta(" ("+fmtDuration(time.Since(tc.When))+" ago)")))
@@ -1585,15 +1586,15 @@ func panelMCPDetail(sb *strings.Builder, tc mcpToolCall, mcp mcpStatus) {
 	if tc.PID == 0 {
 		pidLabel = dashMeta("(unknown)")
 	} else if pidIsActive(tc.PID, mcp.ActivePIDs) {
-		pidLabel = ansiGreen + ansiBold + pidLabel + ansiReset + dashMeta(" (alive)")
+		pidLabel = ansi.Green + ansi.Bold + pidLabel + ansi.Reset + dashMeta(" (alive)")
 	} else {
 		pidLabel = pidLabel + dashMeta(" (previous session)")
 	}
 	boxLine(sb, kvLine("server pid", pidLabel))
 
 	boxLine(sb, "")
-	boxLine(sb, ansiDim+"raw log: ~/.srv/mcp.log"+ansiReset)
-	boxLine(sb, ansiDim+"(read-only -- no actions available here)"+ansiReset)
+	boxLine(sb, ansi.Dim+"raw log: ~/.srv/mcp.log"+ansi.Reset)
+	boxLine(sb, ansi.Dim+"(read-only -- no actions available here)"+ansi.Reset)
 	boxBottom(sb)
 	fmt.Fprintln(sb)
 }
@@ -1616,7 +1617,7 @@ func pidIsActive(pid int, active []int) bool {
 func panelJobDetail(sb *strings.Builder, j *JobRecord) {
 	boxTop(sb, "job detail")
 	boxLine(sb, kvLine("id", dashName(j.ID)))
-	boxLine(sb, kvLine("profile", ansiCyan+j.Profile+ansiReset))
+	boxLine(sb, kvLine("profile", ansi.Cyan+j.Profile+ansi.Reset))
 	boxLine(sb, kvLine("pid", strconv.Itoa(j.Pid)))
 	started := j.Started
 	if t, ok := parseISOLike(j.Started); ok {
@@ -1630,12 +1631,12 @@ func panelJobDetail(sb *strings.Builder, j *JobRecord) {
 		boxLine(sb, kvLine("log", dashPath(fitPlain(j.Log, dashboardContentWidth-10))))
 	}
 	boxLine(sb, "")
-	boxLine(sb, ansiDim+"COMMAND:"+ansiReset)
+	boxLine(sb, ansi.Dim+"COMMAND:"+ansi.Reset)
 	for _, line := range wrapText(j.Cmd, dashboardContentWidth-2) {
 		boxLine(sb, "  "+line)
 	}
 	boxLine(sb, "")
-	boxLine(sb, ansiDim+"press "+ansiYellow+ansiBold+"k"+ansiReset+ansiDim+" to kill"+ansiReset)
+	boxLine(sb, ansi.Dim+"press "+ansi.Yellow+ansi.Bold+"k"+ansi.Reset+ansi.Dim+" to kill"+ansi.Reset)
 	boxBottom(sb)
 	fmt.Fprintln(sb)
 }
@@ -1648,16 +1649,16 @@ func panelTunnelDetail(sb *strings.Builder, name string, cfg *Config, st *uiStat
 	def := cfg.Tunnels[name]
 	if def == nil {
 		boxTop(sb, "tunnel detail")
-		boxLine(sb, ansiRed+"tunnel "+name+" not found in config"+ansiReset)
+		boxLine(sb, ansi.Red+"tunnel "+name+" not found in config"+ansi.Reset)
 		boxBottom(sb)
 		fmt.Fprintln(sb)
 		return
 	}
 	boxTop(sb, "tunnel detail")
 	boxLine(sb, kvLine("name", dashName(name)))
-	boxLine(sb, kvLine("type", ansiMagenta+def.Type+ansiReset))
+	boxLine(sb, kvLine("type", ansi.Magenta+def.Type+ansi.Reset))
 	boxLine(sb, kvLine("spec", dashPath(def.Spec)))
-	boxLine(sb, kvLine("profile", ansiCyan+tunnelProfileLabel(def)+ansiReset))
+	boxLine(sb, kvLine("profile", ansi.Cyan+tunnelProfileLabel(def)+ansi.Reset))
 	boxLine(sb, kvLine("autostart", boolLabel(def.Autostart)))
 	var active map[string]tunnelInfo
 	var errs map[string]string
@@ -1668,20 +1669,20 @@ func panelTunnelDetail(sb *strings.Builder, name string, cfg *Config, st *uiStat
 		active, errs = loadTunnelStatuses()
 	}
 	if a, ok := active[name]; ok {
-		boxLine(sb, kvLine("state", dashStatus("running", ansiGreen)))
+		boxLine(sb, kvLine("state", dashStatus("running", ansi.Green)))
 		boxLine(sb, kvLine("listen", dashPath(a.Listen)))
 	} else if msg, ok := errs[name]; ok {
-		boxLine(sb, kvLine("state", dashStatus("failed", ansiRed)))
+		boxLine(sb, kvLine("state", dashStatus("failed", ansi.Red)))
 		boxLine(sb, "")
-		boxLine(sb, ansiRed+ansiBold+"ERROR:"+ansiReset)
+		boxLine(sb, ansi.Red+ansi.Bold+"ERROR:"+ansi.Reset)
 		for _, line := range wrapText(msg, dashboardContentWidth-2) {
-			boxLine(sb, "  "+ansiRed+line+ansiReset)
+			boxLine(sb, "  "+ansi.Red+line+ansi.Reset)
 		}
 	} else {
-		boxLine(sb, kvLine("state", dashStatus("stopped", ansiDim)))
+		boxLine(sb, kvLine("state", dashStatus("stopped", ansi.Dim)))
 	}
 	boxLine(sb, "")
-	boxLine(sb, ansiDim+"press "+ansiYellow+ansiBold+"Space"+ansiReset+ansiDim+" up/down, "+ansiYellow+ansiBold+"x"+ansiReset+ansiDim+" remove"+ansiReset)
+	boxLine(sb, ansi.Dim+"press "+ansi.Yellow+ansi.Bold+"Space"+ansi.Reset+ansi.Dim+" up/down, "+ansi.Yellow+ansi.Bold+"x"+ansi.Reset+ansi.Dim+" remove"+ansi.Reset)
 	boxBottom(sb)
 	fmt.Fprintln(sb)
 }
@@ -1697,27 +1698,27 @@ func panelMCP(sb *strings.Builder, mcp mcpStatus, st *uiState) {
 	focused := st != nil && st.focusPane == "mcp"
 	boxTopFocused(sb, fmt.Sprintf("mcp %d", len(mcp.RecentTools)), focused)
 	if len(mcp.ActivePIDs) == 0 {
-		boxLineFocused(sb, kvPair("state", dashStatus("idle", ansiDim), "last", fmtDuration(time.Since(mcp.LastActive))+" ago"), focused)
+		boxLineFocused(sb, kvPair("state", dashStatus("idle", ansi.Dim), "last", fmtDuration(time.Since(mcp.LastActive))+" ago"), focused)
 	} else {
 		pids := make([]string, 0, len(mcp.ActivePIDs))
 		for _, p := range mcp.ActivePIDs {
 			pids = append(pids, strconv.Itoa(p))
 		}
-		boxLineFocused(sb, kvPair("state", dashStatus("running", ansiGreen), "pids", strings.Join(pids, ", ")), focused)
+		boxLineFocused(sb, kvPair("state", dashStatus("running", ansi.Green), "pids", strings.Join(pids, ", ")), focused)
 	}
 	if len(mcp.RecentTools) > 0 {
-		boxLineFocused(sb, ansiDim+"  TOOL                  DUR      STATE    AGE"+ansiReset, focused)
-		boxLineFocused(sb, ansiDim+strings.Repeat("-", dashboardContentWidth)+ansiReset, focused)
+		boxLineFocused(sb, ansi.Dim+"  TOOL                  DUR      STATE    AGE"+ansi.Reset, focused)
+		boxLineFocused(sb, ansi.Dim+strings.Repeat("-", dashboardContentWidth)+ansi.Reset, focused)
 		for i, tc := range mcp.RecentTools {
-			status := dashStatus("ok", ansiGreen)
+			status := dashStatus("ok", ansi.Green)
 			if !tc.OK {
-				status = dashStatus("err", ansiRed)
+				status = dashStatus("err", ansi.Red)
 			}
 			row := fmt.Sprintf("  %-20s  %-7s  %-7s  %s",
-				ansiYellow+tc.Name+ansiReset, ansiMagenta+tc.Dur+ansiReset, status,
+				ansi.Yellow+tc.Name+ansi.Reset, ansi.Magenta+tc.Dur+ansi.Reset, status,
 				dashMeta(fmtDuration(time.Since(tc.When))+" ago"))
 			if st != nil && st.isSelected("mcp", i) {
-				row = ansiYellow + ansiBold + "> " + ansiReset + ansiReverse + row[2:] + ansiReset
+				row = ansi.Yellow + ansi.Bold + "> " + ansi.Reset + ansi.Reverse + row[2:] + ansi.Reset
 			}
 			boxLineFocused(sb, row, focused)
 		}
@@ -1729,7 +1730,7 @@ func panelMCP(sb *strings.Builder, mcp mcpStatus, st *uiState) {
 func panelFooter(sb *strings.Builder, st *uiState) {
 	boxTop(sb, "help")
 	if st == nil {
-		boxLine(sb, ansiDim+"snapshot complete"+ansiReset)
+		boxLine(sb, ansi.Dim+"snapshot complete"+ansi.Reset)
 	} else if st.statusMsg != "" {
 		boxLine(sb, st.statusMsg)
 	} else {
@@ -1737,16 +1738,16 @@ func panelFooter(sb *strings.Builder, st *uiState) {
 		if focus == "" {
 			focus = "none"
 		}
-		boxLine(sb, kvPair("focus", ansiYellow+ansiBold+strings.ToUpper(focus)+ansiReset, "mode", "window navigation"))
+		boxLine(sb, kvPair("focus", ansi.Yellow+ansi.Bold+strings.ToUpper(focus)+ansi.Reset, "mode", "window navigation"))
 		switch focus {
 		case "tunnel":
-			boxLine(sb, "actions: "+ansiYellow+"↑/↓"+ansiReset+" move  "+ansiYellow+"space"+ansiReset+" up/down  "+ansiYellow+"x"+ansiReset+" remove  "+ansiYellow+"tab"+ansiReset+" next window  "+ansiYellow+"q"+ansiReset+" quit")
+			boxLine(sb, "actions: "+ansi.Yellow+"↑/↓"+ansi.Reset+" move  "+ansi.Yellow+"space"+ansi.Reset+" up/down  "+ansi.Yellow+"x"+ansi.Reset+" remove  "+ansi.Yellow+"tab"+ansi.Reset+" next window  "+ansi.Yellow+"q"+ansi.Reset+" quit")
 		case "job":
-			boxLine(sb, "actions: "+ansiYellow+"↑/↓"+ansiReset+" move  "+ansiYellow+"k"+ansiReset+" kill  "+ansiYellow+"tab"+ansiReset+" next window  "+ansiYellow+"q"+ansiReset+" quit")
+			boxLine(sb, "actions: "+ansi.Yellow+"↑/↓"+ansi.Reset+" move  "+ansi.Yellow+"k"+ansi.Reset+" kill  "+ansi.Yellow+"tab"+ansi.Reset+" next window  "+ansi.Yellow+"q"+ansi.Reset+" quit")
 		case "mcp":
-			boxLine(sb, "actions: "+ansiYellow+"↑/↓"+ansiReset+" move  "+ansiDim+"(read-only)"+ansiReset+"  "+ansiYellow+"tab"+ansiReset+" next window  "+ansiYellow+"q"+ansiReset+" quit")
+			boxLine(sb, "actions: "+ansi.Yellow+"↑/↓"+ansi.Reset+" move  "+ansi.Dim+"(read-only)"+ansi.Reset+"  "+ansi.Yellow+"tab"+ansi.Reset+" next window  "+ansi.Yellow+"q"+ansi.Reset+" quit")
 		default:
-			boxLine(sb, "actions: "+ansiYellow+"tab"+ansiReset+" choose window  "+ansiYellow+"r"+ansiReset+" refresh  "+ansiYellow+"q"+ansiReset+" quit")
+			boxLine(sb, "actions: "+ansi.Yellow+"tab"+ansi.Reset+" choose window  "+ansi.Yellow+"r"+ansi.Reset+" refresh  "+ansi.Yellow+"q"+ansi.Reset+" quit")
 		}
 	}
 	boxBottom(sb)
@@ -1773,35 +1774,35 @@ func renderConfirmPopup(sb *strings.Builder, c *uiConfirm) {
 	top := indent + "┌" + strings.Repeat("─", width-2) + "┐"
 	bot := indent + "└" + strings.Repeat("─", width-2) + "┘"
 	fmt.Fprintln(sb)
-	fmt.Fprintf(sb, "%s%s%s\n", ansiBold+ansiRed, top, ansiReset)
+	fmt.Fprintf(sb, "%s%s%s\n", ansi.Bold+ansi.Red, top, ansi.Reset)
 	fmt.Fprintf(sb, "%s│%s %s%s%s%s%s│%s\n",
-		ansiBold+ansiRed, ansiReset,
-		ansiBold+ansiRed, c.title, ansiReset,
+		ansi.Bold+ansi.Red, ansi.Reset,
+		ansi.Bold+ansi.Red, c.title, ansi.Reset,
 		strings.Repeat(" ", max(0, width-3-visualWidth(c.title))),
-		ansiBold+ansiRed, ansiReset)
+		ansi.Bold+ansi.Red, ansi.Reset)
 	fmt.Fprintf(sb, "%s│%s%s%s│%s\n",
-		ansiBold+ansiRed, ansiReset,
+		ansi.Bold+ansi.Red, ansi.Reset,
 		strings.Repeat(" ", width-2),
-		ansiBold+ansiRed, ansiReset)
+		ansi.Bold+ansi.Red, ansi.Reset)
 	for _, line := range c.body {
 		pad := max(0, width-3-visualWidth(line))
 		fmt.Fprintf(sb, "%s│%s %s%s%s│%s\n",
-			ansiBold+ansiRed, ansiReset,
+			ansi.Bold+ansi.Red, ansi.Reset,
 			line, strings.Repeat(" ", pad),
-			ansiBold+ansiRed, ansiReset)
+			ansi.Bold+ansi.Red, ansi.Reset)
 	}
 	fmt.Fprintf(sb, "%s│%s%s%s│%s\n",
-		ansiBold+ansiRed, ansiReset,
+		ansi.Bold+ansi.Red, ansi.Reset,
 		strings.Repeat(" ", width-2),
-		ansiBold+ansiRed, ansiReset)
-	choice := ansiYellow + ansiBold + "[Y]" + ansiReset + " confirm    " +
-		ansiYellow + ansiBold + "[N/Esc]" + ansiReset + " cancel"
+		ansi.Bold+ansi.Red, ansi.Reset)
+	choice := ansi.Yellow + ansi.Bold + "[Y]" + ansi.Reset + " confirm    " +
+		ansi.Yellow + ansi.Bold + "[N/Esc]" + ansi.Reset + " cancel"
 	pad := max(0, width-3-visualWidth("[Y] confirm    [N/Esc] cancel"))
 	fmt.Fprintf(sb, "%s│%s %s%s%s│%s\n",
-		ansiBold+ansiRed, ansiReset,
+		ansi.Bold+ansi.Red, ansi.Reset,
 		choice, strings.Repeat(" ", pad),
-		ansiBold+ansiRed, ansiReset)
-	fmt.Fprintf(sb, "%s%s%s\n", ansiBold+ansiRed, bot, ansiReset)
+		ansi.Bold+ansi.Red, ansi.Reset)
+	fmt.Fprintf(sb, "%s%s%s\n", ansi.Bold+ansi.Red, bot, ansi.Reset)
 }
 
 // visualWidth returns the *visible* column count of s with ANSI
@@ -1840,11 +1841,11 @@ func max(a, b int) int {
 func renderJobDetail(j *JobRecord, st *uiState) string {
 	var sb strings.Builder
 	fmt.Fprintf(&sb, "%sJOB DETAIL%s  %s%s%s\n",
-		ansiBold+ansiMagenta, ansiReset, ansiDim, j.ID, ansiReset)
-	fmt.Fprintf(&sb, "%s%s%s\n\n", ansiDim, dashboardRule, ansiReset)
+		ansi.Bold+ansi.Magenta, ansi.Reset, ansi.Dim, j.ID, ansi.Reset)
+	fmt.Fprintf(&sb, "%s%s%s\n\n", ansi.Dim, dashboardRule, ansi.Reset)
 
 	dashField(&sb, "id", dashName(j.ID))
-	dashField(&sb, "profile", ansiCyan+j.Profile+ansiReset)
+	dashField(&sb, "profile", ansi.Cyan+j.Profile+ansi.Reset)
 	dashField(&sb, "pid", strconv.Itoa(j.Pid))
 	started := j.Started
 	if t, ok := parseISOLike(j.Started); ok {
@@ -1858,7 +1859,7 @@ func renderJobDetail(j *JobRecord, st *uiState) string {
 		dashField(&sb, "log", dashPath(j.Log))
 	}
 	fmt.Fprintln(&sb)
-	fmt.Fprintf(&sb, "  %sCOMMAND:%s\n", ansiDim, ansiReset)
+	fmt.Fprintf(&sb, "  %sCOMMAND:%s\n", ansi.Dim, ansi.Reset)
 	// Wrap the command across multiple lines so a long pipeline
 	// stays visible without horizontal scrolling.
 	for _, line := range wrapText(j.Cmd, 76) {
@@ -1866,15 +1867,15 @@ func renderJobDetail(j *JobRecord, st *uiState) string {
 	}
 	fmt.Fprintln(&sb)
 
-	fmt.Fprintf(&sb, "%s%s%s\n", ansiDim, dashboardRule, ansiReset)
+	fmt.Fprintf(&sb, "%s%s%s\n", ansi.Dim, dashboardRule, ansi.Reset)
 	if st != nil && st.confirm != nil {
 		renderConfirmPopup(&sb, st.confirm)
 		return sb.String()
 	}
 	fmt.Fprintf(&sb, "Keys: %sq%s back   %sk%s kill   %ssrv logs %s -f%s tails remotely\n",
-		ansiYellow+ansiBold, ansiReset,
-		ansiYellow+ansiBold, ansiReset,
-		ansiDim, j.ID, ansiReset)
+		ansi.Yellow+ansi.Bold, ansi.Reset,
+		ansi.Yellow+ansi.Bold, ansi.Reset,
+		ansi.Dim, j.ID, ansi.Reset)
 	if st != nil && st.statusMsg != "" {
 		fmt.Fprintf(&sb, "%s\n", st.statusMsg)
 	}
@@ -1890,40 +1891,40 @@ func renderTunnelDetail(name string, cfg *Config, st *uiState) string {
 	}
 	var sb strings.Builder
 	fmt.Fprintf(&sb, "%sTUNNEL DETAIL%s  %s%s%s\n",
-		ansiBold+ansiMagenta, ansiReset, ansiDim, name, ansiReset)
-	fmt.Fprintf(&sb, "%s%s%s\n\n", ansiDim, dashboardRule, ansiReset)
+		ansi.Bold+ansi.Magenta, ansi.Reset, ansi.Dim, name, ansi.Reset)
+	fmt.Fprintf(&sb, "%s%s%s\n\n", ansi.Dim, dashboardRule, ansi.Reset)
 	dashField(&sb, "name", dashName(name))
-	dashField(&sb, "type", ansiMagenta+def.Type+ansiReset)
+	dashField(&sb, "type", ansi.Magenta+def.Type+ansi.Reset)
 	dashField(&sb, "spec", dashPath(def.Spec))
-	dashField(&sb, "profile", ansiCyan+tunnelProfileLabel(def)+ansiReset)
+	dashField(&sb, "profile", ansi.Cyan+tunnelProfileLabel(def)+ansi.Reset)
 	dashField(&sb, "autostart", boolLabel(def.Autostart))
 	active, errs := loadTunnelStatuses()
 	if a, ok := active[name]; ok {
-		dashField(&sb, "state", dashStatus("running", ansiGreen))
+		dashField(&sb, "state", dashStatus("running", ansi.Green))
 		dashField(&sb, "listen", dashPath(a.Listen))
 	} else if msg, ok := errs[name]; ok {
-		dashField(&sb, "state", dashStatus("failed", ansiRed))
+		dashField(&sb, "state", dashStatus("failed", ansi.Red))
 		// Errors can be wordy ("dial profile X: ssh: handshake
 		// failed: connect to ... timeout"). Show on its own block
 		// rather than squeezing into one field row.
 		fmt.Fprintln(&sb)
-		fmt.Fprintf(&sb, "  %sERROR:%s\n", ansiRed+ansiBold, ansiReset)
+		fmt.Fprintf(&sb, "  %sERROR:%s\n", ansi.Red+ansi.Bold, ansi.Reset)
 		for _, line := range wrapText(msg, 72) {
-			fmt.Fprintf(&sb, "    %s%s%s\n", ansiRed, line, ansiReset)
+			fmt.Fprintf(&sb, "    %s%s%s\n", ansi.Red, line, ansi.Reset)
 		}
 	} else {
-		dashField(&sb, "state", dashStatus("stopped", ansiDim))
+		dashField(&sb, "state", dashStatus("stopped", ansi.Dim))
 	}
 	fmt.Fprintln(&sb)
-	fmt.Fprintf(&sb, "%s%s%s\n", ansiDim, dashboardRule, ansiReset)
+	fmt.Fprintf(&sb, "%s%s%s\n", ansi.Dim, dashboardRule, ansi.Reset)
 	if st != nil && st.confirm != nil {
 		renderConfirmPopup(&sb, st.confirm)
 		return sb.String()
 	}
 	fmt.Fprintf(&sb, "Keys: %sq%s back   %sSpace%s toggle up/down   %sx%s remove\n",
-		ansiYellow+ansiBold, ansiReset,
-		ansiYellow+ansiBold, ansiReset,
-		ansiYellow+ansiBold, ansiReset)
+		ansi.Yellow+ansi.Bold, ansi.Reset,
+		ansi.Yellow+ansi.Bold, ansi.Reset,
+		ansi.Yellow+ansi.Bold, ansi.Reset)
 	if st != nil && st.statusMsg != "" {
 		fmt.Fprintf(&sb, "%s\n", st.statusMsg)
 	}
@@ -1932,9 +1933,9 @@ func renderTunnelDetail(name string, cfg *Config, st *uiState) string {
 
 func boolLabel(b bool) string {
 	if b {
-		return ansiGreen + ansiBold + "yes" + ansiReset
+		return ansi.Green + ansi.Bold + "yes" + ansi.Reset
 	}
-	return ansiDim + "no" + ansiReset
+	return ansi.Dim + "no" + ansi.Reset
 }
 
 // wrapText breaks `s` into lines of at most `width` bytes, splitting
@@ -2026,30 +2027,30 @@ const dashboardSubRule = "------------------------------------------------------
 
 func dashHeader(sb *strings.Builder, st *uiState) {
 	boxTop(sb, "srv")
-	boxLine(sb, ansiBold+ansiMagenta+"SRV UI"+ansiReset+"  "+ansiDim+"current-shell control dashboard"+ansiReset)
+	boxLine(sb, ansi.Bold+ansi.Magenta+"SRV UI"+ansi.Reset+"  "+ansi.Dim+"current-shell control dashboard"+ansi.Reset)
 	if st == nil {
 		// Non-TTY snapshot mode: no interactive keys to advertise.
-		boxLine(sb, ansiDim+"snapshot mode (no tty)"+ansiReset)
+		boxLine(sb, ansi.Dim+"snapshot mode (no tty)"+ansi.Reset)
 		boxBottom(sb)
 		fmt.Fprintln(sb)
 		return
 	}
 	fmt.Fprintf(sb,
 		"Keys: %sq%s quit  %sr%s redraw  %s↑/↓%s select  %sk%s kill\n\n",
-		ansiYellow+ansiBold, ansiReset,
-		ansiYellow+ansiBold, ansiReset,
-		ansiYellow+ansiBold, ansiReset,
-		ansiYellow+ansiBold, ansiReset,
+		ansi.Yellow+ansi.Bold, ansi.Reset,
+		ansi.Yellow+ansi.Bold, ansi.Reset,
+		ansi.Yellow+ansi.Bold, ansi.Reset,
+		ansi.Yellow+ansi.Bold, ansi.Reset,
 	)
 }
 
 func dashSection(sb *strings.Builder, title string) {
-	fmt.Fprintf(sb, "%s== %s ==%s\n", ansiBold+ansiCyan, strings.ToUpper(title), ansiReset)
+	fmt.Fprintf(sb, "%s== %s ==%s\n", ansi.Bold+ansi.Cyan, strings.ToUpper(title), ansi.Reset)
 }
 
 func dashSectionCount(sb *strings.Builder, title string, count int) {
 	fmt.Fprintf(sb, "%s== %s %s(%d)%s ==%s\n",
-		ansiBold+ansiCyan, strings.ToUpper(title), ansiDim, count, ansiReset+ansiBold+ansiCyan, ansiReset)
+		ansi.Bold+ansi.Cyan, strings.ToUpper(title), ansi.Dim, count, ansi.Reset+ansi.Bold+ansi.Cyan, ansi.Reset)
 }
 
 func dashField(sb *strings.Builder, key, value string) {
@@ -2057,22 +2058,22 @@ func dashField(sb *strings.Builder, key, value string) {
 }
 
 func dashStatus(label, color string) string {
-	return color + ansiBold + "[" + strings.ToUpper(label) + "]" + ansiReset
+	return color + ansi.Bold + "[" + strings.ToUpper(label) + "]" + ansi.Reset
 }
 
 func dashName(s string) string {
-	return ansiYellow + ansiBold + s + ansiReset
+	return ansi.Yellow + ansi.Bold + s + ansi.Reset
 }
 
 func dashMeta(s string) string {
 	if s == "" {
 		return ""
 	}
-	return ansiDim + s + ansiReset
+	return ansi.Dim + s + ansi.Reset
 }
 
 func dashPath(s string) string {
-	return ansiGreen + s + ansiReset
+	return ansi.Green + s + ansi.Reset
 }
 
 func dashTableHeader(sb *strings.Builder, cols ...string) {
@@ -2081,17 +2082,17 @@ func dashTableHeader(sb *strings.Builder, cols ...string) {
 		if i > 0 {
 			fmt.Fprint(sb, "  ")
 		}
-		fmt.Fprintf(sb, "%s%s%s", ansiDim, col, ansiReset)
+		fmt.Fprintf(sb, "%s%s%s", ansi.Dim, col, ansi.Reset)
 	}
 	fmt.Fprintln(sb)
-	fmt.Fprintf(sb, "  %s%s%s\n", ansiDim, dashboardSubRule, ansiReset)
+	fmt.Fprintf(sb, "  %s%s%s\n", ansi.Dim, dashboardSubRule, ansi.Reset)
 }
 
 func dashActive(sb *strings.Builder, cfg *Config) {
 	dashSection(sb, "Active")
 	name, prof, err := ResolveProfile(cfg, "")
 	if err != nil {
-		dashField(sb, "state", dashStatus("no profile", ansiDim))
+		dashField(sb, "state", dashStatus("no profile", ansi.Dim))
 		fmt.Fprintln(sb)
 		return
 	}
@@ -2103,7 +2104,7 @@ func dashActive(sb *strings.Builder, cfg *Config) {
 		target += ":" + strconv.Itoa(prof.GetPort())
 	}
 	dashField(sb, "profile", dashName(name))
-	dashField(sb, "target", ansiCyan+target+ansiReset)
+	dashField(sb, "target", ansi.Cyan+target+ansi.Reset)
 	cwd := GetCwd(name, prof)
 	dashField(sb, "cwd", dashPath(cwd))
 	if pf := resolveProjectFile(); pf != nil {
@@ -2116,22 +2117,22 @@ func dashDaemon(sb *strings.Builder) {
 	dashSection(sb, "Daemon")
 	conn := daemonDial(300 * time.Millisecond)
 	if conn == nil {
-		dashField(sb, "state", dashStatus("stopped", ansiDim))
+		dashField(sb, "state", dashStatus("stopped", ansi.Dim))
 		fmt.Fprintln(sb)
 		return
 	}
 	defer conn.Close()
 	resp, err := daemonCall(conn, daemonRequest{Op: "status"}, time.Second)
 	if err != nil || resp == nil || !resp.OK {
-		dashField(sb, "state", dashStatus("unreachable", ansiRed))
+		dashField(sb, "state", dashStatus("unreachable", ansi.Red))
 		fmt.Fprintln(sb)
 		return
 	}
-	dashField(sb, "state", dashStatus("running", ansiGreen))
+	dashField(sb, "state", dashStatus("running", ansi.Green))
 	dashField(sb, "uptime", fmtDuration(time.Duration(resp.Uptime)*time.Second))
 	dashField(sb, "pooled", strconv.Itoa(len(resp.Profiles)))
 	if len(resp.Profiles) > 0 {
-		dashField(sb, "profiles", ansiCyan+strings.Join(resp.Profiles, ", ")+ansiReset)
+		dashField(sb, "profiles", ansi.Cyan+strings.Join(resp.Profiles, ", ")+ansi.Reset)
 	}
 	fmt.Fprintln(sb)
 }
@@ -2150,7 +2151,7 @@ func dashGroups(sb *strings.Builder, cfg *Config) {
 	for _, n := range names {
 		members := cfg.Groups[n]
 		fmt.Fprintf(sb, "  %-12s  %s%2d%s  %s\n",
-			dashName(n), ansiMagenta+ansiBold, len(members), ansiReset, ansiCyan+strings.Join(members, ", ")+ansiReset)
+			dashName(n), ansi.Magenta+ansi.Bold, len(members), ansi.Reset, ansi.Cyan+strings.Join(members, ", ")+ansi.Reset)
 	}
 	fmt.Fprintln(sb)
 }
@@ -2172,32 +2173,32 @@ func dashTunnels(sb *strings.Builder, cfg *Config, names []string, st *uiState) 
 	dashTableHeader(sb, "  NAME          TYPE     SPEC / STATE")
 	for i, n := range names {
 		def := cfg.Tunnels[n]
-		status := dashStatus("stopped", ansiDim)
+		status := dashStatus("stopped", ansi.Dim)
 		extra := ""
 		var errMsg string
 		if a, ok := active[n]; ok {
-			status = dashStatus("running", ansiGreen)
+			status = dashStatus("running", ansi.Green)
 			extra = "  listen=" + a.Listen
 		} else if msg, ok := errs[n]; ok {
-			status = dashStatus("failed", ansiRed)
+			status = dashStatus("failed", ansi.Red)
 			errMsg = msg
 		}
 		flag := ""
 		if def.Autostart {
-			flag = " " + dashStatus("autostart", ansiCyan)
+			flag = " " + dashStatus("autostart", ansi.Cyan)
 		}
 		if extra != "" {
-			extra = ansiDim + extra + ansiReset
+			extra = ansi.Dim + extra + ansi.Reset
 		}
 		marker := "   "
 		selected := st != nil && st.isSelected("tunnel", i)
 		if selected {
-			marker = ansiBold + ansiYellow + " > " + ansiReset
+			marker = ansi.Bold + ansi.Yellow + " > " + ansi.Reset
 		}
 		row := fmt.Sprintf("%-12s  %-7s  %s  %s%s%s",
-			dashName(n), ansiMagenta+def.Type+ansiReset, dashPath(def.Spec), status, extra, flag)
+			dashName(n), ansi.Magenta+def.Type+ansi.Reset, dashPath(def.Spec), status, extra, flag)
 		if selected {
-			fmt.Fprintf(sb, "%s%s%s%s\n", marker, ansiReverse, row, ansiReset)
+			fmt.Fprintf(sb, "%s%s%s%s\n", marker, ansi.Reverse, row, ansi.Reset)
 		} else {
 			fmt.Fprintf(sb, "%s%s\n", marker, row)
 		}
@@ -2205,7 +2206,7 @@ func dashTunnels(sb *strings.Builder, cfg *Config, names []string, st *uiState) 
 			// Indent under the row so it groups visually; truncate
 			// to keep the table tight.
 			line := truncOneLine(errMsg, 70)
-			fmt.Fprintf(sb, "      %s%s%s\n", ansiRed, line, ansiReset)
+			fmt.Fprintf(sb, "      %s%s%s\n", ansi.Red, line, ansi.Reset)
 		}
 	}
 	fmt.Fprintln(sb)
@@ -2229,14 +2230,14 @@ func dashJobs(sb *strings.Builder, jobs []*JobRecord, st *uiState) {
 	}
 	if hidden > 0 {
 		fmt.Fprintf(sb, "%s== JOBS %s(%d, %d completed hidden -- see %ssrv jobs%s%s)%s ==%s\n",
-			ansiBold+ansiCyan, ansiDim, len(jobs), hidden,
-			ansiYellow+ansiBold, ansiReset+ansiDim, "",
-			ansiReset+ansiBold+ansiCyan, ansiReset)
+			ansi.Bold+ansi.Cyan, ansi.Dim, len(jobs), hidden,
+			ansi.Yellow+ansi.Bold, ansi.Reset+ansi.Dim, "",
+			ansi.Reset+ansi.Bold+ansi.Cyan, ansi.Reset)
 	} else {
 		dashSectionCount(sb, "Jobs", len(jobs))
 	}
 	if len(jobs) == 0 {
-		fmt.Fprintf(sb, "  %s(nothing running)%s\n\n", ansiDim, ansiReset)
+		fmt.Fprintf(sb, "  %s(nothing running)%s\n\n", ansi.Dim, ansi.Reset)
 		return
 	}
 	dashTableHeader(sb, "  ID            PROFILE     PID       AGE       COMMAND")
@@ -2252,14 +2253,14 @@ func dashJobs(sb *strings.Builder, jobs []*JobRecord, st *uiState) {
 		marker := "   "
 		selected := st != nil && st.isSelected("job", i)
 		if selected {
-			marker = ansiBold + ansiYellow + " > " + ansiReset
+			marker = ansi.Bold + ansi.Yellow + " > " + ansi.Reset
 		}
 		row := fmt.Sprintf("%-12s  %-10s  %-8d  %-8s  %s",
-			dashName(truncID(j.ID)), ansiCyan+j.Profile+ansiReset, j.Pid, dashMeta(started), cmd)
+			dashName(truncID(j.ID)), ansi.Cyan+j.Profile+ansi.Reset, j.Pid, dashMeta(started), cmd)
 		if selected {
 			// Reverse-video the row content so the selection is
 			// readable on terminals that drop the cursor marker.
-			fmt.Fprintf(sb, "%s%s%s%s\n", marker, ansiReverse, row, ansiReset)
+			fmt.Fprintf(sb, "%s%s%s%s\n", marker, ansi.Reverse, row, ansi.Reset)
 		} else {
 			fmt.Fprintf(sb, "%s%s\n", marker, row)
 		}
@@ -2292,47 +2293,47 @@ func dashMCP(sb *strings.Builder) {
 		// Log exists but no recent activity / no live pid. Show that
 		// MCP is idle plus the most recent activity for context.
 		if !st.LastActive.IsZero() {
-			dashField(sb, "state", dashStatus("idle", ansiDim))
+			dashField(sb, "state", dashStatus("idle", ansi.Dim))
 			dashField(sb, "last", fmtDuration(time.Since(st.LastActive))+" ago")
 		} else {
-			dashField(sb, "state", dashStatus("idle", ansiDim))
+			dashField(sb, "state", dashStatus("idle", ansi.Dim))
 		}
 	} else {
 		pids := make([]string, 0, len(st.ActivePIDs))
 		for _, p := range st.ActivePIDs {
 			pids = append(pids, strconv.Itoa(p))
 		}
-		dashField(sb, "state", dashStatus("running", ansiGreen))
+		dashField(sb, "state", dashStatus("running", ansi.Green))
 		dashField(sb, "pids", strings.Join(pids, ", "))
 	}
 	if len(st.RecentTools) > 0 {
 		fmt.Fprintln(sb)
 		dashTableHeader(sb, "TOOL                  DUR      STATE    AGE")
 		for _, tc := range st.RecentTools {
-			status := dashStatus("ok", ansiGreen)
+			status := dashStatus("ok", ansi.Green)
 			if !tc.OK {
-				status = dashStatus("err", ansiRed)
+				status = dashStatus("err", ansi.Red)
 			}
 			age := dashMeta(fmtDuration(time.Since(tc.When)) + " ago")
-			fmt.Fprintf(sb, "  %-20s  %-7s  %-7s  %s\n", ansiYellow+tc.Name+ansiReset, ansiMagenta+tc.Dur+ansiReset, status, age)
+			fmt.Fprintf(sb, "  %-20s  %-7s  %-7s  %s\n", ansi.Yellow+tc.Name+ansi.Reset, ansi.Magenta+tc.Dur+ansi.Reset, status, age)
 		}
 	}
 	fmt.Fprintln(sb)
 }
 
 func dashFooter(sb *strings.Builder, st *uiState) {
-	fmt.Fprintf(sb, "%s%s%s\n", ansiDim, dashboardRule, ansiReset)
+	fmt.Fprintf(sb, "%s%s%s\n", ansi.Dim, dashboardRule, ansi.Reset)
 	if st == nil {
-		fmt.Fprintf(sb, "%ssnapshot complete%s\n", ansiDim, ansiReset)
+		fmt.Fprintf(sb, "%ssnapshot complete%s\n", ansi.Dim, ansi.Reset)
 		return
 	}
 	// Confirm popup renders elsewhere (centered box appended to the
 	// dashboard); the footer only needs the regular key hints.
 	fmt.Fprintf(sb, "Keys: %sq%s quit  %sr%s redraw  %s↑/↓%s move  %sk%s kill\n",
-		ansiYellow+ansiBold, ansiReset,
-		ansiYellow+ansiBold, ansiReset,
-		ansiYellow+ansiBold, ansiReset,
-		ansiYellow+ansiBold, ansiReset,
+		ansi.Yellow+ansi.Bold, ansi.Reset,
+		ansi.Yellow+ansi.Bold, ansi.Reset,
+		ansi.Yellow+ansi.Bold, ansi.Reset,
+		ansi.Yellow+ansi.Bold, ansi.Reset,
 	)
 	if st.statusMsg != "" {
 		fmt.Fprintf(sb, "%s\n", st.statusMsg)

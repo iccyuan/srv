@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"os/signal"
+	"srv/internal/ansi"
 	"srv/internal/srvtty"
 	"strconv"
 	"strings"
@@ -108,11 +109,11 @@ func buildWatchFrame(cmd, profile string, interval, latency time.Duration, res *
 	var sb strings.Builder
 	now := time.Now().Format("15:04:05")
 	fmt.Fprintf(&sb, "%sEvery %s on %s%s   %s   %s$ %s%s\n\n",
-		ansiBold, fmtSecs(interval), profile, ansiReset, now,
-		ansiDim, cmd, ansiReset)
+		ansi.Bold, fmtSecs(interval), profile, ansi.Reset, now,
+		ansi.Dim, cmd, ansi.Reset)
 	if runErr != nil {
 		fmt.Fprintf(&sb, "%s[srv watch: capture failed: %v]%s\n",
-			ansiDim, runErr, ansiReset)
+			ansi.Dim, runErr, ansi.Reset)
 		return sb.String()
 	}
 	if res == nil {
@@ -133,7 +134,7 @@ func buildWatchFrame(cmd, profile string, interval, latency time.Duration, res *
 		sb.WriteByte('\n')
 	}
 	fmt.Fprintf(&sb, "%s[exit %d  capture %.2fs]%s\n",
-		ansiDim, res.ExitCode, latency.Seconds(), ansiReset)
+		ansi.Dim, res.ExitCode, latency.Seconds(), ansi.Reset)
 	return sb.String()
 }
 
@@ -151,9 +152,9 @@ func highlightDiffLines(current, prev string) string {
 		if i < len(prevLines) && prevLines[i] == line {
 			sb.WriteString(line)
 		} else {
-			sb.WriteString(ansiReverse)
+			sb.WriteString(ansi.Reverse)
 			sb.WriteString(line)
-			sb.WriteString(ansiReset)
+			sb.WriteString(ansi.Reset)
 		}
 		if i < len(curLines)-1 {
 			sb.WriteByte('\n')
