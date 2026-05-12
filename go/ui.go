@@ -13,7 +13,7 @@ import (
 
 // uiRow names a selectable row in the dashboard. The cursor is a
 // single index into a flat list of uiRows assembled in display order
-// (Tunnels first, then Jobs) so j/k walks visually top-down across
+// (Tunnels first, then Jobs) so ↓/↑ walks visually top-down across
 // the two interactive sections without the user having to switch
 // "focused pane" themselves.
 type uiRow struct {
@@ -44,7 +44,6 @@ type uiState struct {
 	mcpCursor    int        // index within the mcp recent-tools window
 	detailMode   bool       // showing the per-row detail panel
 	confirm      *uiConfirm // non-nil = popup is up, awaiting Y/N
-	showAll      bool       // include completed (`.exit` marker present) jobs
 	statusMsg    string     // transient line in the footer (kill result, etc.)
 	lastFrame    string
 	prevLines    int
@@ -55,7 +54,16 @@ type uiState struct {
 	// so we never hide a job whose status we couldn't probe.
 	liveness      map[string]bool
 	livenessFresh time.Time
-	hiddenJobs    int // filtered-out count for the footer hint
+	hiddenJobs    int // filtered-out exited-jobs count for the title hint
+	// Snapshot of disk-backed state so rapid cursor / pane switches
+	// don't re-read config.toml + jobs.json + mcp.log (~50ms total)
+	// on every keystroke. Refreshed on tick, on forceRedraw, or when
+	// older than snapTTL. snapMCP holds the full status so both the
+	// list and the detail panel can read ActivePIDs without re-tailing.
+	snapCfg  *Config
+	snapJobs []*JobRecord
+	snapMCP  mcpStatus
+	snapAt   time.Time
 }
 
 // currentRow returns the uiRow under the cursor, or a zero uiRow
@@ -121,31 +129,26 @@ func countUIRows(rows []uiRow) (tunnels, jobs, mcp int) {
 // should foreground. `srv sessions list` is still there for the full
 // view.
 //
-// Jobs are interactive: select with ↑/↓ (or j/k), Enter for the full
-// detail panel, K to kill the selected job (one-key Y confirmation).
-// Everything else is read-only; no inline tunnel toggle / group edit
-// because those have clean subcommand surfaces and would invite the
-// undo / confirmation rabbit hole.
+// Jobs are interactive: select with ↑/↓, k to kill the selected job
+// (one-key Y confirmation). Everything else is read-only; no inline
+// tunnel toggle / group edit because those have clean subcommand
+// surfaces and would invite the undo / confirmation rabbit hole.
 //
 // Refresh policy: ticks every 2 seconds, but only writes to the
 // terminal when the rendered content actually changed. That keeps
 // the screen perfectly still on an idle dashboard (no per-tick
 // flicker) while still picking up changes from `srv group set` etc.
-// in another shell within ~2s.
+// in another shell within ~2s. Disk-backed state (config, jobs, mcp
+// log) is snapshotted so rapid cursor / pane switches don't re-read
+// the files on every keystroke.
 //
 // Keys (dashboard mode):
 //
 //	q / Ctrl-C    exit
 //	r             force a redraw
-//	j / ↓         select next job
-//	k / ↑         select previous job
-//	Enter         open the detail panel for the selected job
-//	K             kill the selected job (arms a Y/N confirm)
-//
-// Keys (detail mode):
-//
-//	q / any       back to dashboard
-//	K             kill (still requires Y confirm)
+//	↑ / ↓         move cursor within the focused window
+//	tab / h / l   switch between windows
+//	k             kill the selected job (arms a Y/N confirm)
 func cmdUI(cfg *Config) error {
 	if !isStdinTTY() {
 		// Without a TTY there's no way to read keys; degrade to a
@@ -180,6 +183,12 @@ func cmdUI(cfg *Config) error {
 	st := &uiState{forceRedraw: true, cursor: 0, liveness: map[string]bool{}}
 	const refreshEvery = 2 * time.Second
 	const livenessTTL = 10 * time.Second
+	// snapTTL bounds how long the on-disk snapshot may be reused
+	// between keystrokes. Matches refreshEvery so a 2s idle tick
+	// naturally re-reads, while a flurry of cursor moves reuses the
+	// snapshot and stays snappy (the three disk reads otherwise add
+	// ~50ms per keystroke).
+	const snapTTL = refreshEvery
 
 	for {
 		// Track terminal width so a resize lands cleanly on the next
@@ -190,13 +199,26 @@ func cmdUI(cfg *Config) error {
 			st.forceRedraw = true
 		}
 
-		// Reload config and jobs each loop so edits from another
-		// terminal show up on the next refresh.
-		fresh, _ := LoadConfig()
+		// Refresh the snapshot only when the cache is older than
+		// snapTTL. handleUIKey zeroes snapAt to force-invalidate after
+		// destructive actions (kill / tunnel up-down) or on `r`; the
+		// 2s idle tick falls through because snapAt was set < 2s ago.
+		// Cursor and pane moves don't touch snapAt at all, so they
+		// reuse the cached reads -- the visible latency the user
+		// notices when MCP-switching.
+		if st.snapCfg == nil || st.snapAt.IsZero() || time.Since(st.snapAt) > snapTTL {
+			if fresh, _ := LoadConfig(); fresh != nil {
+				st.snapCfg = fresh
+			}
+			st.snapJobs = currentJobs()
+			st.snapMCP = readMCPStatus()
+			st.snapAt = time.Now()
+		}
+		fresh := st.snapCfg
 		if fresh == nil {
 			fresh = cfg
 		}
-		allJobs := currentJobs()
+		allJobs := st.snapJobs
 
 		// Liveness: refresh from the remote whenever it's gone stale
 		// (or whenever a forced redraw signals the user wants fresh
@@ -207,27 +229,24 @@ func cmdUI(cfg *Config) error {
 			st.livenessFresh = time.Now()
 		}
 
-		// Filter to active jobs unless the user asked for the full
-		// list via 'a'. Active = no `.exit` marker yet (or liveness
-		// unknown, e.g. profile down). This matches the semantics
-		// `wait_job` uses to decide "completed".
+		// Filter to active jobs only. Exited rows ("`.exit` marker
+		// present" — same semantics `wait_job` uses for "completed")
+		// are hidden so the dashboard stays focused on what's
+		// running; the full list lives in `srv jobs`.
 		jobs := allJobs
 		hidden := 0
-		if !st.showAll {
-			kept := allJobs[:0]
-			for _, j := range allJobs {
-				if alive, ok := st.liveness[j.ID]; ok && !alive {
-					hidden++
-					continue
-				}
-				kept = append(kept, j)
+		kept := allJobs[:0]
+		for _, j := range allJobs {
+			if alive, ok := st.liveness[j.ID]; ok && !alive {
+				hidden++
+				continue
 			}
-			jobs = kept
+			kept = append(kept, j)
 		}
+		jobs = kept
 		tunnelNames := sortedTunnelNames(fresh)
 		st.hiddenJobs = hidden
-		mcpRecent := readMCPStatus().RecentTools
-		st.rows = buildSelectableRows(tunnelNames, jobs, mcpRecent)
+		st.rows = buildSelectableRows(tunnelNames, jobs, st.snapMCP.RecentTools)
 		clampCursor(st)
 
 		// Detail is now part of the dashboard's right column,
@@ -453,9 +472,9 @@ func cyclePane(st *uiState, dir int) {
 // (1 = down, -1 = up). At pane boundaries the cursor automatically
 // crosses into the next non-empty section (down past last row
 // jumps to the top of the next pane; up past first row jumps to
-// the bottom of the previous pane). Plain j/k or arrow keys
-// therefore walk every selectable row across all three panes
-// without the user having to press Tab.
+// the bottom of the previous pane). Arrow keys therefore walk every
+// selectable row across all three panes without the user having to
+// press Tab.
 func moveFocusedRow(st *uiState, delta int) {
 	if len(st.rows) == 0 {
 		return
@@ -533,8 +552,8 @@ func indexOf(xs []string, v string) int {
 // remote kill, tunnel up/down, status messages) are confined here.
 //
 // Precedence: an active confirmation popup eats every key until it
-// resolves (Y = run, anything else = cancel), so a stray j/k can't
-// accidentally trigger a different action while a "kill?" is up.
+// resolves (Y = run, anything else = cancel), so a stray arrow press
+// can't accidentally trigger a different action while a "kill?" is up.
 func handleUIKey(b byte, st *uiState, jobs []*JobRecord, tunnelNames []string, cfg *Config, kr *keyReader) bool {
 	if st.confirm != nil {
 		yes := b == 'y' || b == 'Y'
@@ -550,6 +569,10 @@ func handleUIKey(b byte, st *uiState, jobs []*JobRecord, tunnelNames []string, c
 				st.statusMsg = ansiGreen + title + ": " + msg + ansiReset
 			}
 			st.detailMode = false
+			// Destructive action just touched jobs/tunnels on disk;
+			// invalidate the snapshot so the next render reflects it
+			// instead of waiting up to snapTTL.
+			st.snapAt = time.Time{}
 		} else {
 			st.statusMsg = ansiDim + title + " cancelled" + ansiReset
 		}
@@ -558,33 +581,20 @@ func handleUIKey(b byte, st *uiState, jobs []*JobRecord, tunnelNames []string, c
 
 	row := st.currentRow()
 
-	// Detail is always visible on the right -- Enter no longer opens
-	// a modal, it's just a no-op now (or could be wired to trigger
-	// the "default action" per row in future). Keep the key sink so
-	// stray ⏎ presses don't fall through to other handlers.
+	// Detail is always visible on the right. Navigation is arrow-only;
+	// `k` is reserved for the kill action so we don't shadow it with
+	// vim-style up-movement.
 	switch b {
 	case 'q', '\x03': // q / Ctrl-C
 		return false
 	case 'r':
 		st.forceRedraw = true
-	case 'a':
-		st.showAll = !st.showAll
-		st.focusPane = "job"
-		st.jobCursor = 0
-		st.forceRedraw = true
+		st.snapAt = time.Time{} // manual refresh -- bypass snapTTL
 	case '\t', 'l':
 		focusNextPane(st)
 	case 'h':
 		focusPrevPane(st)
-	case 'j':
-		moveFocusedRow(st, 1)
-	case 'k':
-		moveFocusedRow(st, -1)
-	case '\r', '\n':
-		// No-op: detail is already visible in the right column,
-		// nothing to "open". Sink the key so it doesn't drop into
-		// the catch-all default of other handlers.
-	case 'K', ' ', 'x':
+	case 'k', ' ', 'x':
 		armConfirmFor(st, row, jobs, tunnelNames, cfg, b)
 	case 0x1b: // ESC -- possibly an arrow-key sequence
 		b2, ok := kr.readWithTimeout(80 * time.Millisecond)
@@ -615,16 +625,16 @@ func handleUIKey(b byte, st *uiState, jobs []*JobRecord, tunnelNames []string, c
 // armConfirmFor sets up a popup confirmation tailored to the current
 // row + the pressed key. Mapping:
 //
-//	on a job row:    K = kill (TERM)
+//	on a job row:    k = kill (TERM)
 //	on a tunnel row: Space = toggle up/down,  x = remove
 //
-// Non-applicable combinations (Space on a job, K on a tunnel) are
+// Non-applicable combinations (Space on a job, k on a tunnel) are
 // silently ignored -- the key hint in the footer already advertises
 // which keys apply to which kind of row.
 func armConfirmFor(st *uiState, row uiRow, jobs []*JobRecord, tunnelNames []string, cfg *Config, key byte) {
 	switch row.kind {
 	case "job":
-		if key != 'K' || row.idx < 0 || row.idx >= len(jobs) {
+		if key != 'k' || row.idx < 0 || row.idx >= len(jobs) {
 			return
 		}
 		j := jobs[row.idx]
@@ -854,7 +864,16 @@ func renderDashboard(cfg *Config, jobs []*JobRecord, tunnelNames []string, st *u
 	btopActive(&sb, cfg)
 	btopDaemon(&sb)
 
-	mcpSnapshot := readMCPStatus()
+	// Reuse the snapshot the main loop already tailed -- one disk
+	// read per snapTTL, not per redraw. Snapshot mode (st == nil) and
+	// the legacy paths still hit disk because there's no cache to
+	// inherit from.
+	var mcpSnapshot mcpStatus
+	if st != nil {
+		mcpSnapshot = st.snapMCP
+	} else {
+		mcpSnapshot = readMCPStatus()
+	}
 
 	if st == nil {
 		btopTunnels(&sb, cfg, tunnelNames, st)
@@ -1067,18 +1086,12 @@ func btopHeader(sb *strings.Builder, st *uiState) {
 		fmt.Fprintln(sb)
 		return
 	}
-	mode := "active only"
-	if st.showAll {
-		mode = "all jobs"
-	}
-	boxLine(sb, fmt.Sprintf("keys: %sq%s quit  %sr%s redraw  %stab/h/l%s window  %sj/k%s row  %senter%s detail  %sa%s jobs %s",
+	boxLine(sb, fmt.Sprintf("keys: %sq%s quit  %sr%s redraw  %stab/h/l%s window  %s↑/↓%s row  %sk%s kill",
 		ansiYellow+ansiBold, ansiReset,
 		ansiYellow+ansiBold, ansiReset,
 		ansiYellow+ansiBold, ansiReset,
 		ansiYellow+ansiBold, ansiReset,
-		ansiYellow+ansiBold, ansiReset,
-		ansiYellow+ansiBold, ansiReset,
-		ansiDim+"("+mode+")"+ansiReset))
+		ansiYellow+ansiBold, ansiReset))
 	boxBottom(sb)
 	fmt.Fprintln(sb)
 }
@@ -1196,7 +1209,7 @@ func btopTunnels(sb *strings.Builder, cfg *Config, names []string, st *uiState) 
 
 func btopJobs(sb *strings.Builder, jobs []*JobRecord, st *uiState) {
 	hidden := 0
-	if st != nil && !st.showAll {
+	if st != nil {
 		hidden = st.hiddenJobs
 	}
 	if len(jobs) == 0 && hidden == 0 {
@@ -1209,7 +1222,7 @@ func btopJobs(sb *strings.Builder, jobs []*JobRecord, st *uiState) {
 	}
 	boxTopFocused(sb, title, focused)
 	if len(jobs) == 0 {
-		boxLineFocused(sb, ansiDim+"nothing running; press a to show completed jobs"+ansiReset, focused)
+		boxLineFocused(sb, ansiDim+"nothing running; `srv jobs` lists completed entries"+ansiReset, focused)
 		boxBottomFocused(sb, focused)
 		fmt.Fprintln(sb)
 		return
@@ -1234,7 +1247,7 @@ func btopJobs(sb *strings.Builder, jobs []*JobRecord, st *uiState) {
 }
 
 // btopDetail is the right-column panel: a live view of whatever the
-// cursor currently highlights. Updates automatically on every j/k /
+// cursor currently highlights. Updates automatically on every
 // arrow / Tab event so the user doesn't have to press Enter to
 // "open" a row -- ranger / mutt / lazygit pattern. Falls back to a
 // hint when nothing is selected.
@@ -1258,7 +1271,7 @@ func btopDetail(sb *strings.Builder, cfg *Config, jobs []*JobRecord, tunnelNames
 		}
 	}
 	boxTop(sb, "detail")
-	boxLine(sb, ansiDim+"(no row selected -- move cursor with j/k or arrow keys)"+ansiReset)
+	boxLine(sb, ansiDim+"(no row selected -- move cursor with ↑/↓)"+ansiReset)
 	boxBottom(sb)
 	fmt.Fprintln(sb)
 }
@@ -1334,7 +1347,7 @@ func btopJobDetailColumn(sb *strings.Builder, j *JobRecord) {
 		boxLine(sb, "  "+line)
 	}
 	boxLine(sb, "")
-	boxLine(sb, ansiDim+"press "+ansiYellow+ansiBold+"K"+ansiReset+ansiDim+" to kill"+ansiReset)
+	boxLine(sb, ansiDim+"press "+ansiYellow+ansiBold+"k"+ansiReset+ansiDim+" to kill"+ansiReset)
 	boxBottom(sb)
 	fmt.Fprintln(sb)
 }
@@ -1432,11 +1445,11 @@ func btopFooter(sb *strings.Builder, st *uiState) {
 		boxLine(sb, btopPair("focus", ansiYellow+ansiBold+strings.ToUpper(focus)+ansiReset, "mode", "window navigation"))
 		switch focus {
 		case "tunnel":
-			boxLine(sb, "actions: "+ansiYellow+"j/k"+ansiReset+" move  "+ansiYellow+"space"+ansiReset+" up/down  "+ansiYellow+"x"+ansiReset+" remove  "+ansiYellow+"tab"+ansiReset+" next window  "+ansiYellow+"q"+ansiReset+" quit")
+			boxLine(sb, "actions: "+ansiYellow+"↑/↓"+ansiReset+" move  "+ansiYellow+"space"+ansiReset+" up/down  "+ansiYellow+"x"+ansiReset+" remove  "+ansiYellow+"tab"+ansiReset+" next window  "+ansiYellow+"q"+ansiReset+" quit")
 		case "job":
-			boxLine(sb, "actions: "+ansiYellow+"j/k"+ansiReset+" move  "+ansiYellow+"K"+ansiReset+" kill  "+ansiYellow+"a"+ansiReset+" show all  "+ansiYellow+"tab"+ansiReset+" next window  "+ansiYellow+"q"+ansiReset+" quit")
+			boxLine(sb, "actions: "+ansiYellow+"↑/↓"+ansiReset+" move  "+ansiYellow+"k"+ansiReset+" kill  "+ansiYellow+"tab"+ansiReset+" next window  "+ansiYellow+"q"+ansiReset+" quit")
 		case "mcp":
-			boxLine(sb, "actions: "+ansiYellow+"j/k"+ansiReset+" move  "+ansiDim+"(read-only)"+ansiReset+"  "+ansiYellow+"tab"+ansiReset+" next window  "+ansiYellow+"q"+ansiReset+" quit")
+			boxLine(sb, "actions: "+ansiYellow+"↑/↓"+ansiReset+" move  "+ansiDim+"(read-only)"+ansiReset+"  "+ansiYellow+"tab"+ansiReset+" next window  "+ansiYellow+"q"+ansiReset+" quit")
 		default:
 			boxLine(sb, "actions: "+ansiYellow+"tab"+ansiReset+" choose window  "+ansiYellow+"r"+ansiReset+" refresh  "+ansiYellow+"q"+ansiReset+" quit")
 		}
@@ -1563,7 +1576,7 @@ func renderJobDetail(j *JobRecord, st *uiState) string {
 		renderConfirmPopup(&sb, st.confirm)
 		return sb.String()
 	}
-	fmt.Fprintf(&sb, "Keys: %sq%s back   %sK%s kill   %ssrv logs %s -f%s tails remotely\n",
+	fmt.Fprintf(&sb, "Keys: %sq%s back   %sk%s kill   %ssrv logs %s -f%s tails remotely\n",
 		ansiYellow+ansiBold, ansiReset,
 		ansiYellow+ansiBold, ansiReset,
 		ansiDim, j.ID, ansiReset)
@@ -1718,20 +1731,12 @@ func dashHeader(sb *strings.Builder, st *uiState) {
 		fmt.Fprintln(sb)
 		return
 	}
-	mode := "active only"
-	if st.showAll {
-		mode = "all jobs"
-	}
 	fmt.Fprintf(sb,
-		"Keys: %sq%s quit  %sr%s redraw  %sjk%s/%s↑↓%s select  %s⏎%s detail  %sK%s kill  %sa%s %s\n\n",
+		"Keys: %sq%s quit  %sr%s redraw  %s↑/↓%s select  %sk%s kill\n\n",
 		ansiYellow+ansiBold, ansiReset,
 		ansiYellow+ansiBold, ansiReset,
 		ansiYellow+ansiBold, ansiReset,
 		ansiYellow+ansiBold, ansiReset,
-		ansiYellow+ansiBold, ansiReset,
-		ansiYellow+ansiBold, ansiReset,
-		ansiYellow+ansiBold, ansiReset,
-		ansiDim+"("+mode+")"+ansiReset,
 	)
 }
 
@@ -1906,23 +1911,23 @@ func dashTunnels(sb *strings.Builder, cfg *Config, names []string, st *uiState) 
 // dashJobs renders the jobs table. When `st` is non-nil and the
 // caller has a valid selection (st.selectedJob in range), the
 // matching row gets a `>` marker + reverse video so the user can
-// see what their next Enter / K will target.
+// see what their next k will target.
 //
 // If the active filter (default) hid completed jobs, the section
-// header gets a "(N hidden)" tail so the user knows to press 'a'
-// when they want the full list.
+// header gets a "(N hidden)" tail so the user knows to consult
+// `srv jobs` for the full list.
 func dashJobs(sb *strings.Builder, jobs []*JobRecord, st *uiState) {
 	hidden := 0
-	if st != nil && !st.showAll {
+	if st != nil {
 		hidden = st.hiddenJobs
 	}
 	if len(jobs) == 0 && hidden == 0 {
 		return
 	}
 	if hidden > 0 {
-		fmt.Fprintf(sb, "%s== JOBS %s(%d, %d completed hidden -- press %sa%s%s%s)%s ==%s\n",
+		fmt.Fprintf(sb, "%s== JOBS %s(%d, %d completed hidden -- see %ssrv jobs%s%s)%s ==%s\n",
 			ansiBold+ansiCyan, ansiDim, len(jobs), hidden,
-			ansiYellow+ansiBold, ansiReset+ansiDim, "", "",
+			ansiYellow+ansiBold, ansiReset+ansiDim, "",
 			ansiReset+ansiBold+ansiCyan, ansiReset)
 	} else {
 		dashSectionCount(sb, "Jobs", len(jobs))
@@ -2020,19 +2025,11 @@ func dashFooter(sb *strings.Builder, st *uiState) {
 	}
 	// Confirm popup renders elsewhere (centered box appended to the
 	// dashboard); the footer only needs the regular key hints.
-	mode := "active only"
-	if st.showAll {
-		mode = "all jobs"
-	}
-	fmt.Fprintf(sb, "Keys: %sq%s quit  %sr%s redraw  %sjk%s/%s↑↓%s move  %s⏎%s detail  %sK%s kill  %sa%s %s\n",
+	fmt.Fprintf(sb, "Keys: %sq%s quit  %sr%s redraw  %s↑/↓%s move  %sk%s kill\n",
 		ansiYellow+ansiBold, ansiReset,
 		ansiYellow+ansiBold, ansiReset,
 		ansiYellow+ansiBold, ansiReset,
 		ansiYellow+ansiBold, ansiReset,
-		ansiYellow+ansiBold, ansiReset,
-		ansiYellow+ansiBold, ansiReset,
-		ansiYellow+ansiBold, ansiReset,
-		ansiDim+"("+mode+")"+ansiReset,
 	)
 	if st.statusMsg != "" {
 		fmt.Fprintf(sb, "%s\n", st.statusMsg)
