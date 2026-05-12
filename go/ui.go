@@ -153,8 +153,20 @@ func cmdUI(cfg *Config) error {
 		return exitErr(1, "tty raw mode: %v", err)
 	}
 	defer term.Restore(fd, state)
-	fmt.Fprint(os.Stderr, ansiHide)
-	defer fmt.Fprint(os.Stderr, ansiShow)
+
+	// Width follows the live terminal so the panels actually fill the
+	// window instead of sitting at the hard-coded 88. We re-read on
+	// every redraw cycle in case the user resized.
+	updateDashboardWidth()
+
+	// Enter the alternate screen buffer (xterm extension `?1049`).
+	// The user's previous shell content is preserved underneath and
+	// restored when we exit, so `srv ui` feels like top / htop /
+	// rustnet: type the command, the whole window becomes the UI;
+	// quit, the shell is exactly as you left it. Cursor stays hidden
+	// for the duration.
+	fmt.Fprint(os.Stderr, altScreenOn+ansiHide+clearScreen+cursorHome)
+	defer fmt.Fprint(os.Stderr, ansiShow+altScreenOff)
 
 	kr := newKeyReader()
 	st := &uiState{forceRedraw: true, cursor: 0, liveness: map[string]bool{}}
@@ -162,6 +174,14 @@ func cmdUI(cfg *Config) error {
 	const livenessTTL = 10 * time.Second
 
 	for {
+		// Track terminal width so a resize lands cleanly on the next
+		// tick. We don't try to repaint mid-frame -- the user can hit
+		// `r` if they want it sooner, but a 2s tick is usually fast
+		// enough that they won't notice the lag.
+		if updateDashboardWidth() {
+			st.forceRedraw = true
+		}
+
 		// Reload config and jobs each loop so edits from another
 		// terminal show up on the next refresh.
 		fresh, _ := LoadConfig()
@@ -219,9 +239,15 @@ func cmdUI(cfg *Config) error {
 			out = renderDashboard(fresh, jobs, tunnelNames, st)
 		}
 		if st.forceRedraw || out != st.lastFrame {
-			redrawDashboard(out, st.prevLines)
+			// Alt-screen redraw: home the cursor, write the new
+			// frame, then clear from cursor to end-of-screen. The
+			// terminal cell buffer keeps the pixels of unchanged
+			// rows from the previous frame already in place, so
+			// only the actually-different bytes flicker. No
+			// scrollback pollution -- when the user quits we
+			// `?1049l` back to the original shell.
+			fmt.Fprint(os.Stderr, cursorHome+out+clearEnd)
 			st.lastFrame = out
-			st.prevLines = strings.Count(out, "\n")
 			st.forceRedraw = false
 		}
 
@@ -236,7 +262,6 @@ func cmdUI(cfg *Config) error {
 			continue
 		}
 		if !handleUIKey(b, st, jobs, tunnelNames, fresh, kr) {
-			clearPicker(st.prevLines)
 			return nil
 		}
 	}
@@ -1280,8 +1305,54 @@ func wrapText(s string, width int) []string {
 	return lines
 }
 
-const dashboardWidth = 88
-const dashboardContentWidth = dashboardWidth - 4
+// dashboardWidth / dashboardContentWidth follow the terminal's
+// actual column count once cmdUI starts (set by updateDashboardWidth
+// each redraw). The hard-coded defaults take over only in non-TTY
+// snapshot mode where no terminal size is reported.
+var dashboardWidth = 88
+var dashboardContentWidth = dashboardWidth - 4
+
+// Alt-screen / cursor-control ANSI sequences. Same xterm extensions
+// every TUI app uses (top / htop / btop / vim / rustnet).
+const (
+	altScreenOn  = "\x1b[?1049h"
+	altScreenOff = "\x1b[?1049l"
+	cursorHome   = "\x1b[H"
+	clearScreen  = "\x1b[2J"
+	clearEnd     = "\x1b[J"
+)
+
+// dashboardMinWidth / dashboardMaxWidth bound the auto-detected
+// terminal width. Below the minimum, panel borders + the inner
+// content collide; above the maximum, lines get embarrassingly
+// sparse on ultra-wide monitors.
+const (
+	dashboardMinWidth = 60
+	dashboardMaxWidth = 200
+)
+
+// updateDashboardWidth re-reads terminalSize() and updates the
+// package-level width vars. Returns true if the width actually
+// changed (caller can use it to force a full redraw on resize).
+func updateDashboardWidth() bool {
+	w, _ := terminalSize()
+	if w <= 0 {
+		return false
+	}
+	if w < dashboardMinWidth {
+		w = dashboardMinWidth
+	}
+	if w > dashboardMaxWidth {
+		w = dashboardMaxWidth
+	}
+	if w == dashboardWidth {
+		return false
+	}
+	dashboardWidth = w
+	dashboardContentWidth = w - 4
+	return true
+}
+
 const dashboardRule = "========================================================================================"
 const dashboardSubRule = "----------------------------------------------------------------------------------------"
 
