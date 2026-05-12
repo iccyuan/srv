@@ -1,9 +1,12 @@
-package main
+package group
 
 import (
 	"encoding/json"
 	"fmt"
 	"sort"
+	"srv/internal/clierr"
+	"srv/internal/config"
+	"srv/internal/remote"
 	"strings"
 	"sync"
 	"time"
@@ -18,37 +21,37 @@ import (
 // `srv group <list|show|set|remove>` subcommand plus the `-G <group>`
 // global flag that swaps the per-profile run for a fan-out run.
 
-// cmdGroup is the `srv group <action>` dispatcher. Kept tiny because
+// Cmd is the `srv group <action>` dispatcher. Kept tiny because
 // each branch is one screen of code; promoting to subcommands of its
 // own felt heavier than the feature warranted.
-func cmdGroup(args []string, cfg *Config) error {
+func Cmd(args []string, cfg *config.Config) error {
 	if len(args) == 0 {
-		return groupList(cfg)
+		return listCmd(cfg)
 	}
 	switch args[0] {
 	case "list", "ls":
-		return groupList(cfg)
+		return listCmd(cfg)
 	case "show":
 		if len(args) < 2 {
-			return exitErr(2, "usage: srv group show <name>")
+			return clierr.Errf(2, "usage: srv group show <name>")
 		}
-		return groupShow(cfg, args[1])
+		return showCmd(cfg, args[1])
 	case "set":
 		if len(args) < 3 {
-			return exitErr(2, "usage: srv group set <name> <profile> [profile...]")
+			return clierr.Errf(2, "usage: srv group set <name> <profile> [profile...]")
 		}
-		return groupSet(cfg, args[1], args[2:])
+		return setCmd(cfg, args[1], args[2:])
 	case "remove", "rm":
 		if len(args) < 2 {
-			return exitErr(2, "usage: srv group remove <name>")
+			return clierr.Errf(2, "usage: srv group remove <name>")
 		}
-		return groupRemove(cfg, args[1])
+		return removeCmd(cfg, args[1])
 	default:
-		return exitErr(2, "unknown group action %q (expected list/show/set/remove)", args[0])
+		return clierr.Errf(2, "unknown group action %q (expected list/show/set/remove)", args[0])
 	}
 }
 
-func groupList(cfg *Config) error {
+func listCmd(cfg *config.Config) error {
 	if len(cfg.Groups) == 0 {
 		fmt.Println("(no groups defined)")
 		return nil
@@ -65,10 +68,10 @@ func groupList(cfg *Config) error {
 	return nil
 }
 
-func groupShow(cfg *Config, name string) error {
+func showCmd(cfg *config.Config, name string) error {
 	members, ok := cfg.Groups[name]
 	if !ok {
-		return exitErr(1, "group %q not found", name)
+		return clierr.Errf(1, "group %q not found", name)
 	}
 	if len(members) == 0 {
 		fmt.Printf("%s: (empty)\n", name)
@@ -84,19 +87,19 @@ func groupShow(cfg *Config, name string) error {
 	return nil
 }
 
-// groupSet replaces a group's membership wholesale. Replace-not-merge
+// setCmd replaces a group's membership wholesale. Replace-not-merge
 // is the safer default: explicit add-member / remove-member ops would
 // surface as two more subcommands without adding power -- the user can
 // always re-run set with the new list. We do validate each member is a
 // known profile up front so the saved config can never reference a
 // ghost name.
-func groupSet(cfg *Config, name string, members []string) error {
+func setCmd(cfg *config.Config, name string, members []string) error {
 	if len(members) == 0 {
-		return exitErr(2, "set requires at least one member; use `srv group remove %s` to delete", name)
+		return clierr.Errf(2, "set requires at least one member; use `srv group remove %s` to delete", name)
 	}
 	for _, m := range members {
 		if _, ok := cfg.Profiles[m]; !ok {
-			return exitErr(1, "profile %q not found", m)
+			return clierr.Errf(1, "profile %q not found", m)
 		}
 	}
 	// De-duplicate while preserving the order the user typed -- order
@@ -115,29 +118,29 @@ func groupSet(cfg *Config, name string, members []string) error {
 		cfg.Groups = map[string][]string{}
 	}
 	cfg.Groups[name] = deduped
-	if err := SaveConfig(cfg); err != nil {
+	if err := config.Save(cfg); err != nil {
 		return err
 	}
 	fmt.Printf("group %q set to %d member(s): %s\n", name, len(deduped), strings.Join(deduped, ", "))
 	return nil
 }
 
-func groupRemove(cfg *Config, name string) error {
+func removeCmd(cfg *config.Config, name string) error {
 	if _, ok := cfg.Groups[name]; !ok {
-		return exitErr(1, "group %q not found", name)
+		return clierr.Errf(1, "group %q not found", name)
 	}
 	delete(cfg.Groups, name)
-	if err := SaveConfig(cfg); err != nil {
+	if err := config.Save(cfg); err != nil {
 		return err
 	}
 	fmt.Printf("group %q removed\n", name)
 	return nil
 }
 
-// groupResult is the per-profile outcome of a fan-out call. Captured
+// Result is the per-profile outcome of a fan-out call. Captured
 // in full so the MCP wrapper can return structured content and the CLI
 // can render a section-per-profile report.
-type groupResult struct {
+type Result struct {
 	Profile  string  `json:"profile"`
 	ExitCode int     `json:"exit_code"`
 	Stdout   string  `json:"stdout,omitempty"`
@@ -149,7 +152,7 @@ type groupResult struct {
 	Error string `json:"error,omitempty"`
 }
 
-// runGroup executes `cmd` on every profile in `groupName` in parallel
+// Run executes `cmd` on every profile in `groupName` in parallel
 // and returns a result per profile. Order matches Config.Groups[name]
 // so reports are deterministic across runs.
 //
@@ -163,7 +166,7 @@ type groupResult struct {
 // per host; the daemon pool reuses connections across calls. For
 // groups of a few dozen hosts this is fine; if anyone defines a 500-
 // host group we'll revisit with a worker-pool limit.
-func runGroup(cfg *Config, groupName, cmd string) ([]groupResult, error) {
+func Run(cfg *config.Config, groupName, cmd string) ([]Result, error) {
 	members, ok := cfg.Groups[groupName]
 	if !ok {
 		return nil, fmt.Errorf("group %q not found", groupName)
@@ -177,7 +180,7 @@ func runGroup(cfg *Config, groupName, cmd string) ([]groupResult, error) {
 		}
 	}
 
-	results := make([]groupResult, len(members))
+	results := make([]Result, len(members))
 	var wg sync.WaitGroup
 	for i, name := range members {
 		wg.Add(1)
@@ -185,15 +188,15 @@ func runGroup(cfg *Config, groupName, cmd string) ([]groupResult, error) {
 			defer wg.Done()
 			prof := cfg.Profiles[name]
 			prof.Name = name
-			cwd := GetCwd(name, prof)
+			cwd := config.GetCwd(name, prof)
 			start := time.Now()
-			res, err := runRemoteCapture(prof, cwd, cmd)
+			res, err := remote.RunCapture(prof, cwd, cmd)
 			dur := time.Since(start).Seconds()
 			if err != nil {
-				results[i] = groupResult{Profile: name, ExitCode: -1, Error: err.Error(), Duration: dur}
+				results[i] = Result{Profile: name, ExitCode: -1, Error: err.Error(), Duration: dur}
 				return
 			}
-			results[i] = groupResult{
+			results[i] = Result{
 				Profile:  name,
 				ExitCode: res.ExitCode,
 				Stdout:   res.Stdout,
@@ -206,28 +209,28 @@ func runGroup(cfg *Config, groupName, cmd string) ([]groupResult, error) {
 	return results, nil
 }
 
-// cmdRunGroup is the CLI entry point for `-G <group> <cmd>`. Renders
+// RunCmd is the CLI entry point for `-G <group> <cmd>`. Renders
 // results as one section per profile, with a summary line at the end.
 // Exit code is the maximum non-zero across members so CI / shell
 // pipelines can detect partial failure.
-func cmdRunGroup(args []string, cfg *Config, groupName string) error {
+func RunCmd(args []string, cfg *config.Config, groupName string) error {
 	if len(args) == 0 {
-		return exitErr(2, "usage: srv -G <group> <command>")
+		return clierr.Errf(2, "usage: srv -G <group> <command>")
 	}
 	cmd := strings.Join(args, " ")
-	results, err := runGroup(cfg, groupName, cmd)
+	results, err := Run(cfg, groupName, cmd)
 	if err != nil {
-		return exitErr(1, "%v", err)
+		return clierr.Errf(1, "%v", err)
 	}
-	maxExit, failed := renderGroupResults(results)
+	maxExit, failed := RenderResults(results)
 	fmt.Printf("\n%d profile(s), %d succeeded, %d failed.\n", len(results), len(results)-failed, failed)
-	return exitCode(maxExit)
+	return clierr.Code(maxExit)
 }
 
-// renderGroupResults prints one section per result and returns
+// RenderResults prints one section per result and returns
 // (max-exit-code, failures). Sections are separated by a header line
 // so output is greppable and the per-profile boundaries are visible.
-func renderGroupResults(results []groupResult) (int, int) {
+func RenderResults(results []Result) (int, int) {
 	maxExit, failed := 0, 0
 	for _, r := range results {
 		fmt.Printf("=== %s [exit %d, %.1fs]", r.Profile, r.ExitCode, r.Duration)
@@ -262,9 +265,9 @@ func renderGroupResults(results []groupResult) (int, int) {
 	return maxExit, failed
 }
 
-// groupResultsJSON renders a JSON array of results -- used by the MCP
+// ResultsJSON renders a JSON array of results -- used by the MCP
 // tool when it wants a structured payload alongside the text report.
-func groupResultsJSON(results []groupResult) string {
+func ResultsJSON(results []Result) string {
 	b, _ := json.Marshal(results)
 	return string(b)
 }
