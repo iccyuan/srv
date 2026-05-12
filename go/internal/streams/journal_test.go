@@ -1,4 +1,4 @@
-package main
+package streams
 
 import (
 	"strings"
@@ -6,7 +6,7 @@ import (
 )
 
 func TestParseJournalArgs_AllFlags(t *testing.T) {
-	jc, err := parseJournalArgs([]string{
+	jc, err := ParseJournalArgs([]string{
 		"-u", "nginx.service",
 		"--since", "10 min ago",
 		"-p", "err",
@@ -17,60 +17,60 @@ func TestParseJournalArgs_AllFlags(t *testing.T) {
 	if err != nil {
 		t.Fatalf("parse: %v", err)
 	}
-	if jc.unit != "nginx.service" {
-		t.Errorf("unit=%q", jc.unit)
+	if jc.Unit != "nginx.service" {
+		t.Errorf("unit=%q", jc.Unit)
 	}
-	if jc.since != "10 min ago" {
-		t.Errorf("since=%q", jc.since)
+	if jc.Since != "10 min ago" {
+		t.Errorf("since=%q", jc.Since)
 	}
-	if jc.priority != "err" {
-		t.Errorf("priority=%q", jc.priority)
+	if jc.Priority != "err" {
+		t.Errorf("priority=%q", jc.Priority)
 	}
-	if jc.lines != 200 {
-		t.Errorf("lines=%d", jc.lines)
+	if jc.Lines != 200 {
+		t.Errorf("lines=%d", jc.Lines)
 	}
-	if jc.grep != "timeout" {
-		t.Errorf("grep=%q", jc.grep)
+	if jc.Grep != "timeout" {
+		t.Errorf("grep=%q", jc.Grep)
 	}
-	if !jc.follow {
+	if !jc.Follow {
 		t.Error("follow not set")
 	}
 }
 
 func TestParseJournalArgs_EqualsForm(t *testing.T) {
-	jc, err := parseJournalArgs([]string{"--unit=nginx", "--since=1h"})
+	jc, err := ParseJournalArgs([]string{"--unit=nginx", "--since=1h"})
 	if err != nil {
 		t.Fatalf("parse: %v", err)
 	}
-	if jc.unit != "nginx" || jc.since != "1h" {
+	if jc.Unit != "nginx" || jc.Since != "1h" {
 		t.Errorf("got %+v", jc)
 	}
 }
 
 func TestParseJournalArgs_Unknown(t *testing.T) {
-	_, err := parseJournalArgs([]string{"--bogus"})
+	_, err := ParseJournalArgs([]string{"--bogus"})
 	if err == nil {
 		t.Error("expected error on unknown flag")
 	}
 }
 
 func TestParseJournalArgs_MissingValue(t *testing.T) {
-	_, err := parseJournalArgs([]string{"-u"})
+	_, err := ParseJournalArgs([]string{"-u"})
 	if err == nil {
 		t.Error("expected error on missing -u value")
 	}
 }
 
 func TestParseJournalArgs_BadLines(t *testing.T) {
-	_, err := parseJournalArgs([]string{"-n", "not-a-number"})
+	_, err := ParseJournalArgs([]string{"-n", "not-a-number"})
 	if err == nil {
 		t.Error("expected error on non-numeric -n")
 	}
 }
 
 func TestJournalCmd_ToRemoteCommand_Minimal(t *testing.T) {
-	jc := journalCmd{}
-	got := jc.toRemoteCommand()
+	jc := JournalCmd{}
+	got := jc.ToRemoteCommand()
 	want := []string{"journalctl", "--no-pager", "-o", "short-iso"}
 	for _, w := range want {
 		if !strings.Contains(got, w) {
@@ -86,11 +86,11 @@ func TestJournalCmd_ToRemoteCommand_Minimal(t *testing.T) {
 }
 
 func TestJournalCmd_ToRemoteCommand_FullShape(t *testing.T) {
-	jc := journalCmd{
-		unit: "nginx.service", since: "1 hour ago", priority: "warning",
-		lines: 50, grep: "ERROR", follow: true,
+	jc := JournalCmd{
+		Unit: "nginx.service", Since: "1 hour ago", Priority: "warning",
+		Lines: 50, Grep: "ERROR", Follow: true,
 	}
-	got := jc.toRemoteCommand()
+	got := jc.ToRemoteCommand()
 	// srvtty.ShQuote leaves alphanumerics + . / : etc. unquoted but always
 	// quotes anything with whitespace. Assert against the shape we
 	// expect from that contract rather than a literal one-true-string.

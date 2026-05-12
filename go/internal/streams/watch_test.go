@@ -1,8 +1,9 @@
-package main
+package streams
 
 import (
 	"errors"
 	"srv/internal/ansi"
+	"srv/internal/sshx"
 	"strings"
 	"testing"
 	"time"
@@ -29,7 +30,7 @@ func TestFmtSecs(t *testing.T) {
 }
 
 func TestBuildWatchFrame_HappyPath(t *testing.T) {
-	res := &RunCaptureResult{Stdout: "hello\n", ExitCode: 0}
+	res := &sshx.RunCaptureResult{Stdout: "hello\n", ExitCode: 0}
 	frame := buildWatchFrame("uptime", "prod", 2*time.Second, 120*time.Millisecond, res, nil, "", false)
 	if !strings.Contains(frame, "Every 2s on prod") {
 		t.Errorf("header missing 'Every 2s on prod': %q", frame)
@@ -53,7 +54,7 @@ func TestBuildWatchFrame_CaptureError(t *testing.T) {
 }
 
 func TestBuildWatchFrame_ExitCodeAndStderr(t *testing.T) {
-	res := &RunCaptureResult{
+	res := &sshx.RunCaptureResult{
 		Stdout:   "ok\n",
 		Stderr:   "warn: foo\n",
 		ExitCode: 2,

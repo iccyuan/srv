@@ -5,6 +5,7 @@ import (
 	"srv/internal/completion"
 	"srv/internal/install"
 	"srv/internal/project"
+	"srv/internal/streams"
 	"srv/internal/theme"
 	"srv/internal/tunnel"
 
@@ -127,10 +128,10 @@ var subcommands = []subcommand{
 		return cmdSudo(c.args, c.cfg, globalOpts{profile: c.profileOverride})
 	}},
 	{name: "ui", handler: func(c cmdCtx) error { return cmdUI(c.cfg) }},
-	{name: "tail", handler: func(c cmdCtx) error { return cmdTail(c.args, c.cfg, c.profileOverride) }},
-	{name: "watch", handler: func(c cmdCtx) error { return cmdWatch(c.args, c.cfg, c.profileOverride) }},
-	{name: "journal", handler: func(c cmdCtx) error { return cmdJournal(c.args, c.cfg, c.profileOverride) }},
-	{name: "top", handler: func(c cmdCtx) error { return cmdTop(c.args, c.cfg, c.profileOverride) }},
+	{name: "tail", handler: func(c cmdCtx) error { return streams.Tail(c.args, c.cfg, c.profileOverride) }},
+	{name: "watch", handler: func(c cmdCtx) error { return streams.Watch(c.args, c.cfg, c.profileOverride) }},
+	{name: "journal", handler: func(c cmdCtx) error { return streams.Journal(c.args, c.cfg, c.profileOverride) }},
+	{name: "top", handler: func(c cmdCtx) error { return streams.Top(c.args, c.cfg, c.profileOverride) }},
 
 	// run/exec: -d global flag swaps in cmdDetach; -G swaps in fan-out;
 	// otherwise wrap with the typo-hint emitter.

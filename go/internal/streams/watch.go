@@ -1,11 +1,15 @@
-package main
+package streams
 
 import (
 	"fmt"
 	"os"
 	"os/signal"
 	"srv/internal/ansi"
+	"srv/internal/clierr"
+	"srv/internal/config"
+	"srv/internal/remote"
 	"srv/internal/srvtty"
+	"srv/internal/sshx"
 	"strconv"
 	"strings"
 	"syscall"
@@ -24,7 +28,7 @@ import (
 // GNU watch -d) -- it's noisier for fields with rolling counters but
 // keeps the code small and the highlight readable for typical
 // ps/df/free output.
-func cmdWatch(args []string, cfg *Config, profileOverride string) error {
+func Watch(args []string, cfg *config.Config, profileOverride string) error {
 	interval := 2 * time.Second
 	diff := false
 	var cmdArgs []string
@@ -33,18 +37,18 @@ func cmdWatch(args []string, cfg *Config, profileOverride string) error {
 		switch {
 		case a == "-n" || a == "--interval":
 			if i+1 >= len(args) {
-				return exitErr(2, "%s requires a value (seconds)", a)
+				return clierr.Errf(2, "%s requires a value (seconds)", a)
 			}
 			n, err := strconv.ParseFloat(args[i+1], 64)
 			if err != nil || n <= 0 {
-				return exitErr(2, "bad %s value %q (want positive number)", a, args[i+1])
+				return clierr.Errf(2, "bad %s value %q (want positive number)", a, args[i+1])
 			}
 			interval = time.Duration(n * float64(time.Second))
 			i++
 		case strings.HasPrefix(a, "-n"):
 			n, err := strconv.ParseFloat(a[2:], 64)
 			if err != nil || n <= 0 {
-				return exitErr(2, "bad -n value %q", a[2:])
+				return clierr.Errf(2, "bad -n value %q", a[2:])
 			}
 			interval = time.Duration(n * float64(time.Second))
 		case a == "-d" || a == "--diff":
@@ -57,13 +61,13 @@ func cmdWatch(args []string, cfg *Config, profileOverride string) error {
 		}
 	}
 	if len(cmdArgs) == 0 {
-		return exitErr(2, "usage: srv watch [-n SECONDS] [--diff] <command>")
+		return clierr.Errf(2, "usage: srv watch [-n SECONDS] [--diff] <command>")
 	}
 	cmd := strings.Join(cmdArgs, " ")
 
-	profName, profile, err := ResolveProfile(cfg, profileOverride)
+	profName, profile, err := config.Resolve(cfg, profileOverride)
 	if err != nil {
-		return exitErr(1, "%v", err)
+		return clierr.Errf(1, "%v", err)
 	}
 
 	stopCh := make(chan struct{})
@@ -75,7 +79,7 @@ func cmdWatch(args []string, cfg *Config, profileOverride string) error {
 		close(stopCh)
 	}()
 
-	cwd := GetCwd(profName, profile)
+	cwd := config.GetCwd(profName, profile)
 	var prevOut string
 	var prevLines int
 	for {
@@ -86,7 +90,7 @@ func cmdWatch(args []string, cfg *Config, profileOverride string) error {
 		}
 
 		start := time.Now()
-		res, runErr := runRemoteCapture(profile, cwd, cmd)
+		res, runErr := remote.RunCapture(profile, cwd, cmd)
 		latency := time.Since(start)
 
 		frame := buildWatchFrame(cmd, profName, interval, latency, res, runErr, prevOut, diff)
@@ -105,7 +109,7 @@ func cmdWatch(args []string, cfg *Config, profileOverride string) error {
 // buildWatchFrame composes the header + body for one watch tick. Pulled
 // out of Watch so the (otherwise side-effect-free) rendering can be
 // covered by tests without driving a real SSH session.
-func buildWatchFrame(cmd, profile string, interval, latency time.Duration, res *RunCaptureResult, runErr error, prev string, diff bool) string {
+func buildWatchFrame(cmd, profile string, interval, latency time.Duration, res *sshx.RunCaptureResult, runErr error, prev string, diff bool) string {
 	var sb strings.Builder
 	now := time.Now().Format("15:04:05")
 	fmt.Fprintf(&sb, "%sEvery %s on %s%s   %s   %s$ %s%s\n\n",

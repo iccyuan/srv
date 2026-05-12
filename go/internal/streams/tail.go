@@ -1,10 +1,12 @@
-package main
+package streams
 
 import (
 	"fmt"
 	"os"
 	"os/signal"
 	"regexp"
+	"srv/internal/clierr"
+	"srv/internal/config"
 	"srv/internal/srvtty"
 	"srv/internal/sshx"
 	"strconv"
@@ -25,9 +27,9 @@ import (
 //  2. Client-side --grep filter that runs after lines arrive locally.
 //     Server-side `tail | grep` would buffer at the grep boundary and
 //     hide partial lines; doing it locally keeps line-rate latency.
-func cmdTail(args []string, cfg *Config, profileOverride string) error {
+func Tail(args []string, cfg *config.Config, profileOverride string) error {
 	if len(args) == 0 {
-		return exitErr(2, `usage: srv tail [-n LINES] [--grep REGEX] <remote-path>...  any remote file (auto-reconnect)
+		return clierr.Errf(2, `usage: srv tail [-n LINES] [--grep REGEX] <remote-path>...  any remote file (auto-reconnect)
 see also:
   srv journal -u UNIT [-f]                      systemd journal for a service
   srv logs <id> [-f]                            output of a detached srv job`)
@@ -41,23 +43,23 @@ see also:
 		switch {
 		case a == "-n" || a == "--lines":
 			if i+1 >= len(args) {
-				return exitErr(2, "%s requires a value", a)
+				return clierr.Errf(2, "%s requires a value", a)
 			}
 			n, err := strconv.Atoi(args[i+1])
 			if err != nil || n < 0 {
-				return exitErr(2, "bad %s value %q (want non-negative int)", a, args[i+1])
+				return clierr.Errf(2, "bad %s value %q (want non-negative int)", a, args[i+1])
 			}
 			initial = n
 			i++
 		case strings.HasPrefix(a, "-n"):
 			n, err := strconv.Atoi(a[2:])
 			if err != nil || n < 0 {
-				return exitErr(2, "bad -n value %q", a[2:])
+				return clierr.Errf(2, "bad -n value %q", a[2:])
 			}
 			initial = n
 		case a == "--grep":
 			if i+1 >= len(args) {
-				return exitErr(2, "--grep requires a value")
+				return clierr.Errf(2, "--grep requires a value")
 			}
 			grepPat = args[i+1]
 			i++
@@ -69,21 +71,21 @@ see also:
 		}
 	}
 	if len(paths) == 0 {
-		return exitErr(2, "missing remote path")
+		return clierr.Errf(2, "missing remote path")
 	}
 
 	var re *regexp.Regexp
 	if grepPat != "" {
 		r, err := regexp.Compile(grepPat)
 		if err != nil {
-			return exitErr(2, "bad regex %q: %v", grepPat, err)
+			return clierr.Errf(2, "bad regex %q: %v", grepPat, err)
 		}
 		re = r
 	}
 
-	_, profile, err := ResolveProfile(cfg, profileOverride)
+	_, profile, err := config.Resolve(cfg, profileOverride)
 	if err != nil {
-		return exitErr(1, "%v", err)
+		return clierr.Errf(1, "%v", err)
 	}
 
 	// Build the remote command. `tail -F` (capital F) follows by name
@@ -99,20 +101,20 @@ see also:
 		"srv tail: %s   (Ctrl-C to stop, auto-reconnect on drop)\n",
 		strings.Join(paths, " "))
 
-	onChunk := func(kind StreamChunkKind, line string) {
+	onChunk := func(kind sshx.StreamChunkKind, line string) {
 		if re != nil && !re.MatchString(line) {
 			return
 		}
-		if kind == StreamStderr {
+		if kind == sshx.StreamStderr {
 			fmt.Fprint(os.Stderr, line)
 		} else {
 			fmt.Fprint(os.Stdout, line)
 		}
 	}
-	return streamWithReconnect(profile, remoteCmd, onChunk)
+	return StreamWithReconnect(profile, remoteCmd, onChunk)
 }
 
-// streamWithReconnect runs `remoteCmd` on `profile`, forwarding every
+// StreamWithReconnect runs `remoteCmd` on `profile`, forwarding every
 // stdout/stderr line to onChunk, and redials on SSH disconnect with
 // exponential backoff. Stops cleanly on Ctrl-C / SIGTERM. Returns nil
 // for clean shutdown; only a permanently-broken profile (auth, host
@@ -120,7 +122,7 @@ see also:
 //
 // Reusable: anything that wants "watch a remote command forever with
 // reconnect" (tail, watch -n 0, journalctl -f) can call this.
-func streamWithReconnect(profile *Profile, remoteCmd string, onChunk func(StreamChunkKind, string)) error {
+func StreamWithReconnect(profile *config.Profile, remoteCmd string, onChunk func(sshx.StreamChunkKind, string)) error {
 	stopCh := make(chan struct{})
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, os.Interrupt, syscall.SIGTERM)
@@ -147,13 +149,13 @@ func streamWithReconnect(profile *Profile, remoteCmd string, onChunk func(Stream
 		default:
 		}
 
-		c, err := Dial(profile)
+		c, err := sshx.Dial(profile)
 		if err != nil {
 			// Auth / host-key errors are deterministic -- another redial
 			// won't change the answer, so we surface immediately rather
 			// than spin forever.
 			if !sshx.IsRetryableDialErr(err) {
-				return exitErr(1, "tail: dial: %v", err)
+				return clierr.Errf(1, "tail: dial: %v", err)
 			}
 			fmt.Fprintf(os.Stderr, "srv tail: dial failed: %v (retry in %s)\n", err, backoff)
 			if !waitOrStop(backoff, stopCh) {

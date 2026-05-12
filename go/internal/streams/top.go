@@ -1,8 +1,11 @@
-package main
+package streams
 
 import (
 	"fmt"
 	"os"
+	"srv/internal/clierr"
+	"srv/internal/config"
+	"srv/internal/sshx"
 	"strconv"
 	"strings"
 )
@@ -17,7 +20,7 @@ import (
 // command line (default on most distros but explicit beats implicit).
 // -w 512 sets a wide enough output width that lines aren't truncated
 // by top's own column logic before they reach us.
-func cmdTop(args []string, cfg *Config, profileOverride string) error {
+func Top(args []string, cfg *config.Config, profileOverride string) error {
 	interval := 2.0
 	width := 512
 	var extra []string
@@ -26,27 +29,27 @@ func cmdTop(args []string, cfg *Config, profileOverride string) error {
 		switch {
 		case a == "-n" || a == "--interval":
 			if i+1 >= len(args) {
-				return exitErr(2, "%s requires a value (seconds)", a)
+				return clierr.Errf(2, "%s requires a value (seconds)", a)
 			}
 			n, err := strconv.ParseFloat(args[i+1], 64)
 			if err != nil || n <= 0 {
-				return exitErr(2, "bad %s value %q", a, args[i+1])
+				return clierr.Errf(2, "bad %s value %q", a, args[i+1])
 			}
 			interval = n
 			i++
 		case strings.HasPrefix(a, "-n"):
 			n, err := strconv.ParseFloat(a[2:], 64)
 			if err != nil || n <= 0 {
-				return exitErr(2, "bad -n value %q", a[2:])
+				return clierr.Errf(2, "bad -n value %q", a[2:])
 			}
 			interval = n
 		case a == "-w" || a == "--width":
 			if i+1 >= len(args) {
-				return exitErr(2, "%s requires a value", a)
+				return clierr.Errf(2, "%s requires a value", a)
 			}
 			n, err := strconv.Atoi(args[i+1])
 			if err != nil || n <= 0 {
-				return exitErr(2, "bad %s value %q", a, args[i+1])
+				return clierr.Errf(2, "bad %s value %q", a, args[i+1])
 			}
 			width = n
 			i++
@@ -61,9 +64,9 @@ func cmdTop(args []string, cfg *Config, profileOverride string) error {
 		}
 	}
 
-	_, profile, err := ResolveProfile(cfg, profileOverride)
+	_, profile, err := config.Resolve(cfg, profileOverride)
 	if err != nil {
-		return exitErr(1, "%v", err)
+		return clierr.Errf(1, "%v", err)
 	}
 
 	parts := []string{"top", "-b", "-c", "-w", strconv.Itoa(width), "-d", strconv.FormatFloat(interval, 'f', -1, 64)}
@@ -75,12 +78,12 @@ func cmdTop(args []string, cfg *Config, profileOverride string) error {
 			"  alternatives: `srv -t top` (pty, in-place)   `srv watch -n N <cmd>` (periodic any cmd)\n",
 		profile.Host)
 
-	onChunk := func(kind StreamChunkKind, line string) {
-		if kind == StreamStderr {
+	onChunk := func(kind sshx.StreamChunkKind, line string) {
+		if kind == sshx.StreamStderr {
 			fmt.Fprint(os.Stderr, line)
 		} else {
 			fmt.Fprint(os.Stdout, line)
 		}
 	}
-	return streamWithReconnect(profile, remoteCmd, onChunk)
+	return StreamWithReconnect(profile, remoteCmd, onChunk)
 }
