@@ -126,8 +126,15 @@ func cmdTunnelOneShot(args []string, cfg *Config, profileOverride string) error 
 }
 
 // runLocalForwarder is the body of a local-to-remote forwarder, shared
-// by the one-shot CLI and the daemon-hosted persistent tunnel. Returns
-// when the listener closes or the ssh connection drops.
+// by the one-shot CLI and the daemon-hosted persistent tunnel.
+//
+// Return value distinguishes the two ways the forwarder can exit:
+//   - nil error: caller-driven shutdown (stopCh / sigCh fired).
+//     The user / daemon asked us to stop; nothing to surface.
+//   - non-nil error: the underlying SSH transport dropped under us
+//     (`c.Conn.Wait()` returned). The caller -- particularly the
+//     daemon-hosted path -- wants this so it can record "forwarder
+//     crashed" in tunnel-err state for `srv tunnel list` to display.
 //
 // stopCh: external close signal (daemon shutdown / explicit `tunnel
 // down`). sigCh: optional; nil under daemon, set under CLI to allow
@@ -140,6 +147,10 @@ func runLocalForwarder(c *Client, localPort int, remoteHost string, remotePort i
 	}
 	defer listener.Close()
 
+	var (
+		causeMu sync.Mutex
+		cause   error
+	)
 	stopOnce := sync.Once{}
 	stop := func() { stopOnce.Do(func() { _ = listener.Close() }) }
 	go func() {
@@ -152,7 +163,11 @@ func runLocalForwarder(c *Client, localPort int, remoteHost string, remotePort i
 	}()
 	go func() {
 		err := c.Conn.Wait()
-		fmt.Fprintf(os.Stderr, "srv tunnel: ssh connection closed: %v\n", err)
+		causeMu.Lock()
+		if cause == nil {
+			cause = fmt.Errorf("ssh connection closed: %v", err)
+		}
+		causeMu.Unlock()
 		stop()
 	}()
 
@@ -180,12 +195,16 @@ func runLocalForwarder(c *Client, localPort int, remoteHost string, remotePort i
 		}(local)
 	}
 	wg.Wait()
-	return nil
+	causeMu.Lock()
+	defer causeMu.Unlock()
+	return cause
 }
 
 // runReverseForwarder mirrors runLocalForwarder for the -R direction:
 // the remote side does the listen, local dials happen per accepted
-// connection.
+// connection. Same nil-on-clean-stop / err-on-ssh-drop contract as
+// runLocalForwarder, so the daemon's `tunnel %q forwarder exited`
+// path can record the transport cause.
 func runReverseForwarder(c *Client, remotePort int, localHost string, localPort int, stopCh <-chan struct{}, sigCh <-chan os.Signal) error {
 	remoteListen := net.JoinHostPort("127.0.0.1", strconv.Itoa(remotePort))
 	listener, err := c.Conn.Listen("tcp", remoteListen)
@@ -194,6 +213,10 @@ func runReverseForwarder(c *Client, remotePort int, localHost string, localPort 
 	}
 	defer listener.Close()
 
+	var (
+		causeMu sync.Mutex
+		cause   error
+	)
 	stopOnce := sync.Once{}
 	stop := func() { stopOnce.Do(func() { _ = listener.Close() }) }
 	go func() {
@@ -206,7 +229,11 @@ func runReverseForwarder(c *Client, remotePort int, localHost string, localPort 
 	}()
 	go func() {
 		err := c.Conn.Wait()
-		fmt.Fprintf(os.Stderr, "srv tunnel -R: ssh connection closed: %v\n", err)
+		causeMu.Lock()
+		if cause == nil {
+			cause = fmt.Errorf("ssh connection closed: %v", err)
+		}
+		causeMu.Unlock()
 		stop()
 	}()
 
@@ -234,7 +261,9 @@ func runReverseForwarder(c *Client, remotePort int, localHost string, localPort 
 		}(remote)
 	}
 	wg.Wait()
-	return nil
+	causeMu.Lock()
+	defer causeMu.Unlock()
+	return cause
 }
 
 // sigChOrNil returns the channel directly when non-nil; otherwise a

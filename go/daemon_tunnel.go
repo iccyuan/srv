@@ -179,8 +179,17 @@ func (s *daemonState) startTunnel(name string, def *TunnelDef) (at *activeTunnel
 		default:
 			runErr = runLocalForwarder(client, lp, rh, rp, at.stopCh, nil)
 		}
+		// runErr is non-nil ONLY when the SSH transport died under
+		// the forwarder (clean stop via stopCh returns nil). Record
+		// it so `srv tunnel list` shows "failed: ssh connection
+		// closed: ..." instead of the misleading "stopped" the user
+		// would have seen otherwise. The pooled SSH client is also
+		// likely toast at this point, so evict it from the pool --
+		// otherwise the next `tunnel up` reuses a dead connection.
 		if runErr != nil {
+			s.recordTunnelErr(name, fmt.Errorf("forwarder crashed: %v", runErr))
 			fmt.Fprintf(os.Stderr, "daemon: tunnel %q forwarder exited: %v\n", name, runErr)
+			s.evictPooledClient(profileName)
 		}
 		// Self-deregister so list reflects "stopped" even if nobody
 		// called tunnel_down (e.g. ssh connection dropped under us).

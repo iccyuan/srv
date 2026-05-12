@@ -874,6 +874,25 @@ func waitDaemonGone(maxWait time.Duration) {
 	}
 }
 
+// evictPooledClient drops the pooled SSH connection for `profileName`
+// without waiting for the idle-TTL GC. Used by the tunnel forwarder
+// after a transport crash so the next dial of the same profile
+// builds a fresh connection instead of reusing the dead one.
+func (s *daemonState) evictPooledClient(profileName string) {
+	if profileName == "" {
+		return
+	}
+	s.mu.Lock()
+	pc, ok := s.pool[profileName]
+	if ok {
+		delete(s.pool, profileName)
+	}
+	s.mu.Unlock()
+	if ok && pc.client != nil {
+		_ = pc.client.Close()
+	}
+}
+
 func (s *daemonState) closeAll() {
 	// Stop tunnels first: their listeners hold references to pooled
 	// clients, so closing the pool before the tunnels would race the
