@@ -5,6 +5,7 @@ import (
 	"srv/internal/completion"
 	"srv/internal/install"
 	"srv/internal/project"
+	"srv/internal/theme"
 
 	"srv/internal/i18n"
 )
@@ -117,7 +118,7 @@ var subcommands = []subcommand{
 	// Integrations / settings.
 	{name: "mcp", handler: func(c cmdCtx) error { return cmdMcp(c.cfg) }},
 	{name: "guard", handler: func(c cmdCtx) error { return cmdGuard(c.args) }},
-	{name: "color", handler: func(c cmdCtx) error { return cmdColor(c.args) }},
+	{name: "color", handler: func(c cmdCtx) error { return theme.Cmd(c.args) }},
 	{name: "daemon", handler: func(c cmdCtx) error { return cmdDaemon(c.args) }},
 	{name: "project", noConfig: true, handler: func(c cmdCtx) error { return project.Cmd(c.args) }},
 	{name: "group", handler: func(c cmdCtx) error { return cmdGroup(c.args, c.cfg) }},

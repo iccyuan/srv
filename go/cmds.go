@@ -12,6 +12,7 @@ import (
 	"srv/internal/srvpath"
 	"srv/internal/srvtty"
 	"srv/internal/srvutil"
+	"srv/internal/theme"
 	"strconv"
 	"strings"
 )
@@ -592,9 +593,9 @@ func cmdRun(args []string, cfg *Config, profileOverride string, tty bool) error 
 	// TTY mode allocates a real interactive shell on the remote that
 	// sources ~/.bashrc itself, so colour just works -- skip our hook.
 	// Non-TTY (`srv ls`, etc.) is what we have to fix up: see
-	// colorPrologue() for the rules. MCP never goes through this path.
+	// theme.Prologue() for the rules. MCP never goes through this path.
 	if !tty {
-		if prologue := colorPrologue(); prologue != "" {
+		if prologue := theme.Prologue(); prologue != "" {
 			cmd = prologue + cmd
 		}
 	}

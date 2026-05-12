@@ -1,4 +1,4 @@
-package main
+package theme
 
 import (
 	"fmt"
@@ -397,11 +397,11 @@ func themeToLSColorsShell(t *themeColors) string {
 	return sb.String()
 }
 
-// supportedThemeExts is the list of file extensions the user can
+// SupportedExts is the list of file extensions the user can
 // drop into ~/.srv/init/, in order of precedence when multiple
 // files share the same basename. Compared lower-case at use time
 // so .Xresources / .xresources / .YML / etc all work.
-var supportedThemeExts = []string{
+var SupportedExts = []string{
 	".sh",          // raw shell snippet, highest priority
 	".itermcolors", // iTerm2 plist (XML)
 	".toml",        // Alacritty TOML (post-0.13)
@@ -411,11 +411,11 @@ var supportedThemeExts = []string{
 	".xresources",  // xterm / urxvt classic Xresources
 }
 
-// loadThemeFile reads a single theme file from disk and returns the
+// LoadFile reads a single theme file from disk and returns the
 // shell snippet to inline before remote commands. Empty string when
 // the file doesn't exist, can't be parsed, or has an unsupported
 // extension -- callers fall back to the next lookup.
-func loadThemeFile(p string) string {
+func LoadFile(p string) string {
 	data, err := os.ReadFile(p)
 	if err != nil || len(data) == 0 {
 		return ""
