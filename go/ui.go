@@ -36,15 +36,18 @@ type uiConfirm struct {
 // confirmation popup is up. Kept in one struct so the renderers can
 // read it without each one growing a parameter.
 type uiState struct {
-	cursor      int        // index into rows; -1 when rows is empty
-	rows        []uiRow    // selectable rows in display order
-	detailMode  bool       // showing the per-row detail panel
-	confirm     *uiConfirm // non-nil = popup is up, awaiting Y/N
-	showAll     bool       // include completed (`.exit` marker present) jobs
-	statusMsg   string     // transient line in the footer (kill result, etc.)
-	lastFrame   string
-	prevLines   int
-	forceRedraw bool
+	cursor       int        // index into rows; -1 when rows is empty
+	rows         []uiRow    // selectable rows in display order
+	focusPane    string     // "tunnel" or "job"; Tab / h / l switches panes
+	tunnelCursor int        // index within the tunnel window
+	jobCursor    int        // index within the jobs window
+	detailMode   bool       // showing the per-row detail panel
+	confirm      *uiConfirm // non-nil = popup is up, awaiting Y/N
+	showAll      bool       // include completed (`.exit` marker present) jobs
+	statusMsg    string     // transient line in the footer (kill result, etc.)
+	lastFrame    string
+	prevLines    int
+	forceRedraw  bool
 	// liveness is the result of the last remote "which job ids have
 	// an .exit marker" sweep: jobID -> alive. Missing entries mean
 	// "unknown" (e.g. profile unreachable) and are treated as alive
@@ -58,7 +61,22 @@ type uiState struct {
 // when there's no selection. Centralised so renderers / handlers
 // don't each duplicate the bounds check.
 func (s *uiState) currentRow() uiRow {
-	if s == nil || s.cursor < 0 || s.cursor >= len(s.rows) {
+	if s == nil || len(s.rows) == 0 {
+		return uiRow{}
+	}
+	tunnels, jobs := countUIRows(s.rows)
+	switch s.focusPane {
+	case "tunnel":
+		if s.tunnelCursor >= 0 && s.tunnelCursor < tunnels {
+			return uiRow{kind: "tunnel", id: s.rows[s.tunnelCursor].id, idx: s.tunnelCursor}
+		}
+	case "job":
+		if s.jobCursor >= 0 && s.jobCursor < jobs {
+			offset := tunnels + s.jobCursor
+			return uiRow{kind: "job", id: s.rows[offset].id, idx: s.jobCursor}
+		}
+	}
+	if s.cursor < 0 || s.cursor >= len(s.rows) {
 		return uiRow{}
 	}
 	return s.rows[s.cursor]
@@ -70,6 +88,18 @@ func (s *uiState) currentRow() uiRow {
 func (s *uiState) isSelected(kind string, idx int) bool {
 	r := s.currentRow()
 	return r.kind == kind && r.idx == idx
+}
+
+func countUIRows(rows []uiRow) (tunnels, jobs int) {
+	for _, r := range rows {
+		switch r.kind {
+		case "tunnel":
+			tunnels++
+		case "job":
+			jobs++
+		}
+	}
+	return tunnels, jobs
 }
 
 // cmdUI is `srv ui` -- a one-screen dashboard showing the bits of srv
@@ -251,13 +281,59 @@ func clampCursor(st *uiState) {
 	n := len(st.rows)
 	if n == 0 {
 		st.cursor = -1
+		st.focusPane = ""
+		st.tunnelCursor = 0
+		st.jobCursor = 0
 		return
 	}
-	if st.cursor < 0 {
-		st.cursor = 0
+	tunnels, jobs := countUIRows(st.rows)
+	if st.focusPane == "" {
+		switch {
+		case st.cursor >= 0 && st.cursor < tunnels:
+			st.focusPane = "tunnel"
+			st.tunnelCursor = st.cursor
+		case st.cursor >= tunnels && st.cursor < n:
+			st.focusPane = "job"
+			st.jobCursor = st.cursor - tunnels
+		case st.cursor >= n && n > 0:
+			last := st.rows[n-1]
+			st.focusPane = last.kind
+			if last.kind == "tunnel" {
+				st.tunnelCursor = tunnels - 1
+			} else {
+				st.jobCursor = jobs - 1
+			}
+		case tunnels > 0:
+			st.focusPane = "tunnel"
+		default:
+			st.focusPane = "job"
+		}
 	}
-	if st.cursor >= n {
-		st.cursor = n - 1
+	if tunnels == 0 && st.focusPane == "tunnel" {
+		st.focusPane = "job"
+	}
+	if jobs == 0 && st.focusPane == "job" {
+		st.focusPane = "tunnel"
+	}
+	if st.tunnelCursor < 0 {
+		st.tunnelCursor = 0
+	}
+	if st.jobCursor < 0 {
+		st.jobCursor = 0
+	}
+	if tunnels > 0 && st.tunnelCursor >= tunnels {
+		st.tunnelCursor = tunnels - 1
+	}
+	if jobs > 0 && st.jobCursor >= jobs {
+		st.jobCursor = jobs - 1
+	}
+	switch st.focusPane {
+	case "tunnel":
+		st.cursor = st.tunnelCursor
+	case "job":
+		st.cursor = tunnels + st.jobCursor
+	default:
+		st.cursor = 0
 	}
 }
 
@@ -269,6 +345,52 @@ func currentJobs() []*JobRecord {
 		return nil
 	}
 	return jf.Jobs
+}
+
+func focusNextPane(st *uiState) {
+	tunnels, jobs := countUIRows(st.rows)
+	switch st.focusPane {
+	case "tunnel":
+		if jobs > 0 {
+			st.focusPane = "job"
+		}
+	case "job":
+		if tunnels > 0 {
+			st.focusPane = "tunnel"
+		}
+	default:
+		if tunnels > 0 {
+			st.focusPane = "tunnel"
+		} else if jobs > 0 {
+			st.focusPane = "job"
+		}
+	}
+	clampCursor(st)
+	st.forceRedraw = true
+}
+
+func focusPrevPane(st *uiState) {
+	focusNextPane(st)
+}
+
+func moveFocusedRow(st *uiState, delta int) {
+	tunnels, jobs := countUIRows(st.rows)
+	switch st.focusPane {
+	case "tunnel":
+		if tunnels == 0 {
+			return
+		}
+		st.tunnelCursor += delta
+	case "job":
+		if jobs == 0 {
+			return
+		}
+		st.jobCursor += delta
+	default:
+		return
+	}
+	clampCursor(st)
+	st.forceRedraw = true
 }
 
 // handleUIKey is the input dispatcher. Returns false when the user
@@ -327,18 +449,17 @@ func handleUIKey(b byte, st *uiState, jobs []*JobRecord, tunnelNames []string, c
 		st.forceRedraw = true
 	case 'a':
 		st.showAll = !st.showAll
-		st.cursor = 0
+		st.focusPane = "job"
+		st.jobCursor = 0
 		st.forceRedraw = true
+	case '\t', 'l':
+		focusNextPane(st)
+	case 'h':
+		focusPrevPane(st)
 	case 'j':
-		if st.cursor >= 0 && st.cursor+1 < len(st.rows) {
-			st.cursor++
-			st.forceRedraw = true
-		}
+		moveFocusedRow(st, 1)
 	case 'k':
-		if st.cursor > 0 {
-			st.cursor--
-			st.forceRedraw = true
-		}
+		moveFocusedRow(st, -1)
 	case '\r', '\n':
 		if row.kind != "" {
 			st.detailMode = true
@@ -360,15 +481,13 @@ func handleUIKey(b byte, st *uiState, jobs []*JobRecord, tunnelNames []string, c
 		}
 		switch b3 {
 		case 'A':
-			if st.cursor > 0 {
-				st.cursor--
-				st.forceRedraw = true
-			}
+			moveFocusedRow(st, -1)
 		case 'B':
-			if st.cursor >= 0 && st.cursor+1 < len(st.rows) {
-				st.cursor++
-				st.forceRedraw = true
-			}
+			moveFocusedRow(st, 1)
+		case 'C':
+			focusNextPane(st)
+		case 'D':
+			focusPrevPane(st)
 		}
 	}
 	return true
@@ -603,20 +722,349 @@ func redrawDashboard(content string, prevLines int) {
 // `jobs` and `st` are nil for the non-TTY one-shot path; in that
 // mode the Jobs section renders without selection markers and the
 // footer drops the interactive-key hints.
+// renderDashboard draws every section as its own boxed panel. Each
+// btop* function owns its panel borders via boxTop / boxLine /
+// boxBottom; the focused panel (tunnels or jobs) gets a brighter
+// border and a `*` prefix on the title so the active pane is obvious
+// at a glance.
 func renderDashboard(cfg *Config, jobs []*JobRecord, tunnelNames []string, st *uiState) string {
 	var sb strings.Builder
-	dashHeader(&sb, st)
-	dashActive(&sb, cfg)
-	dashDaemon(&sb)
-	dashMCP(&sb)
-	dashGroups(&sb, cfg)
-	dashTunnels(&sb, cfg, tunnelNames, st)
-	dashJobs(&sb, jobs, st)
-	dashFooter(&sb, st)
+	btopHeader(&sb, st)
+	btopActive(&sb, cfg)
+	btopDaemon(&sb)
+	btopTunnels(&sb, cfg, tunnelNames, st)
+	btopJobs(&sb, jobs, st)
+	btopMCP(&sb)
+	btopGroups(&sb, cfg)
+	btopFooter(&sb, st)
 	if st != nil && st.confirm != nil {
 		renderConfirmPopup(&sb, st.confirm)
 	}
 	return sb.String()
+}
+
+// boxColor returns the ANSI escape used for a panel's border.
+// Focused panels get bright cyan + bold, every other panel stays
+// dim gray. Single switch-by-bool so a theme rework touches one
+// spot rather than every box* call site.
+func boxColor(focused bool) string {
+	if focused {
+		return ansiCyan + ansiBold
+	}
+	return ansiDim
+}
+
+// boxTop / boxBottom / boxLine are the default-unfocused variants
+// most panels use. Tunnels and Jobs (the only focusable panes) call
+// the *Focused variants below and supply the active flag directly.
+func boxTop(sb *strings.Builder, title string)    { boxTopFocused(sb, title, false) }
+func boxBottom(sb *strings.Builder)               { boxBottomFocused(sb, false) }
+func boxLine(sb *strings.Builder, content string) { boxLineFocused(sb, content, false) }
+
+// boxTopFocused draws a rounded-corner panel header with the title
+// embedded near the top-left, rustnet / bottom -style. Focused panels
+// get a "▸ " arrow prefix on the title plus a bright cyan border so
+// the active pane is unambiguous on screen.
+func boxTopFocused(sb *strings.Builder, title string, focused bool) {
+	border := boxColor(focused)
+	label := ""
+	if title != "" {
+		t := strings.ToUpper(title)
+		if focused {
+			label = " " + ansiReset + ansiBold + ansiYellow + "▸ " + t + ansiReset + border + " "
+		} else {
+			label = " " + ansiReset + ansiBold + ansiCyan + t + ansiReset + border + " "
+		}
+	}
+	labelVis := visualWidth(label)
+	remain := dashboardWidth - 2 - labelVis
+	if remain < 0 {
+		remain = 0
+	}
+	left := 2
+	if remain < left {
+		left = remain
+	}
+	right := remain - left
+	fmt.Fprintf(sb, "%s╭%s%s%s%s╮%s\n",
+		border,
+		strings.Repeat("─", left),
+		label,
+		strings.Repeat("─", right),
+		border, ansiReset)
+}
+
+func boxBottomFocused(sb *strings.Builder, focused bool) {
+	border := boxColor(focused)
+	fmt.Fprintf(sb, "%s╰%s╯%s\n", border, strings.Repeat("─", dashboardWidth-2), ansiReset)
+}
+
+func boxLineFocused(sb *strings.Builder, content string, focused bool) {
+	border := boxColor(focused)
+	fmt.Fprintf(sb, "%s│%s %s %s│%s\n",
+		border, ansiReset, padAnsiRight(content, dashboardContentWidth), border, ansiReset)
+}
+
+func padAnsiRight(s string, width int) string {
+	pad := width - visualWidth(s)
+	if pad < 0 {
+		pad = 0
+	}
+	return s + strings.Repeat(" ", pad)
+}
+
+func fitPlain(s string, width int) string {
+	if width <= 0 || len(s) <= width {
+		return s
+	}
+	if width <= 3 {
+		return s[:width]
+	}
+	return s[:width-3] + "..."
+}
+
+func btopKV(key, value string) string {
+	return ansiDim + fmt.Sprintf("%-9s", strings.ToUpper(key)+":") + ansiReset + " " + value
+}
+
+func btopPair(leftLabel, leftValue, rightLabel, rightValue string) string {
+	left := btopKV(leftLabel, leftValue)
+	right := btopKV(rightLabel, rightValue)
+	spaces := dashboardContentWidth - visualWidth(left) - visualWidth(right)
+	if spaces < 2 {
+		spaces = 2
+	}
+	return left + strings.Repeat(" ", spaces) + right
+}
+
+func btopHeader(sb *strings.Builder, st *uiState) {
+	boxTop(sb, "srv")
+	boxLine(sb, ansiBold+ansiMagenta+"SRV UI"+ansiReset+"  "+ansiDim+"windowed control dashboard"+ansiReset)
+	if st == nil {
+		boxLine(sb, ansiDim+"snapshot mode (no tty)"+ansiReset)
+		boxBottom(sb)
+		fmt.Fprintln(sb)
+		return
+	}
+	mode := "active only"
+	if st.showAll {
+		mode = "all jobs"
+	}
+	boxLine(sb, fmt.Sprintf("keys: %sq%s quit  %sr%s redraw  %stab/h/l%s window  %sj/k%s row  %senter%s detail  %sa%s jobs %s",
+		ansiYellow+ansiBold, ansiReset,
+		ansiYellow+ansiBold, ansiReset,
+		ansiYellow+ansiBold, ansiReset,
+		ansiYellow+ansiBold, ansiReset,
+		ansiYellow+ansiBold, ansiReset,
+		ansiYellow+ansiBold, ansiReset,
+		ansiDim+"("+mode+")"+ansiReset))
+	boxBottom(sb)
+	fmt.Fprintln(sb)
+}
+
+func btopActive(sb *strings.Builder, cfg *Config) {
+	boxTop(sb, "active")
+	name, prof, err := ResolveProfile(cfg, "")
+	if err != nil {
+		boxLine(sb, btopKV("state", dashStatus("no profile", ansiDim)))
+		boxBottom(sb)
+		fmt.Fprintln(sb)
+		return
+	}
+	target := prof.Host
+	if prof.User != "" {
+		target = prof.User + "@" + prof.Host
+	}
+	if prof.GetPort() != 22 {
+		target += ":" + strconv.Itoa(prof.GetPort())
+	}
+	boxLine(sb, btopPair("profile", dashName(name), "target", ansiCyan+target+ansiReset))
+	boxLine(sb, btopKV("cwd", dashPath(GetCwd(name, prof))))
+	if pf := resolveProjectFile(); pf != nil {
+		boxLine(sb, btopKV("pinned", dashPath(pf.Path)))
+	}
+	boxBottom(sb)
+	fmt.Fprintln(sb)
+}
+
+func btopDaemon(sb *strings.Builder) {
+	boxTop(sb, "daemon")
+	conn := daemonDial(300 * time.Millisecond)
+	if conn == nil {
+		boxLine(sb, btopKV("state", dashStatus("stopped", ansiDim)))
+		boxBottom(sb)
+		fmt.Fprintln(sb)
+		return
+	}
+	defer conn.Close()
+	resp, err := daemonCall(conn, daemonRequest{Op: "status"}, time.Second)
+	if err != nil || resp == nil || !resp.OK {
+		boxLine(sb, btopKV("state", dashStatus("unreachable", ansiRed)))
+		boxBottom(sb)
+		fmt.Fprintln(sb)
+		return
+	}
+	boxLine(sb, btopPair("state", dashStatus("running", ansiGreen), "uptime", fmtDuration(time.Duration(resp.Uptime)*time.Second)))
+	boxLine(sb, btopPair("pooled", strconv.Itoa(len(resp.Profiles)), "profiles", ansiCyan+fitPlain(strings.Join(resp.Profiles, ", "), 42)+ansiReset))
+	boxBottom(sb)
+	fmt.Fprintln(sb)
+}
+
+func btopGroups(sb *strings.Builder, cfg *Config) {
+	if len(cfg.Groups) == 0 {
+		return
+	}
+	boxTop(sb, fmt.Sprintf("groups %d", len(cfg.Groups)))
+	boxLine(sb, ansiDim+"NAME          SIZE  MEMBERS"+ansiReset)
+	boxLine(sb, ansiDim+strings.Repeat("-", dashboardContentWidth)+ansiReset)
+	names := make([]string, 0, len(cfg.Groups))
+	for n := range cfg.Groups {
+		names = append(names, n)
+	}
+	sort.Strings(names)
+	for _, n := range names {
+		members := cfg.Groups[n]
+		boxLine(sb, fmt.Sprintf("%-12s  %s%2d%s  %s",
+			dashName(n), ansiMagenta+ansiBold, len(members), ansiReset, ansiCyan+fitPlain(strings.Join(members, ", "), 56)+ansiReset))
+	}
+	boxBottom(sb)
+	fmt.Fprintln(sb)
+}
+
+func btopTunnels(sb *strings.Builder, cfg *Config, names []string, st *uiState) {
+	if len(names) == 0 {
+		return
+	}
+	focused := st != nil && st.focusPane == "tunnel"
+	active, errs := loadTunnelStatuses()
+	title := fmt.Sprintf("tunnels %d", len(names))
+	boxTopFocused(sb, title, focused)
+	boxLineFocused(sb, ansiDim+"  NAME          TYPE     SPEC / STATE"+ansiReset, focused)
+	boxLineFocused(sb, ansiDim+strings.Repeat("-", dashboardContentWidth)+ansiReset, focused)
+	for i, n := range names {
+		def := cfg.Tunnels[n]
+		status := dashStatus("stopped", ansiDim)
+		extra := ""
+		errMsg := ""
+		if a, ok := active[n]; ok {
+			status = dashStatus("running", ansiGreen)
+			extra = " listen=" + a.Listen
+		} else if msg, ok := errs[n]; ok {
+			status = dashStatus("failed", ansiRed)
+			errMsg = msg
+		}
+		flag := ""
+		if def.Autostart {
+			flag = " " + dashStatus("autostart", ansiCyan)
+		}
+		marker := "  "
+		row := fmt.Sprintf("%s%-12s  %-7s  %s  %s%s%s",
+			marker, dashName(n), ansiMagenta+def.Type+ansiReset, dashPath(fitPlain(def.Spec, 32)), status, ansiDim+extra+ansiReset, flag)
+		selected := st != nil && st.isSelected("tunnel", i)
+		if selected {
+			row = ansiYellow + ansiBold + "> " + ansiReset + ansiReverse + row[2:] + ansiReset
+		}
+		boxLineFocused(sb, row, focused)
+		if errMsg != "" {
+			boxLineFocused(sb, "    "+ansiRed+fitPlain(errMsg, 76)+ansiReset, focused)
+		}
+	}
+	boxBottomFocused(sb, focused)
+	fmt.Fprintln(sb)
+}
+
+func btopJobs(sb *strings.Builder, jobs []*JobRecord, st *uiState) {
+	hidden := 0
+	if st != nil && !st.showAll {
+		hidden = st.hiddenJobs
+	}
+	if len(jobs) == 0 && hidden == 0 {
+		return
+	}
+	focused := st != nil && st.focusPane == "job"
+	title := fmt.Sprintf("jobs %d", len(jobs))
+	if hidden > 0 {
+		title = fmt.Sprintf("jobs %d + %d hidden", len(jobs), hidden)
+	}
+	boxTopFocused(sb, title, focused)
+	if len(jobs) == 0 {
+		boxLineFocused(sb, ansiDim+"nothing running; press a to show completed jobs"+ansiReset, focused)
+		boxBottomFocused(sb, focused)
+		fmt.Fprintln(sb)
+		return
+	}
+	boxLineFocused(sb, ansiDim+"  ID            PROFILE     PID       AGE       COMMAND"+ansiReset, focused)
+	boxLineFocused(sb, ansiDim+strings.Repeat("-", dashboardContentWidth)+ansiReset, focused)
+	for i, j := range jobs {
+		cmd := fitPlain(j.Cmd, 42)
+		started := j.Started
+		if t, ok := parseISOLike(j.Started); ok {
+			started = fmtDuration(time.Since(t)) + " ago"
+		}
+		row := fmt.Sprintf("  %-12s  %-10s  %-8d  %-8s  %s",
+			dashName(truncID(j.ID)), ansiCyan+j.Profile+ansiReset, j.Pid, dashMeta(started), cmd)
+		if st != nil && st.isSelected("job", i) {
+			row = ansiYellow + ansiBold + "> " + ansiReset + ansiReverse + row[2:] + ansiReset
+		}
+		boxLineFocused(sb, row, focused)
+	}
+	boxBottomFocused(sb, focused)
+	fmt.Fprintln(sb)
+}
+
+func btopMCP(sb *strings.Builder) {
+	st := readMCPStatus()
+	if !st.LogExists {
+		return
+	}
+	boxTop(sb, "mcp")
+	if len(st.ActivePIDs) == 0 {
+		boxLine(sb, btopPair("state", dashStatus("idle", ansiDim), "last", fmtDuration(time.Since(st.LastActive))+" ago"))
+	} else {
+		pids := make([]string, 0, len(st.ActivePIDs))
+		for _, p := range st.ActivePIDs {
+			pids = append(pids, strconv.Itoa(p))
+		}
+		boxLine(sb, btopPair("state", dashStatus("running", ansiGreen), "pids", strings.Join(pids, ", ")))
+	}
+	if len(st.RecentTools) > 0 {
+		boxLine(sb, ansiDim+"TOOL                  DUR      STATE    AGE"+ansiReset)
+		boxLine(sb, ansiDim+strings.Repeat("-", dashboardContentWidth)+ansiReset)
+		for _, tc := range st.RecentTools {
+			status := dashStatus("ok", ansiGreen)
+			if !tc.OK {
+				status = dashStatus("err", ansiRed)
+			}
+			boxLine(sb, fmt.Sprintf("%-20s  %-7s  %-7s  %s",
+				ansiYellow+tc.Name+ansiReset, ansiMagenta+tc.Dur+ansiReset, status, dashMeta(fmtDuration(time.Since(tc.When))+" ago")))
+		}
+	}
+	boxBottom(sb)
+	fmt.Fprintln(sb)
+}
+
+func btopFooter(sb *strings.Builder, st *uiState) {
+	boxTop(sb, "help")
+	if st == nil {
+		boxLine(sb, ansiDim+"snapshot complete"+ansiReset)
+	} else if st.statusMsg != "" {
+		boxLine(sb, st.statusMsg)
+	} else {
+		focus := st.focusPane
+		if focus == "" {
+			focus = "none"
+		}
+		boxLine(sb, btopPair("focus", ansiYellow+ansiBold+strings.ToUpper(focus)+ansiReset, "mode", "window navigation"))
+		switch focus {
+		case "tunnel":
+			boxLine(sb, "actions: "+ansiYellow+"j/k"+ansiReset+" move  "+ansiYellow+"enter"+ansiReset+" details  "+ansiYellow+"space"+ansiReset+" up/down  "+ansiYellow+"x"+ansiReset+" remove  "+ansiYellow+"tab"+ansiReset+" next window")
+		case "job":
+			boxLine(sb, "actions: "+ansiYellow+"j/k"+ansiReset+" move  "+ansiYellow+"enter"+ansiReset+" details  "+ansiYellow+"K"+ansiReset+" kill  "+ansiYellow+"a"+ansiReset+" show all  "+ansiYellow+"tab"+ansiReset+" next window")
+		default:
+			boxLine(sb, "actions: "+ansiYellow+"tab"+ansiReset+" choose window  "+ansiYellow+"r"+ansiReset+" refresh  "+ansiYellow+"q"+ansiReset+" quit")
+		}
+	}
+	boxBottom(sb)
 }
 
 // renderConfirmPopup draws a centered box at the bottom of the
@@ -832,16 +1280,19 @@ func wrapText(s string, width int) []string {
 	return lines
 }
 
-const dashboardRule = "================================================================"
-const dashboardSubRule = "----------------------------------------------------------------"
+const dashboardWidth = 88
+const dashboardContentWidth = dashboardWidth - 4
+const dashboardRule = "========================================================================================"
+const dashboardSubRule = "----------------------------------------------------------------------------------------"
 
 func dashHeader(sb *strings.Builder, st *uiState) {
-	fmt.Fprintf(sb, "%sSRV UI%s  %scurrent-shell view, jobs are global%s\n",
-		ansiBold+ansiMagenta, ansiReset, ansiDim, ansiReset)
-	fmt.Fprintf(sb, "%s%s%s\n", ansiDim, dashboardRule, ansiReset)
+	boxTop(sb, "srv")
+	boxLine(sb, ansiBold+ansiMagenta+"SRV UI"+ansiReset+"  "+ansiDim+"current-shell control dashboard"+ansiReset)
 	if st == nil {
 		// Non-TTY snapshot mode: no interactive keys to advertise.
-		fmt.Fprintf(sb, "%ssnapshot mode (no tty)%s\n\n", ansiDim, ansiReset)
+		boxLine(sb, ansiDim+"snapshot mode (no tty)"+ansiReset)
+		boxBottom(sb)
+		fmt.Fprintln(sb)
 		return
 	}
 	mode := "active only"
