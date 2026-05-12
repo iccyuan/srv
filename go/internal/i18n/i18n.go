@@ -1,4 +1,4 @@
-package main
+package i18n
 
 import (
 	"fmt"
@@ -23,27 +23,58 @@ const (
 var (
 	detectedLangOnce sync.Once
 	detectedLangVal  lang
+
+	// inMCPMode is set by callers via SetMCPMode. When true, T() always
+	// returns English regardless of locale -- AI clients read tool
+	// descriptions back into the model and any locale-dependent text
+	// makes behaviour non-reproducible across machines.
+	inMCPMode bool
+
+	// configLangProvider lets package main register a lazy lookup
+	// into Config.Lang without i18n having to depend on the config
+	// package. Returns the configured language string ("en"/"zh"/"")
+	// when available, "" when no config is present.
+	configLangProvider = func() string { return "" }
+
+	// platformLangProvider returns the OS-reported locale tag (e.g.
+	// "zh-cn") on Windows, or "" elsewhere. Set by the
+	// build-tagged platform_*.go file in this package.
+	platformLangProvider = func() string { return "" }
 )
 
-// currentLang returns the active UI language for the process. Detection
-// runs at most once and caches the result.
+// SetMCPMode pins the active language to English for the rest of the
+// process when called with true. mcp_loop.go invokes it on startup.
+func SetMCPMode(on bool) { inMCPMode = on }
+
+// SetConfigLangProvider lets package main inject a lazy reader for
+// Config.Lang so i18n can honour the user's pinned language without
+// having a hard dependency on the config package. Provider may return
+// "" to defer to env vars / platform locale.
+func SetConfigLangProvider(fn func() string) {
+	if fn != nil {
+		configLangProvider = fn
+	}
+}
+
+// currentLang returns the active UI language for the process.
+// Detection runs at most once and caches the result.
 //
 // Resolution order (highest first):
-//  1. mcpMode -> always English. AI clients (Claude Code / Codex) read
-//     tool descriptions and error messages and feed them back into the
-//     model; locale-dependent text creates two problems: (a) the model's
-//     learned patterns for srv-style tools assume English, (b) the same
-//     prompt produces different model behaviour on a 中文 vs en_US
-//     machine. Pin English under MCP so behaviour is reproducible.
-//  2. Config.Lang ("en" / "zh"; "" or "auto" defers to env)
+//  1. inMCPMode -> always English. AI clients (Claude Code / Codex)
+//     read tool descriptions and error messages and feed them back
+//     into the model; locale-dependent text creates two problems:
+//     (a) the model's learned patterns for srv-style tools assume
+//     English, (b) the same prompt produces different model
+//     behaviour on a 中文 vs en_US machine. Pin English under MCP
+//     so behaviour is reproducible.
+//  2. configLangProvider() ("en" / "zh"; "" or "auto" defers to env)
 //  3. $SRV_LANG ("en" / "zh"; "auto" defers)
-//  4. $LC_ALL / $LC_MESSAGES / $LANG (anything starting with "zh" -> Chinese; else English)
-//  5. Platform locale (Windows only; querying Win32 GetUserDefaultLocaleName).
-//     POSIX envs are typically empty on Windows, so without this a 中文
-//     Windows install would always fall through to English.
+//  4. $LC_ALL / $LC_MESSAGES / $LANG (anything starting with "zh" ->
+//     Chinese; else English)
+//  5. Platform locale (Windows only, via platformLangProvider).
 //  6. English fallback
 func currentLang() lang {
-	if mcpMode {
+	if inMCPMode {
 		return langEN
 	}
 	detectedLangOnce.Do(func() {
@@ -53,16 +84,11 @@ func currentLang() lang {
 }
 
 func detectLang() lang {
-	// Config takes precedence so users can pin a language regardless of
-	// what their shell exports. LoadConfig is best-effort -- absence
-	// just means "fall through to env".
-	if cfg, _ := LoadConfig(); cfg != nil {
-		switch strings.ToLower(strings.TrimSpace(cfg.Lang)) {
-		case "en":
-			return langEN
-		case "zh":
-			return langZH
-		}
+	switch strings.ToLower(strings.TrimSpace(configLangProvider())) {
+	case "en":
+		return langEN
+	case "zh":
+		return langZH
 	}
 	if v := os.Getenv("SRV_LANG"); v != "" {
 		switch strings.ToLower(strings.TrimSpace(v)) {
@@ -72,9 +98,10 @@ func detectLang() lang {
 			return langZH
 		}
 	}
-	// POSIX locale envs. The first non-empty one wins; if it's not zh*
-	// we treat the user as having explicitly opted into a non-Chinese
-	// locale (English fallback) and skip the platform probe.
+	// POSIX locale envs. The first non-empty one wins; if it's not
+	// zh* we treat the user as having explicitly opted into a
+	// non-Chinese locale (English fallback) and skip the platform
+	// probe.
 	posixSet := false
 	for _, k := range []string{"LC_ALL", "LC_MESSAGES", "LANG"} {
 		if v := os.Getenv(k); v != "" {
@@ -86,19 +113,19 @@ func detectLang() lang {
 		}
 	}
 	if !posixSet {
-		if strings.HasPrefix(platformLang(), "zh") {
+		if strings.HasPrefix(platformLangProvider(), "zh") {
 			return langZH
 		}
 	}
 	return langEN
 }
 
-// t looks up the active-language template for key, applies fmt
+// T looks up the active-language template for key, applies fmt
 // arguments, and returns the formatted string. Falls back to the
 // English template when a key is missing in the active language. If
 // even the English template is missing, returns the key itself --
 // surfaces missing translations as obvious bugs in stderr.
-func t(key string, args ...any) string {
+func T(key string, args ...any) string {
 	tmpl := messageFor(currentLang(), key)
 	if len(args) == 0 {
 		return tmpl

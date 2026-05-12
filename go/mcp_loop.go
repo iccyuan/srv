@@ -7,6 +7,8 @@ import (
 	"os"
 	"strings"
 	"time"
+
+	"srv/internal/i18n"
 )
 
 // mcpMode is set true while the process is acting as a stdio MCP server.
@@ -35,6 +37,7 @@ func currentProgressTokenFn() any { return currentProgressToken }
 // post-mortem'd (the client doesn't surface why a session ended).
 func cmdMcp(cfg *Config) error {
 	mcpMode = true
+	i18n.SetMCPMode(true)
 	mcpLogf("start v=%s", Version)
 	rd := bufio.NewReader(os.Stdin)
 	for {

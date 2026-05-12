@@ -3,6 +3,7 @@ package main
 import (
 	"fmt"
 	"os"
+	"srv/internal/i18n"
 	"strings"
 )
 
@@ -158,7 +159,7 @@ func emitTypoHintPre(cfg *Config, opts globalOpts, sub string) {
 		return
 	}
 	if match := suggestSubcommand(sub); match != "" {
-		fmt.Fprintln(os.Stderr, t("hint.typo_pre", sub, match))
+		fmt.Fprintln(os.Stderr, i18n.T("hint.typo_pre", sub, match))
 	}
 }
 
@@ -199,6 +200,6 @@ func emitTypoHintPostFailure(cfg *Config, opts globalOpts, cmd string, exitCode 
 		return
 	}
 	if match := suggestSubcommand(first); match != "" {
-		fmt.Fprintln(os.Stderr, t("hint.typo_post", first, match, match))
+		fmt.Fprintln(os.Stderr, i18n.T("hint.typo_post", first, match, match))
 	}
 }

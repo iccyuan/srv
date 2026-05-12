@@ -1,6 +1,10 @@
 package main
 
-import "fmt"
+import (
+	"fmt"
+
+	"srv/internal/i18n"
+)
 
 // Subcommand registry. ONE source of truth: dispatch, the
 // reservedSubcommands set used by the typo-hint engine, and -- once the
@@ -49,7 +53,7 @@ type subcommand struct {
 var subcommands = []subcommand{
 	// Help / version / first-run -- need no config.
 	{name: "help", aliases: []string{"--help", "-h"}, noConfig: true, handler: func(c cmdCtx) error {
-		fmt.Print(t("help.full"))
+		fmt.Print(i18n.T("help.full"))
 		return nil
 	}},
 	{name: "version", aliases: []string{"--version"}, noConfig: true, handler: func(c cmdCtx) error {

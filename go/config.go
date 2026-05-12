@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"srv/internal/i18n"
 	"srv/internal/srvutil"
 	"time"
 )
@@ -303,11 +304,11 @@ func ResolveProfile(cfg *Config, override string) (string, *Profile, error) {
 		name = cfg.DefaultProfile
 	}
 	if name == "" {
-		return "", nil, fmt.Errorf("%s", t("err.no_profile"))
+		return "", nil, fmt.Errorf("%s", i18n.T("err.no_profile"))
 	}
 	p, ok := cfg.Profiles[name]
 	if !ok {
-		return "", nil, fmt.Errorf("%s", t("err.profile_not_found", name))
+		return "", nil, fmt.Errorf("%s", i18n.T("err.profile_not_found", name))
 	}
 	p.Name = name
 	return name, p, nil
