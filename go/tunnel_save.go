@@ -2,9 +2,8 @@ package main
 
 import (
 	"fmt"
-	"net"
 	"sort"
-	"strconv"
+	"srv/internal/sshx"
 	"time"
 )
 
@@ -52,7 +51,7 @@ func tunnelAdd(args []string, cfg *Config, profileOverride string) error {
 			if specSeen {
 				return exitErr(2, "unexpected arg %q (already have spec %q)", a, def.Spec)
 			}
-			if _, _, _, err := parseTunnelSpec(a); err != nil {
+			if _, _, _, err := sshx.ParseTunnelSpec(a); err != nil {
 				return exitErr(2, "bad spec %q: %v", a, err)
 			}
 			def.Spec = a
@@ -290,26 +289,5 @@ func loadTunnelStatuses() (active map[string]tunnelInfo, errs map[string]string)
 // Returns localPort/remoteHost/remotePort -- semantics flip in the
 // caller based on TunnelDef.Type.
 func applyTunnelSpec(spec string) (int, string, int, error) {
-	return parseTunnelSpec(spec)
-}
-
-// tunnelListenLabel formats the human-facing "I'm listening here" line
-// for an active TunnelDef. Pulled out so daemon status and CLI both
-// format identically.
-func tunnelListenLabel(def *TunnelDef, profile *Profile) string {
-	lp, _, _, err := parseTunnelSpec(def.Spec)
-	if err != nil {
-		return def.Spec
-	}
-	switch def.Type {
-	case "remote":
-		// Remote listener side -- we say "remote-host:port".
-		host := "localhost"
-		if profile != nil && profile.Host != "" {
-			host = profile.Host
-		}
-		return host + ":" + strconv.Itoa(lp)
-	default:
-		return net.JoinHostPort("127.0.0.1", strconv.Itoa(lp))
-	}
+	return sshx.ParseTunnelSpec(spec)
 }

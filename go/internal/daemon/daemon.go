@@ -1,4 +1,4 @@
-package main
+package daemon
 
 import (
 	"bufio"
@@ -11,8 +11,11 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"srv/internal/clierr"
+	"srv/internal/config"
 	"srv/internal/srvpath"
 	"srv/internal/srvtty"
+	"srv/internal/sshx"
 	"strings"
 	"sync"
 	"syscall"
@@ -44,7 +47,7 @@ import (
 // requests without `"v"` and treat them as v0 (unversioned, pre-2.4.1).
 const DaemonProtoVersion = 1
 
-type daemonRequest struct {
+type Request struct {
 	V       int    `json:"v,omitempty"`
 	ID      int    `json:"id"`
 	Op      string `json:"op"`
@@ -70,7 +73,7 @@ type daemonRequest struct {
 	TTLSec int `json:"ttl_sec,omitempty"`
 }
 
-type daemonResponse struct {
+type Response struct {
 	V        int      `json:"v,omitempty"`
 	ID       int      `json:"id"`
 	OK       bool     `json:"ok"`
@@ -86,7 +89,7 @@ type daemonResponse struct {
 	Uptime   int64    `json:"uptime_sec,omitempty"`
 	// Tunnels carries the active-tunnel snapshot returned by
 	// tunnel_list. Empty otherwise.
-	Tunnels []tunnelInfo `json:"tunnels,omitempty"`
+	Tunnels []TunnelInfo `json:"tunnels,omitempty"`
 	// TunnelErrors maps tunnel name -> last-attempt error message for
 	// saved tunnels the daemon tried but failed to bring up
 	// (autostart-on-boot or explicit tunnel_up). Cleared on
@@ -122,7 +125,7 @@ type streamChunk struct {
 }
 
 type pooledClient struct {
-	client   *Client
+	client   *sshx.Client
 	lastUsed time.Time
 }
 
@@ -169,7 +172,7 @@ type sudoCacheEntry struct {
 // goroutine watches stopCh and unwinds the listener when it fires.
 type activeTunnel struct {
 	name      string
-	def       *TunnelDef
+	def       *config.TunnelDef
 	profile   string
 	listen    string // human-readable listen address (cached for status)
 	startedAt time.Time
@@ -207,36 +210,36 @@ func daemonSocketPath() string {
 
 // Cmd starts the daemon listener (foreground). Ctrl-C stops it
 // cleanly and unlinks the socket file.
-func cmdDaemon(args []string) error {
+func Cmd(args []string) error {
 	// Subcommands of `srv daemon` itself: status / stop.
 	if len(args) > 0 {
 		switch args[0] {
 		case "status":
-			return exitCode(daemonClientStatus(args[1:]))
+			return clierr.Code(daemonClientStatus(args[1:]))
 		case "stop":
-			return exitCode(daemonClientStop())
+			return clierr.Code(daemonClientStop())
 		case "restart":
 			if rc := daemonClientStop(); rc != 0 {
-				return exitCode(rc)
+				return clierr.Code(rc)
 			}
 			// Wait for the old daemon to actually exit before
 			// spawning a new one. daemonClientStop only waits for
 			// the shutdown RPC's response, not for the daemon
 			// process to finish teardown. If we race ahead,
-			// ensureDaemon's ping might hit the still-listening
+			// Ensure's ping might hit the still-listening
 			// dying daemon, declare success, and skip the spawn --
 			// at which point autostart tunnels never come back up
 			// because no fresh daemon ever runs startAutostartTunnels.
 			waitDaemonGone(3 * time.Second)
-			if ensureDaemon() {
+			if Ensure() {
 				fmt.Println("daemon: restarted")
 				return nil
 			}
 			return fmt.Errorf("daemon: restart failed")
 		case "logs":
-			return exitCode(daemonClientLogs())
+			return clierr.Code(daemonClientLogs())
 		case "prune-cache":
-			return exitCode(daemonClientPruneCache())
+			return clierr.Code(daemonClientPruneCache())
 		}
 	}
 	sockPath := daemonSocketPath()
@@ -244,7 +247,7 @@ func cmdDaemon(args []string) error {
 	// Best-effort cleanup of stale socket.
 	if _, err := os.Stat(sockPath); err == nil {
 		// Try a quick ping; if unreachable, remove.
-		if !daemonPing() {
+		if !Ping() {
 			_ = os.Remove(sockPath)
 		} else {
 			fmt.Fprintln(os.Stderr, "daemon already running at", sockPath)
@@ -323,10 +326,10 @@ func (s *daemonState) handleConn(conn net.Conn) {
 		if line == "" {
 			continue
 		}
-		var req daemonRequest
+		var req Request
 		if jerr := json.Unmarshal([]byte(line), &req); jerr != nil {
 			wrMu.Lock()
-			s.write(wr, daemonResponse{OK: false, Err: "parse: " + jerr.Error()})
+			s.write(wr, Response{OK: false, Err: "parse: " + jerr.Error()})
 			wrMu.Unlock()
 			continue
 		}
@@ -358,7 +361,7 @@ func (s *daemonState) requestStop() {
 	})
 }
 
-func (s *daemonState) write(wr *bufio.Writer, resp daemonResponse) {
+func (s *daemonState) write(wr *bufio.Writer, resp Response) {
 	resp.V = DaemonProtoVersion
 	if resp.OK && resp.Data == nil {
 		resp.Data = daemonData(resp)
@@ -372,7 +375,7 @@ func (s *daemonState) write(wr *bufio.Writer, resp daemonResponse) {
 	wr.Flush()
 }
 
-func daemonData(resp daemonResponse) any {
+func daemonData(resp Response) any {
 	data := map[string]any{}
 	if len(resp.Entries) > 0 {
 		data["entries"] = resp.Entries
@@ -401,15 +404,15 @@ func daemonData(resp daemonResponse) any {
 	return data
 }
 
-func (s *daemonState) dispatch(req daemonRequest) (resp daemonResponse) {
+func (s *daemonState) dispatch(req Request) (resp Response) {
 	defer func() {
 		if r := recover(); r != nil {
-			resp = daemonResponse{OK: false, Err: fmt.Sprintf("daemon panic: %v", r)}
+			resp = Response{OK: false, Err: fmt.Sprintf("daemon panic: %v", r)}
 		}
 	}()
 	switch req.Op {
 	case "ping":
-		return daemonResponse{OK: true}
+		return Response{OK: true}
 	case "status":
 		s.mu.Lock()
 		profs := make([]string, 0, len(s.pool))
@@ -417,13 +420,13 @@ func (s *daemonState) dispatch(req daemonRequest) (resp daemonResponse) {
 			profs = append(profs, k)
 		}
 		s.mu.Unlock()
-		return daemonResponse{
+		return Response{
 			OK:       true,
 			Profiles: profs,
 			Uptime:   int64(time.Since(s.startedAt).Seconds()),
 		}
 	case "shutdown":
-		return daemonResponse{OK: true}
+		return Response{OK: true}
 	case "ls":
 		return s.handleLs(req)
 	case "cd":
@@ -445,7 +448,7 @@ func (s *daemonState) dispatch(req daemonRequest) (resp daemonResponse) {
 	case "sudo_cache_clear":
 		return s.handleSudoCacheClear(req)
 	}
-	return daemonResponse{OK: false, Err: "unknown op: " + req.Op}
+	return Response{OK: false, Err: "unknown op: " + req.Op}
 }
 
 // getClient returns a pooled (or freshly dialed) Client for the named
@@ -455,8 +458,8 @@ func (s *daemonState) dispatch(req daemonRequest) (resp daemonResponse) {
 // The Dial step happens OUTSIDE the daemon mutex -- a slow handshake (or
 // a hanging dial when the remote is unreachable) must NOT block other
 // requests like `status` or `shutdown` that just want to read map state.
-func (s *daemonState) getClient(profileName string) (*Client, *Profile, error) {
-	cfg, err := LoadConfig()
+func (s *daemonState) getClient(profileName string) (*sshx.Client, *config.Profile, error) {
+	cfg, err := config.Load()
 	if err != nil || cfg == nil {
 		return nil, nil, fmt.Errorf("load config: %v", err)
 	}
@@ -501,7 +504,7 @@ func (s *daemonState) getClient(profileName string) (*Client, *Profile, error) {
 	}
 
 	// Slow path: dial without holding s.mu. Other requests stay responsive.
-	c, err := Dial(profile)
+	c, err := sshx.Dial(profile)
 	if err != nil {
 		return nil, profile, err
 	}
@@ -520,10 +523,10 @@ func (s *daemonState) getClient(profileName string) (*Client, *Profile, error) {
 	return c, profile, nil
 }
 
-func (s *daemonState) handleLs(req daemonRequest) daemonResponse {
+func (s *daemonState) handleLs(req Request) Response {
 	c, profile, err := s.getClient(req.Profile)
 	if err != nil {
-		return daemonResponse{OK: false, Err: err.Error()}
+		return Response{OK: false, Err: err.Error()}
 	}
 	// Use the caller's cwd (sent in the request); fall back to default for
 	// safety only.
@@ -531,15 +534,15 @@ func (s *daemonState) handleLs(req daemonRequest) daemonResponse {
 	if cwd == "" {
 		cwd = profile.GetDefaultCwd()
 	}
-	dirPart, basePart := splitRemotePrefix(req.Prefix)
-	target := remoteListTarget(dirPart, cwd)
+	dirPart, basePart := sshx.SplitRemotePrefix(req.Prefix)
+	target := sshx.RemoteListTarget(dirPart, cwd)
 
 	// In-memory cache: same target for the same profile within 5s -> instant.
 	listing, fromCache := s.cachedListing(profile.Name, target)
 	if !fromCache {
 		listing, err = s.runLs(c, target)
 		if err != nil {
-			return daemonResponse{OK: false, Err: err.Error()}
+			return Response{OK: false, Err: err.Error()}
 		}
 		s.cacheListing(profile.Name, target, listing)
 		// Fire-and-forget prefetch of immediate sub-dirs so the next-level
@@ -554,12 +557,12 @@ func (s *daemonState) handleLs(req daemonRequest) daemonResponse {
 		}
 		out = append(out, dirPart+line)
 	}
-	return daemonResponse{OK: true, Entries: out}
+	return Response{OK: true, Entries: out}
 }
 
 // runLs runs `ls -1Ap` on the remote and returns the raw entries (one
 // per line; dirs carry trailing "/").
-func (s *daemonState) runLs(c *Client, target string) ([]string, error) {
+func (s *daemonState) runLs(c *sshx.Client, target string) ([]string, error) {
 	cmd := fmt.Sprintf("ls -1Ap -- %s", srvtty.ShQuotePath(target))
 	res, err := c.RunCapture(cmd, "")
 	if err != nil {
@@ -589,7 +592,7 @@ func (s *daemonState) cachedListing(profileName, target string) ([]string, bool)
 	if !ok {
 		return nil, false
 	}
-	if time.Since(e.cached) > lsCacheTTL {
+	if time.Since(e.cached) > sshx.LsCacheTTL {
 		return nil, false
 	}
 	// Defensive copy so callers can't mutate cached value.
@@ -645,13 +648,13 @@ func (s *daemonState) prefetchSubdirs(profileName, parent string, entries []stri
 	}
 }
 
-// lsCacheTTL was already defined in completion_remote.go for the file
+// sshx.LsCacheTTL was already defined in completion_remote.go for the file
 // cache; reuse it for the daemon's in-memory cache too. (Defined there.)
 
-func (s *daemonState) handleCd(req daemonRequest) daemonResponse {
+func (s *daemonState) handleCd(req Request) Response {
 	c, _, err := s.getClient(req.Profile)
 	if err != nil {
-		return daemonResponse{OK: false, Err: err.Error()}
+		return Response{OK: false, Err: err.Error()}
 	}
 	current := req.Cwd
 	if current == "" {
@@ -667,30 +670,30 @@ func (s *daemonState) handleCd(req daemonRequest) daemonResponse {
 	)
 	res, err := c.RunCapture(cmd, "")
 	if err != nil {
-		return daemonResponse{OK: false, Err: err.Error()}
+		return Response{OK: false, Err: err.Error()}
 	}
 	if res.ExitCode != 0 {
 		stderr := strings.TrimSpace(res.Stderr)
 		if stderr == "" {
 			stderr = fmt.Sprintf("cd failed (exit %d)", res.ExitCode)
 		}
-		return daemonResponse{OK: false, Err: stderr}
+		return Response{OK: false, Err: stderr}
 	}
 	lines := strings.Split(strings.TrimSpace(res.Stdout), "\n")
 	if len(lines) == 0 || strings.TrimSpace(lines[len(lines)-1]) == "" {
-		return daemonResponse{OK: false, Err: "remote did not return a path"}
+		return Response{OK: false, Err: "remote did not return a path"}
 	}
-	return daemonResponse{OK: true, Cwd: strings.TrimSpace(lines[len(lines)-1])}
+	return Response{OK: true, Cwd: strings.TrimSpace(lines[len(lines)-1])}
 }
 
-func (s *daemonState) handlePwd(req daemonRequest) daemonResponse {
+func (s *daemonState) handlePwd(req Request) Response {
 	// pwd is purely local in the new model -- the CLI reads its session
 	// directly. Kept for protocol completeness; returns the request's cwd.
 	cwd := req.Cwd
 	if cwd == "" {
 		cwd = "~"
 	}
-	return daemonResponse{OK: true, Cwd: cwd}
+	return Response{OK: true, Cwd: cwd}
 }
 
 // handleStreamRun runs `req.Command` on the remote and forwards stdout
@@ -698,7 +701,7 @@ func (s *daemonState) handlePwd(req daemonRequest) daemonResponse {
 // Final frame {"k":"end","c":<exit>}. If the daemon's writer fails (the
 // CLI disconnected, e.g. user hit Ctrl+C), the ssh session is closed so
 // the remote process gets a SIGHUP and we don't leak it.
-func (s *daemonState) handleStreamRun(req daemonRequest, wr *bufio.Writer, wrMu *sync.Mutex) {
+func (s *daemonState) handleStreamRun(req Request, wr *bufio.Writer, wrMu *sync.Mutex) {
 	emit := func(ch streamChunk) error {
 		ch.V = DaemonProtoVersion
 		ch.ID = req.ID
@@ -790,17 +793,17 @@ func (s *daemonState) handleStreamRun(req daemonRequest, wr *bufio.Writer, wrMu 
 	_ = emit(streamChunk{K: "end", C: exit})
 }
 
-func (s *daemonState) handleRun(req daemonRequest) daemonResponse {
+func (s *daemonState) handleRun(req Request) Response {
 	c, _, err := s.getClient(req.Profile)
 	if err != nil {
-		return daemonResponse{OK: false, Err: err.Error()}
+		return Response{OK: false, Err: err.Error()}
 	}
 	cwd := req.Cwd
 	res, err := c.RunCapture(req.Command, cwd)
 	if err != nil {
-		return daemonResponse{OK: false, Err: err.Error()}
+		return Response{OK: false, Err: err.Error()}
 	}
-	return daemonResponse{
+	return Response{
 		OK:       true,
 		Stdout:   res.Stdout,
 		Stderr:   res.Stderr,
@@ -836,7 +839,7 @@ func (s *daemonState) gc() {
 	// ever tab-completed sticks around forever, even though the TTL check
 	// in cachedListing makes them functionally dead).
 	for k, e := range s.lsCache {
-		if now.Sub(e.cached) > lsCacheTTL {
+		if now.Sub(e.cached) > sshx.LsCacheTTL {
 			delete(s.lsCache, k)
 		}
 	}
@@ -862,14 +865,14 @@ func (s *daemonState) gc() {
 	}
 }
 
-// waitDaemonGone polls until daemonPing() reports no daemon, or the
+// waitDaemonGone polls until Ping() reports no daemon, or the
 // deadline expires. Used after a shutdown RPC so a follow-up
-// ensureDaemon() definitely sees a clean slate instead of racing
+// Ensure() definitely sees a clean slate instead of racing
 // with the old daemon's teardown.
 func waitDaemonGone(maxWait time.Duration) {
 	deadline := time.Now().Add(maxWait)
 	for time.Now().Before(deadline) {
-		if !daemonPing() {
+		if !Ping() {
 			return
 		}
 		time.Sleep(50 * time.Millisecond)

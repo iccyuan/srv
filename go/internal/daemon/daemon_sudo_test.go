@@ -1,4 +1,4 @@
-package main
+package daemon
 
 import (
 	"encoding/base64"
@@ -14,7 +14,7 @@ func newSudoTestState() *daemonState {
 
 func TestSudoCache_GetMiss(t *testing.T) {
 	s := newSudoTestState()
-	resp := s.handleSudoCacheGet(daemonRequest{Profile: "p"})
+	resp := s.handleSudoCacheGet(Request{Profile: "p"})
 	if !resp.OK {
 		t.Fatalf("get should succeed on miss; got err=%q", resp.Err)
 	}
@@ -26,7 +26,7 @@ func TestSudoCache_GetMiss(t *testing.T) {
 func TestSudoCache_SetThenGet(t *testing.T) {
 	s := newSudoTestState()
 	pw := "hunter2!"
-	setResp := s.handleSudoCacheSet(daemonRequest{
+	setResp := s.handleSudoCacheSet(Request{
 		Profile:     "p",
 		PasswordB64: base64.StdEncoding.EncodeToString([]byte(pw)),
 		TTLSec:      60,
@@ -34,7 +34,7 @@ func TestSudoCache_SetThenGet(t *testing.T) {
 	if !setResp.OK {
 		t.Fatalf("set failed: %q", setResp.Err)
 	}
-	getResp := s.handleSudoCacheGet(daemonRequest{Profile: "p"})
+	getResp := s.handleSudoCacheGet(Request{Profile: "p"})
 	if !getResp.OK {
 		t.Fatalf("get failed: %q", getResp.Err)
 	}
@@ -51,7 +51,7 @@ func TestSudoCache_TTLExpires(t *testing.T) {
 		password: []byte("stale"),
 		expires:  time.Now().Add(-time.Second),
 	}
-	resp := s.handleSudoCacheGet(daemonRequest{Profile: "p"})
+	resp := s.handleSudoCacheGet(Request{Profile: "p"})
 	if resp.PasswordB64 != "" {
 		t.Errorf("expired entry should miss, got %q", resp.PasswordB64)
 	}
@@ -67,7 +67,7 @@ func TestSudoCache_Clear(t *testing.T) {
 		password: []byte("x"),
 		expires:  time.Now().Add(time.Hour),
 	}
-	resp := s.handleSudoCacheClear(daemonRequest{Profile: "p"})
+	resp := s.handleSudoCacheClear(Request{Profile: "p"})
 	if !resp.OK {
 		t.Fatalf("clear failed: %q", resp.Err)
 	}
@@ -78,7 +78,7 @@ func TestSudoCache_Clear(t *testing.T) {
 
 func TestSudoCache_TTLClampedToMax(t *testing.T) {
 	s := newSudoTestState()
-	resp := s.handleSudoCacheSet(daemonRequest{
+	resp := s.handleSudoCacheSet(Request{
 		Profile:     "p",
 		PasswordB64: base64.StdEncoding.EncodeToString([]byte("x")),
 		TTLSec:      24 * 3600, // ask for 24h
@@ -95,7 +95,7 @@ func TestSudoCache_TTLClampedToMax(t *testing.T) {
 
 func TestSudoCache_RejectsBadBase64(t *testing.T) {
 	s := newSudoTestState()
-	resp := s.handleSudoCacheSet(daemonRequest{
+	resp := s.handleSudoCacheSet(Request{
 		Profile:     "p",
 		PasswordB64: "not-base64!!",
 		TTLSec:      60,
@@ -107,10 +107,10 @@ func TestSudoCache_RejectsBadBase64(t *testing.T) {
 
 func TestSudoCache_RejectsEmptyProfile(t *testing.T) {
 	s := newSudoTestState()
-	for _, op := range []func() daemonResponse{
-		func() daemonResponse { return s.handleSudoCacheGet(daemonRequest{}) },
-		func() daemonResponse { return s.handleSudoCacheSet(daemonRequest{PasswordB64: "eA=="}) },
-		func() daemonResponse { return s.handleSudoCacheClear(daemonRequest{}) },
+	for _, op := range []func() Response{
+		func() Response { return s.handleSudoCacheGet(Request{}) },
+		func() Response { return s.handleSudoCacheSet(Request{PasswordB64: "eA=="}) },
+		func() Response { return s.handleSudoCacheClear(Request{}) },
 	} {
 		resp := op()
 		if resp.OK {

@@ -1,4 +1,4 @@
-package main
+package daemon
 
 import (
 	"errors"
@@ -50,7 +50,7 @@ func TestHandleTunnelList_IncludesErrors(t *testing.T) {
 	s.tunnelErr["db"] = "profile prod not found"
 	s.tunnelErr["stats"] = "dial timeout"
 
-	resp := s.handleTunnelList(daemonRequest{Op: "tunnel_list"})
+	resp := s.handleTunnelList(Request{Op: "tunnel_list"})
 	if !resp.OK {
 		t.Fatal("tunnel_list should succeed")
 	}
@@ -67,7 +67,7 @@ func TestHandleTunnelList_IncludesErrors(t *testing.T) {
 
 func TestHandleTunnelList_NoErrorsYieldsEmptyMap(t *testing.T) {
 	s := newTunnelErrTestState()
-	resp := s.handleTunnelList(daemonRequest{Op: "tunnel_list"})
+	resp := s.handleTunnelList(Request{Op: "tunnel_list"})
 	if !resp.OK {
 		t.Fatal("tunnel_list should succeed on empty state")
 	}

@@ -9,6 +9,7 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"srv/internal/daemon"
 	"srv/internal/progress"
 	"srv/internal/srvtty"
 	"strings"
@@ -25,7 +26,7 @@ import (
 // `tail -f` and `find /` produce real-time output, not buffered.
 func runRemoteStream(profile *Profile, cwd, cmd string, tty bool) int {
 	if !tty {
-		if rc, ok := tryDaemonStreamRun(profile.Name, cwd, cmd); ok {
+		if rc, ok := daemon.TryStreamRun(profile.Name, cwd, cmd); ok {
 			return rc
 		}
 	}
@@ -59,7 +60,7 @@ func runRemoteStream(profile *Profile, cwd, cmd string, tty bool) int {
 func runRemoteCapture(profile *Profile, cwd, cmd string) (*RunCaptureResult, error) {
 	cmd = applyRemoteEnv(profile, cmd)
 	if profile.Name != "" {
-		if res, ok := tryDaemonRunCapture(profile.Name, cwd, cmd); ok {
+		if res, ok := daemon.TryRunCapture(profile.Name, cwd, cmd); ok {
 			return res, nil
 		}
 	}
@@ -86,7 +87,7 @@ func changeRemoteCwd(profileName string, profile *Profile, target string) (strin
 	current := GetCwd(profileName, profile)
 
 	// Fast path via daemon.
-	if newCwd, used, err := tryDaemonCd(profileName, current, target); used {
+	if newCwd, used, err := daemon.TryCd(profileName, current, target); used {
 		if err != nil {
 			return "", err
 		}

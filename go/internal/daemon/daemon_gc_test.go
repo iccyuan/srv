@@ -1,6 +1,7 @@
-package main
+package daemon
 
 import (
+	"srv/internal/config"
 	"testing"
 	"time"
 )
@@ -38,7 +39,7 @@ func TestGC_IdleWithActiveTunnelStaysAlive(t *testing.T) {
 	s.lastReq = time.Now().Add(-2 * daemonIdleTTL)
 	s.tunnels["db"] = &activeTunnel{
 		name:      "db",
-		def:       &TunnelDef{Type: "local", Spec: "5432"},
+		def:       &config.TunnelDef{Type: "local", Spec: "5432"},
 		stopCh:    make(chan struct{}),
 		done:      make(chan struct{}),
 		startedAt: time.Now(),

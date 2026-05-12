@@ -1,4 +1,4 @@
-package main
+package daemon
 
 import (
 	"encoding/base64"
@@ -21,9 +21,9 @@ import (
 
 const sudoCacheMaxTTL = 60 * time.Minute
 
-func (s *daemonState) handleSudoCacheGet(req daemonRequest) daemonResponse {
+func (s *daemonState) handleSudoCacheGet(req Request) Response {
 	if req.Profile == "" {
-		return daemonResponse{OK: false, Err: "profile is required"}
+		return Response{OK: false, Err: "profile is required"}
 	}
 	s.sudoMu.Lock()
 	entry, ok := s.sudoCache[req.Profile]
@@ -34,24 +34,24 @@ func (s *daemonState) handleSudoCacheGet(req daemonRequest) daemonResponse {
 	}
 	s.sudoMu.Unlock()
 	if !ok {
-		return daemonResponse{OK: true} // cache miss; empty PasswordB64
+		return Response{OK: true} // cache miss; empty PasswordB64
 	}
-	return daemonResponse{
+	return Response{
 		OK:          true,
 		PasswordB64: base64.StdEncoding.EncodeToString(entry.password),
 	}
 }
 
-func (s *daemonState) handleSudoCacheSet(req daemonRequest) daemonResponse {
+func (s *daemonState) handleSudoCacheSet(req Request) Response {
 	if req.Profile == "" {
-		return daemonResponse{OK: false, Err: "profile is required"}
+		return Response{OK: false, Err: "profile is required"}
 	}
 	if req.PasswordB64 == "" {
-		return daemonResponse{OK: false, Err: "password_b64 is required"}
+		return Response{OK: false, Err: "password_b64 is required"}
 	}
 	pw, err := base64.StdEncoding.DecodeString(req.PasswordB64)
 	if err != nil {
-		return daemonResponse{OK: false, Err: "password_b64 decode: " + err.Error()}
+		return Response{OK: false, Err: "password_b64 decode: " + err.Error()}
 	}
 	ttl := time.Duration(req.TTLSec) * time.Second
 	if ttl <= 0 {
@@ -66,15 +66,15 @@ func (s *daemonState) handleSudoCacheSet(req daemonRequest) daemonResponse {
 		expires:  time.Now().Add(ttl),
 	}
 	s.sudoMu.Unlock()
-	return daemonResponse{OK: true}
+	return Response{OK: true}
 }
 
-func (s *daemonState) handleSudoCacheClear(req daemonRequest) daemonResponse {
+func (s *daemonState) handleSudoCacheClear(req Request) Response {
 	if req.Profile == "" {
-		return daemonResponse{OK: false, Err: "profile is required"}
+		return Response{OK: false, Err: "profile is required"}
 	}
 	s.sudoMu.Lock()
 	delete(s.sudoCache, req.Profile)
 	s.sudoMu.Unlock()
-	return daemonResponse{OK: true}
+	return Response{OK: true}
 }

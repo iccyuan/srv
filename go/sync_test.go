@@ -3,6 +3,7 @@ package main
 import (
 	"reflect"
 	"srv/internal/srvutil"
+	"srv/internal/sshx"
 	"testing"
 	"time"
 )
@@ -98,9 +99,9 @@ func TestSplitRemotePrefix(t *testing.T) {
 		{"~/foo", "~/", "foo"},
 	}
 	for _, tc := range cases {
-		d, b := splitRemotePrefix(tc.in)
+		d, b := sshx.SplitRemotePrefix(tc.in)
 		if d != tc.wantDir || b != tc.wantBase {
-			t.Errorf("splitRemotePrefix(%q) = (%q, %q); want (%q, %q)",
+			t.Errorf("sshx.SplitRemotePrefix(%q) = (%q, %q); want (%q, %q)",
 				tc.in, d, b, tc.wantDir, tc.wantBase)
 		}
 	}

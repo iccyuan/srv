@@ -1,4 +1,4 @@
-package main
+package daemon
 
 import (
 	"fmt"
@@ -9,7 +9,7 @@ import (
 	"time"
 )
 
-// ensureDaemon checks whether a daemon is reachable; if not, spawns one
+// Ensure checks whether a daemon is reachable; if not, spawns one
 // in the background and waits up to ~1.5s for its socket to appear.
 // Returns true if the caller can talk to a daemon afterwards.
 //
@@ -17,8 +17,8 @@ import (
 // try to start a daemon. The second one's listen() will fail because the
 // socket is already bound; Cmd detects this and exits cleanly. Net
 // result: exactly one daemon survives.
-func ensureDaemon() bool {
-	if daemonPing() {
+func Ensure() bool {
+	if Ping() {
 		return true
 	}
 	if err := spawnDaemonDetached(); err != nil {
@@ -29,7 +29,7 @@ func ensureDaemon() bool {
 	// answer a ping. ~50ms is typical; budget 1500ms.
 	deadline := time.Now().Add(1500 * time.Millisecond)
 	for time.Now().Before(deadline) {
-		if daemonPing() {
+		if Ping() {
 			return true
 		}
 		time.Sleep(40 * time.Millisecond)

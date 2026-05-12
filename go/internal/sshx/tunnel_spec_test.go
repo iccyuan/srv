@@ -1,4 +1,4 @@
-package main
+package sshx
 
 import "testing"
 
@@ -25,7 +25,7 @@ func TestParseTunnelSpec(t *testing.T) {
 		{in: "a:b:c:d", wantErr: true, errLabel: "too many parts"},
 	}
 	for _, tc := range cases {
-		lp, rh, rp, err := parseTunnelSpec(tc.in)
+		lp, rh, rp, err := ParseTunnelSpec(tc.in)
 		if tc.wantErr {
 			if err == nil {
 				t.Errorf("%q: want error (%s), got nil", tc.in, tc.errLabel)

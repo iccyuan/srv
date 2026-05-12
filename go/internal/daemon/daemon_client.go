@@ -1,4 +1,4 @@
-package main
+package daemon
 
 import (
 	"bufio"
@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"srv/internal/srvpath"
+	"srv/internal/sshx"
 	"strings"
 	"time"
 )
@@ -16,7 +17,7 @@ import (
 // Dial connects to the daemon socket with a short timeout. Returns
 // nil + nil error if no daemon is reachable (the caller falls back to
 // direct dial). Returns an error for unexpected failures.
-func daemonDial(timeout time.Duration) net.Conn {
+func DialSock(timeout time.Duration) net.Conn {
 	conn, err := net.DialTimeout("unix", daemonSocketPath(), timeout)
 	if err != nil {
 		return nil
@@ -24,19 +25,19 @@ func daemonDial(timeout time.Duration) net.Conn {
 	return conn
 }
 
-// daemonPing returns true if a daemon is alive at the socket path.
-func daemonPing() bool {
-	conn := daemonDial(500 * time.Millisecond)
+// Ping returns true if a daemon is alive at the socket path.
+func Ping() bool {
+	conn := DialSock(500 * time.Millisecond)
 	if conn == nil {
 		return false
 	}
 	defer conn.Close()
-	resp, err := daemonCall(conn, daemonRequest{Op: "ping"}, time.Second)
+	resp, err := Call(conn, Request{Op: "ping"}, time.Second)
 	return err == nil && resp.OK
 }
 
-// daemonCall writes a request and reads one response. Caller owns the conn.
-func daemonCall(conn net.Conn, req daemonRequest, deadline time.Duration) (*daemonResponse, error) {
+// Call writes a request and reads one response. Caller owns the conn.
+func Call(conn net.Conn, req Request, deadline time.Duration) (*Response, error) {
 	if deadline > 0 {
 		_ = conn.SetDeadline(time.Now().Add(deadline))
 		defer conn.SetDeadline(time.Time{})
@@ -59,7 +60,7 @@ func daemonCall(conn net.Conn, req daemonRequest, deadline time.Duration) (*daem
 	if err != nil {
 		return nil, err
 	}
-	var resp daemonResponse
+	var resp Response
 	if jerr := json.Unmarshal([]byte(line), &resp); jerr != nil {
 		return nil, jerr
 	}
@@ -71,16 +72,16 @@ func daemonCall(conn net.Conn, req daemonRequest, deadline time.Duration) (*daem
 	return &resp, nil
 }
 
-// tryDaemonLs short-circuits the cold SSH handshake when a daemon is
+// TryLs short-circuits the cold SSH handshake when a daemon is
 // running and has the profile already pooled. Returns (entries, true) on
 // success; (nil, false) when the caller should fall back to direct ssh.
-func tryDaemonLs(profileName, cwd, prefix string) ([]string, bool) {
-	conn := daemonDial(200 * time.Millisecond)
+func TryLs(profileName, cwd, prefix string) ([]string, bool) {
+	conn := DialSock(200 * time.Millisecond)
 	if conn == nil {
 		return nil, false
 	}
 	defer conn.Close()
-	resp, err := daemonCall(conn, daemonRequest{
+	resp, err := Call(conn, Request{
 		Op: "ls", Profile: profileName, Cwd: cwd, Prefix: prefix,
 	}, 5*time.Second)
 	if err != nil || resp == nil || !resp.OK {
@@ -89,25 +90,25 @@ func tryDaemonLs(profileName, cwd, prefix string) ([]string, bool) {
 	return resp.Entries, true
 }
 
-// tryDaemonStreamRun runs `command` via the daemon's pooled SSH connection
+// TryStreamRun runs `command` via the daemon's pooled SSH connection
 // and forwards the remote stdout/stderr to the local terminal in real
 // time as chunks arrive (no buffering at the daemon, so `tail -f` and
 // long-running commands behave naturally). Returns (exitCode, true) on
 // success; (0, false) when the caller should fall back to direct dial.
-func tryDaemonStreamRun(profileName, cwd, command string) (int, bool) {
-	conn := daemonDial(200 * time.Millisecond)
+func TryStreamRun(profileName, cwd, command string) (int, bool) {
+	conn := DialSock(200 * time.Millisecond)
 	if conn == nil {
-		if !ensureDaemon() {
+		if !Ensure() {
 			return 0, false
 		}
-		conn = daemonDial(200 * time.Millisecond)
+		conn = DialSock(200 * time.Millisecond)
 		if conn == nil {
 			return 0, false
 		}
 	}
 	defer conn.Close()
 
-	req := daemonRequest{
+	req := Request{
 		V:       DaemonProtoVersion,
 		ID:      int(time.Now().UnixNano() & 0x7fffffff),
 		Op:      "stream_run",
@@ -163,34 +164,34 @@ func tryDaemonStreamRun(profileName, cwd, command string) (int, bool) {
 	}
 }
 
-// tryDaemonRunCapture runs `command` via the daemon's pooled SSH and
+// TryRunCapture runs `command` via the daemon's pooled SSH and
 // returns the captured stdout/stderr/exit_code. Returns (nil, false) when
 // no daemon is reachable or it answered with a non-OK -- caller should
 // fall back to a direct dial in either case.
 //
-// Unlike tryDaemonStreamRun this is for the MCP `run` tool path: the
+// Unlike TryStreamRun this is for the MCP `run` tool path: the
 // caller wants a single buffered result, not real-time streaming. Reusing
 // the daemon's pooled SSH avoids the ~2.7s cold handshake every call.
-func tryDaemonRunCapture(profileName, cwd, command string) (*RunCaptureResult, bool) {
-	conn := daemonDial(200 * time.Millisecond)
+func TryRunCapture(profileName, cwd, command string) (*sshx.RunCaptureResult, bool) {
+	conn := DialSock(200 * time.Millisecond)
 	if conn == nil {
-		if !ensureDaemon() {
+		if !Ensure() {
 			return nil, false
 		}
-		conn = daemonDial(200 * time.Millisecond)
+		conn = DialSock(200 * time.Millisecond)
 		if conn == nil {
 			return nil, false
 		}
 	}
 	defer conn.Close()
 	// deadline=0: arbitrary-duration commands shouldn't get cut off mid-run.
-	resp, err := daemonCall(conn, daemonRequest{
+	resp, err := Call(conn, Request{
 		Op: "run", Profile: profileName, Cwd: cwd, Command: command,
 	}, 0)
 	if err != nil || resp == nil || !resp.OK {
 		return nil, false
 	}
-	return &RunCaptureResult{
+	return &sshx.RunCaptureResult{
 		Stdout:   resp.Stdout,
 		Stderr:   resp.Stderr,
 		ExitCode: resp.ExitCode,
@@ -198,7 +199,7 @@ func tryDaemonRunCapture(profileName, cwd, command string) (*RunCaptureResult, b
 	}, true
 }
 
-// tryDaemonCd validates the target cwd via the daemon.
+// TryCd validates the target cwd via the daemon.
 //
 // Returns:
 //   - used=false: no daemon reachable; caller should fall back to direct dial.
@@ -209,19 +210,19 @@ func tryDaemonRunCapture(profileName, cwd, command string) (*RunCaptureResult, b
 //
 // Caller is responsible for persisting newCwd to its session store -- the
 // daemon doesn't touch sessions.json.
-func tryDaemonCd(profileName, currentCwd, target string) (newCwd string, used bool, err error) {
-	conn := daemonDial(200 * time.Millisecond)
+func TryCd(profileName, currentCwd, target string) (newCwd string, used bool, err error) {
+	conn := DialSock(200 * time.Millisecond)
 	if conn == nil {
-		if !ensureDaemon() {
+		if !Ensure() {
 			return "", false, nil
 		}
-		conn = daemonDial(200 * time.Millisecond)
+		conn = DialSock(200 * time.Millisecond)
 		if conn == nil {
 			return "", false, nil
 		}
 	}
 	defer conn.Close()
-	resp, callErr := daemonCall(conn, daemonRequest{
+	resp, callErr := Call(conn, Request{
 		Op: "cd", Profile: profileName, Cwd: currentCwd, Path: target,
 	}, 30*time.Second)
 	if callErr != nil || resp == nil {
@@ -237,7 +238,7 @@ func tryDaemonCd(profileName, currentCwd, target string) (newCwd string, used bo
 
 func daemonClientStatus(args []string) int {
 	asJSON := len(args) > 0 && args[0] == "--json"
-	conn := daemonDial(time.Second)
+	conn := DialSock(time.Second)
 	if conn == nil {
 		if asJSON {
 			fmt.Println(`{"running":false}`)
@@ -247,7 +248,7 @@ func daemonClientStatus(args []string) int {
 		return 1
 	}
 	defer conn.Close()
-	resp, err := daemonCall(conn, daemonRequest{Op: "status"}, 2*time.Second)
+	resp, err := Call(conn, Request{Op: "status"}, 2*time.Second)
 	if err != nil || resp == nil {
 		fmt.Fprintln(os.Stderr, "daemon: status failed:", err)
 		return 1
@@ -300,13 +301,13 @@ func daemonClientPruneCache() int {
 }
 
 func daemonClientStop() int {
-	conn := daemonDial(time.Second)
+	conn := DialSock(time.Second)
 	if conn == nil {
 		fmt.Println("daemon: not running")
 		return 0
 	}
 	defer conn.Close()
-	resp, _ := daemonCall(conn, daemonRequest{Op: "shutdown"}, 2*time.Second)
+	resp, _ := Call(conn, Request{Op: "shutdown"}, 2*time.Second)
 	if resp != nil && resp.OK {
 		fmt.Println("daemon: stopped")
 		return 0
@@ -315,10 +316,10 @@ func daemonClientStop() int {
 	return 1
 }
 
-// tunnelInfo flows from the daemon to the CLI as the "active" view
+// TunnelInfo flows from the daemon to the CLI as the "active" view
 // of one tunnel. JSON-tagged for the daemon protocol; never written
 // to disk.
-type tunnelInfo struct {
+type TunnelInfo struct {
 	Name    string `json:"name"`
 	Type    string `json:"type"`
 	Spec    string `json:"spec"`
@@ -327,8 +328,8 @@ type tunnelInfo struct {
 	Started int64  `json:"started,omitempty"`
 }
 
-// String makes tunnelInfo printable for diagnostics.
-func (t tunnelInfo) String() string {
+// String makes TunnelInfo printable for diagnostics.
+func (t TunnelInfo) String() string {
 	b, _ := json.Marshal(t)
 	return string(b)
 }

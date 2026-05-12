@@ -9,6 +9,7 @@ import (
 	"path"
 	"path/filepath"
 	"runtime"
+	"srv/internal/daemon"
 	"srv/internal/srvpath"
 	"strings"
 )
@@ -72,7 +73,7 @@ func doctorChecks(cfg *Config, profileOverride string) ([]map[string]any, bool) 
 	} else {
 		check("completion cache", true, "will be created on demand")
 	}
-	if daemonPing() {
+	if daemon.Ping() {
 		check("daemon", true, "running")
 	} else {
 		check("daemon", true, "not running; will auto-spawn for hot paths")

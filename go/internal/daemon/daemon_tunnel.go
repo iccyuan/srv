@@ -1,8 +1,12 @@
-package main
+package daemon
 
 import (
 	"fmt"
+	"net"
 	"os"
+	"srv/internal/config"
+	"srv/internal/sshx"
+	"strconv"
 	"time"
 )
 
@@ -13,40 +17,40 @@ import (
 // Autostart entries come up at daemon boot in a background goroutine
 // so a slow / dead host can't block ls / cd / run readiness.
 
-// handleTunnelUp resolves the TunnelDef, dials (or reuses the pooled
+// handleTunnelUp resolves the config.TunnelDef, dials (or reuses the pooled
 // client), and launches the forwarder. Idempotent on already-running:
 // re-up is a no-op so MCP loops / startup scripts can call it freely.
-func (s *daemonState) handleTunnelUp(req daemonRequest) daemonResponse {
+func (s *daemonState) handleTunnelUp(req Request) Response {
 	if req.Name == "" {
-		return daemonResponse{OK: false, Err: "tunnel name is required"}
+		return Response{OK: false, Err: "tunnel name is required"}
 	}
 	s.tunnelsMu.Lock()
 	if existing, ok := s.tunnels[req.Name]; ok {
 		listen := existing.listen
 		s.tunnelsMu.Unlock()
-		return daemonResponse{OK: true, Listen: listen}
+		return Response{OK: true, Listen: listen}
 	}
 	s.tunnelsMu.Unlock()
 
-	cfg, err := LoadConfig()
+	cfg, err := config.Load()
 	if err != nil || cfg == nil {
-		return daemonResponse{OK: false, Err: fmt.Sprintf("load config: %v", err)}
+		return Response{OK: false, Err: fmt.Sprintf("load config: %v", err)}
 	}
 	def, ok := cfg.Tunnels[req.Name]
 	if !ok {
-		return daemonResponse{OK: false, Err: fmt.Sprintf("tunnel %q not defined", req.Name)}
+		return Response{OK: false, Err: fmt.Sprintf("tunnel %q not defined", req.Name)}
 	}
 
 	at, err := s.startTunnel(req.Name, def)
 	if err != nil {
-		return daemonResponse{OK: false, Err: err.Error()}
+		return Response{OK: false, Err: err.Error()}
 	}
-	return daemonResponse{OK: true, Listen: at.listen}
+	return Response{OK: true, Listen: at.listen}
 }
 
-func (s *daemonState) handleTunnelDown(req daemonRequest) daemonResponse {
+func (s *daemonState) handleTunnelDown(req Request) Response {
 	if req.Name == "" {
-		return daemonResponse{OK: false, Err: "tunnel name is required"}
+		return Response{OK: false, Err: "tunnel name is required"}
 	}
 	s.tunnelsMu.Lock()
 	at, ok := s.tunnels[req.Name]
@@ -55,7 +59,7 @@ func (s *daemonState) handleTunnelDown(req daemonRequest) daemonResponse {
 	}
 	s.tunnelsMu.Unlock()
 	if !ok {
-		return daemonResponse{OK: false, Err: fmt.Sprintf("tunnel %q not running", req.Name)}
+		return Response{OK: false, Err: fmt.Sprintf("tunnel %q not running", req.Name)}
 	}
 	at.stop()
 	// Bounded wait so a stuck forwarder can't hang the CLI -- if it
@@ -65,14 +69,14 @@ func (s *daemonState) handleTunnelDown(req daemonRequest) daemonResponse {
 	case <-at.done:
 	case <-time.After(2 * time.Second):
 	}
-	return daemonResponse{OK: true}
+	return Response{OK: true}
 }
 
-func (s *daemonState) handleTunnelList(req daemonRequest) daemonResponse {
+func (s *daemonState) handleTunnelList(req Request) Response {
 	s.tunnelsMu.Lock()
-	out := make([]tunnelInfo, 0, len(s.tunnels))
+	out := make([]TunnelInfo, 0, len(s.tunnels))
 	for _, at := range s.tunnels {
-		out = append(out, tunnelInfo{
+		out = append(out, TunnelInfo{
 			Name:    at.name,
 			Type:    at.def.Type,
 			Spec:    at.def.Spec,
@@ -89,7 +93,7 @@ func (s *daemonState) handleTunnelList(req daemonRequest) daemonResponse {
 		errs[name] = msg
 	}
 	s.tunnelErrMu.Unlock()
-	return daemonResponse{OK: true, Tunnels: out, TunnelErrors: errs}
+	return Response{OK: true, Tunnels: out, TunnelErrors: errs}
 }
 
 // recordTunnelErr / clearTunnelErr are the two operations on the
@@ -116,7 +120,7 @@ func (s *daemonState) clearTunnelErr(name string) {
 // On any failure path the error is also recorded in s.tunnelErr so
 // `tunnel_list` can surface "last try failed for X" to the user;
 // on success any prior recorded error is cleared.
-func (s *daemonState) startTunnel(name string, def *TunnelDef) (at *activeTunnel, err error) {
+func (s *daemonState) startTunnel(name string, def *config.TunnelDef) (at *activeTunnel, err error) {
 	defer func() {
 		if err != nil {
 			s.recordTunnelErr(name, err)
@@ -128,7 +132,7 @@ func (s *daemonState) startTunnel(name string, def *TunnelDef) (at *activeTunnel
 	// Resolve profile NOW so up-time errors (missing profile / bad
 	// spec) surface to the user rather than getting buried in a
 	// background goroutine.
-	cfg, err := LoadConfig()
+	cfg, err := config.Load()
 	if err != nil || cfg == nil {
 		return nil, fmt.Errorf("load config: %v", err)
 	}
@@ -142,7 +146,7 @@ func (s *daemonState) startTunnel(name string, def *TunnelDef) (at *activeTunnel
 	if _, ok := cfg.Profiles[profileName]; !ok {
 		return nil, fmt.Errorf("tunnel %q references unknown profile %q", name, profileName)
 	}
-	lp, rh, rp, err := parseTunnelSpec(def.Spec)
+	lp, rh, rp, err := sshx.ParseTunnelSpec(def.Spec)
 	if err != nil {
 		return nil, fmt.Errorf("tunnel %q spec: %w", name, err)
 	}
@@ -175,9 +179,9 @@ func (s *daemonState) startTunnel(name string, def *TunnelDef) (at *activeTunnel
 		var runErr error
 		switch def.Type {
 		case "remote":
-			runErr = runReverseForwarder(client, lp, rh, rp, at.stopCh, nil)
+			runErr = sshx.RunReverseForwarder(client, lp, rh, rp, at.stopCh, nil)
 		default:
-			runErr = runLocalForwarder(client, lp, rh, rp, at.stopCh, nil)
+			runErr = sshx.RunLocalForwarder(client, lp, rh, rp, at.stopCh, nil)
 		}
 		// runErr is non-nil ONLY when the SSH transport died under
 		// the forwarder (clean stop via stopCh returns nil). Record
@@ -206,7 +210,7 @@ func (s *daemonState) startTunnel(name string, def *TunnelDef) (at *activeTunnel
 // entry flagged autostart=true. Runs in a goroutine so daemon startup
 // doesn't block on slow dials; per-tunnel failures are logged.
 func (s *daemonState) startAutostartTunnels() {
-	cfg, err := LoadConfig()
+	cfg, err := config.Load()
 	if err != nil || cfg == nil {
 		return
 	}
@@ -240,5 +244,25 @@ func (s *daemonState) stopAllTunnels() {
 		case <-at.done:
 		case <-time.After(time.Second):
 		}
+	}
+}
+
+// tunnelListenLabel formats the human-facing "I'm listening here"
+// line for an active TunnelDef. Pulled out of tunnel_save so daemon
+// status and CLI both format identically; called from buildTunnelInfo.
+func tunnelListenLabel(def *config.TunnelDef, profile *config.Profile) string {
+	lp, _, _, err := sshx.ParseTunnelSpec(def.Spec)
+	if err != nil {
+		return def.Spec
+	}
+	switch def.Type {
+	case "remote":
+		host := "localhost"
+		if profile != nil && profile.Host != "" {
+			host = profile.Host
+		}
+		return host + ":" + strconv.Itoa(lp)
+	default:
+		return net.JoinHostPort("127.0.0.1", strconv.Itoa(lp))
 	}
 }

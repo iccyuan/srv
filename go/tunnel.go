@@ -2,13 +2,11 @@ package main
 
 import (
 	"fmt"
-	"io"
 	"net"
 	"os"
 	"os/signal"
+	"srv/internal/sshx"
 	"strconv"
-	"strings"
-	"sync"
 	"syscall"
 )
 
@@ -71,7 +69,7 @@ func cmdTunnelOneShot(args []string, cfg *Config, profileOverride string) error 
 		printTunnelUsage()
 		return exitCode(2)
 	}
-	lp, rh, rp, err := parseTunnelSpec(args[0])
+	lp, rh, rp, err := sshx.ParseTunnelSpec(args[0])
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "srv tunnel:", err)
 		return exitCode(2)
@@ -109,209 +107,18 @@ func cmdTunnelOneShot(args []string, cfg *Config, profileOverride string) error 
 			"srv tunnel -R: %s -> local %s   (Ctrl-C to stop)\n",
 			listenLabel, net.JoinHostPort(rh, strconv.Itoa(rp)),
 		)
-		runErr = runReverseForwarder(c, lp, rh, rp, stopCh, sigCh)
+		runErr = sshx.RunReverseForwarder(c, lp, rh, rp, stopCh, sigCh)
 	} else {
 		listenLabel = net.JoinHostPort("127.0.0.1", strconv.Itoa(lp))
 		fmt.Fprintf(os.Stderr,
 			"srv tunnel: %s -> %s -> %s:%d   (Ctrl-C to stop)\n",
 			listenLabel, profile.Host, rh, rp,
 		)
-		runErr = runLocalForwarder(c, lp, rh, rp, stopCh, sigCh)
+		runErr = sshx.RunLocalForwarder(c, lp, rh, rp, stopCh, sigCh)
 	}
 	if runErr != nil {
 		fmt.Fprintln(os.Stderr, "srv tunnel:", runErr)
 		return exitCode(1)
 	}
 	return nil
-}
-
-// runLocalForwarder is the body of a local-to-remote forwarder, shared
-// by the one-shot CLI and the daemon-hosted persistent tunnel.
-//
-// Return value distinguishes the two ways the forwarder can exit:
-//   - nil error: caller-driven shutdown (stopCh / sigCh fired).
-//     The user / daemon asked us to stop; nothing to surface.
-//   - non-nil error: the underlying SSH transport dropped under us
-//     (`c.Conn.Wait()` returned). The caller -- particularly the
-//     daemon-hosted path -- wants this so it can record "forwarder
-//     crashed" in tunnel-err state for `srv tunnel list` to display.
-//
-// stopCh: external close signal (daemon shutdown / explicit `tunnel
-// down`). sigCh: optional; nil under daemon, set under CLI to allow
-// Ctrl-C to break the accept loop.
-func runLocalForwarder(c *Client, localPort int, remoteHost string, remotePort int, stopCh <-chan struct{}, sigCh <-chan os.Signal) error {
-	listenAddr := net.JoinHostPort("127.0.0.1", strconv.Itoa(localPort))
-	listener, err := net.Listen("tcp", listenAddr)
-	if err != nil {
-		return fmt.Errorf("listen %s: %w", listenAddr, err)
-	}
-	defer listener.Close()
-
-	var (
-		causeMu sync.Mutex
-		cause   error
-	)
-	stopOnce := sync.Once{}
-	stop := func() { stopOnce.Do(func() { _ = listener.Close() }) }
-	go func() {
-		select {
-		case <-stopCh:
-			stop()
-		case <-sigChOrNil(sigCh):
-			stop()
-		}
-	}()
-	go func() {
-		err := c.Conn.Wait()
-		causeMu.Lock()
-		if cause == nil {
-			cause = fmt.Errorf("ssh connection closed: %v", err)
-		}
-		causeMu.Unlock()
-		stop()
-	}()
-
-	remoteAddr := net.JoinHostPort(remoteHost, strconv.Itoa(remotePort))
-	var wg sync.WaitGroup
-	for {
-		local, err := listener.Accept()
-		if err != nil {
-			break
-		}
-		wg.Add(1)
-		go func(local net.Conn) {
-			defer wg.Done()
-			defer local.Close()
-			remote, err := c.Conn.Dial("tcp", remoteAddr)
-			if err != nil {
-				fmt.Fprintf(os.Stderr, "srv tunnel: remote dial %s: %v\n", remoteAddr, err)
-				return
-			}
-			defer remote.Close()
-			done := make(chan struct{}, 2)
-			go func() { _, _ = io.Copy(remote, local); done <- struct{}{} }()
-			go func() { _, _ = io.Copy(local, remote); done <- struct{}{} }()
-			<-done
-		}(local)
-	}
-	wg.Wait()
-	causeMu.Lock()
-	defer causeMu.Unlock()
-	return cause
-}
-
-// runReverseForwarder mirrors runLocalForwarder for the -R direction:
-// the remote side does the listen, local dials happen per accepted
-// connection. Same nil-on-clean-stop / err-on-ssh-drop contract as
-// runLocalForwarder, so the daemon's `tunnel %q forwarder exited`
-// path can record the transport cause.
-func runReverseForwarder(c *Client, remotePort int, localHost string, localPort int, stopCh <-chan struct{}, sigCh <-chan os.Signal) error {
-	remoteListen := net.JoinHostPort("127.0.0.1", strconv.Itoa(remotePort))
-	listener, err := c.Conn.Listen("tcp", remoteListen)
-	if err != nil {
-		return fmt.Errorf("remote listen %s: %w", remoteListen, err)
-	}
-	defer listener.Close()
-
-	var (
-		causeMu sync.Mutex
-		cause   error
-	)
-	stopOnce := sync.Once{}
-	stop := func() { stopOnce.Do(func() { _ = listener.Close() }) }
-	go func() {
-		select {
-		case <-stopCh:
-			stop()
-		case <-sigChOrNil(sigCh):
-			stop()
-		}
-	}()
-	go func() {
-		err := c.Conn.Wait()
-		causeMu.Lock()
-		if cause == nil {
-			cause = fmt.Errorf("ssh connection closed: %v", err)
-		}
-		causeMu.Unlock()
-		stop()
-	}()
-
-	localAddr := net.JoinHostPort(localHost, strconv.Itoa(localPort))
-	var wg sync.WaitGroup
-	for {
-		remote, err := listener.Accept()
-		if err != nil {
-			break
-		}
-		wg.Add(1)
-		go func(remote net.Conn) {
-			defer wg.Done()
-			defer remote.Close()
-			local, err := net.Dial("tcp", localAddr)
-			if err != nil {
-				fmt.Fprintf(os.Stderr, "srv tunnel -R: local dial %s: %v\n", localAddr, err)
-				return
-			}
-			defer local.Close()
-			done := make(chan struct{}, 2)
-			go func() { _, _ = io.Copy(local, remote); done <- struct{}{} }()
-			go func() { _, _ = io.Copy(remote, local); done <- struct{}{} }()
-			<-done
-		}(remote)
-	}
-	wg.Wait()
-	causeMu.Lock()
-	defer causeMu.Unlock()
-	return cause
-}
-
-// sigChOrNil returns the channel directly when non-nil; otherwise a
-// channel that never fires. Lets the same select-block work in both
-// CLI mode (with SIGINT/SIGTERM) and daemon mode (where signals are
-// already handled at the daemon level).
-func sigChOrNil(sigCh <-chan os.Signal) <-chan os.Signal {
-	if sigCh != nil {
-		return sigCh
-	}
-	return nil
-}
-
-// parseTunnelSpec turns "8080" / "8080:9090" / "8080:host:9090" into its
-// components. Anything else is an error.
-func parseTunnelSpec(spec string) (localPort int, remoteHost string, remotePort int, err error) {
-	parts := strings.Split(spec, ":")
-	switch len(parts) {
-	case 1:
-		p, e := strconv.Atoi(parts[0])
-		if e != nil || p <= 0 || p > 65535 {
-			return 0, "", 0, fmt.Errorf("port not a valid number: %q", parts[0])
-		}
-		return p, "127.0.0.1", p, nil
-	case 2:
-		lp, e1 := strconv.Atoi(parts[0])
-		rp, e2 := strconv.Atoi(parts[1])
-		if e1 != nil || lp <= 0 || lp > 65535 {
-			return 0, "", 0, fmt.Errorf("local port not valid: %q", parts[0])
-		}
-		if e2 != nil || rp <= 0 || rp > 65535 {
-			return 0, "", 0, fmt.Errorf("remote port not valid: %q", parts[1])
-		}
-		return lp, "127.0.0.1", rp, nil
-	case 3:
-		lp, e1 := strconv.Atoi(parts[0])
-		rp, e2 := strconv.Atoi(parts[2])
-		if e1 != nil || lp <= 0 || lp > 65535 {
-			return 0, "", 0, fmt.Errorf("local port not valid: %q", parts[0])
-		}
-		if e2 != nil || rp <= 0 || rp > 65535 {
-			return 0, "", 0, fmt.Errorf("remote port not valid: %q", parts[2])
-		}
-		if parts[1] == "" {
-			return 0, "", 0, fmt.Errorf("empty remote host in %q", spec)
-		}
-		return lp, parts[1], rp, nil
-	default:
-		return 0, "", 0, fmt.Errorf("expected port, lp:rp, or lp:host:rp, got %q", spec)
-	}
 }

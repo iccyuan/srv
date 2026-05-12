@@ -6,17 +6,17 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"srv/internal/daemon"
 	"srv/internal/srvio"
 	"srv/internal/srvpath"
 	"srv/internal/srvtty"
+	"srv/internal/sshx"
 	"strings"
 	"time"
 )
 
 // Cache TTL for `srv _ls` outputs. Tab-tab on the same prefix should be
 // instant; new content is rare on this timescale.
-const lsCacheTTL = 5 * time.Second
-
 // cmdInternalLs is the `srv _ls <prefix>` internal subcommand used by tab
 // completion to enumerate remote entries. Output: one entry per line, each
 // line is the full path the shell should substitute (so the user gets a
@@ -60,12 +60,12 @@ func listRemoteEntries(prefix string, cfg *Config, profileOverride string) ([]st
 		return nil, err
 	}
 	cwd := GetCwd(name, profile)
-	dirPart, basePart := splitRemotePrefix(prefix)
-	target := remoteListTarget(dirPart, cwd)
+	dirPart, basePart := sshx.SplitRemotePrefix(prefix)
+	target := sshx.RemoteListTarget(dirPart, cwd)
 
 	// File cache (instant, ~60ms even for misses-then-hits sequences).
 	key := cacheKey(profile.Host, profile.User, target)
-	if cached, ok := readLsCache(key, lsCacheTTL); ok {
+	if cached, ok := readLsCache(key, sshx.LsCacheTTL); ok {
 		return matchEntries(cached, dirPart, basePart), nil
 	}
 
@@ -73,11 +73,11 @@ func listRemoteEntries(prefix string, cfg *Config, profileOverride string) ([]st
 	// Auto-spawn one in the background if none is running -- next call will
 	// be warm. Send the CLI's cwd so relative prefixes resolve against the
 	// right directory (the daemon never reads its own session).
-	if entries, ok := tryDaemonLs(name, cwd, prefix); ok {
+	if entries, ok := daemon.TryLs(name, cwd, prefix); ok {
 		return entries, nil
 	}
 	if ensureDaemon() {
-		if entries, ok := tryDaemonLs(name, cwd, prefix); ok {
+		if entries, ok := daemon.TryLs(name, cwd, prefix); ok {
 			return entries, nil
 		}
 	}
@@ -102,36 +102,6 @@ func matchEntries(entries []string, dirPart, basePart string) []string {
 		out = append(out, dirPart+e)
 	}
 	return out
-}
-
-// splitRemotePrefix divides "/opt/ap" into ("/opt/", "ap"); "/opt/" into
-// ("/opt/", ""); "ap" into ("", "ap"); "" into ("", "").
-func splitRemotePrefix(p string) (dir, base string) {
-	if p == "" {
-		return "", ""
-	}
-	i := strings.LastIndex(p, "/")
-	if i < 0 {
-		return "", p
-	}
-	return p[:i+1], p[i+1:]
-}
-
-// remoteListTarget resolves what directory to ls on the remote, given the
-// dirPart from the user's prefix and the persisted cwd.
-func remoteListTarget(dirPart, cwd string) string {
-	if dirPart == "" {
-		// Relative completion: list cwd.
-		if cwd == "" {
-			return "."
-		}
-		return cwd
-	}
-	// Absolute or ~-prefixed: pass through. Otherwise relative to cwd.
-	if strings.HasPrefix(dirPart, "/") || strings.HasPrefix(dirPart, "~") {
-		return dirPart
-	}
-	return strings.TrimRight(cwd, "/") + "/" + dirPart
 }
 
 // remoteList runs `ls -1Ap <dir>` and returns one entry per line. Dirs
