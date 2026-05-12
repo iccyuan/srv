@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"srv/internal/srvtty"
 	"strings"
 	"time"
 )
@@ -135,7 +136,7 @@ func remoteListTarget(dirPart, cwd string) string {
 // carry a trailing "/". Hidden entries are included (so `srv cd .ssh/`
 // completes), `.` and `..` are skipped.
 func remoteList(profile *Profile, target string, timeout time.Duration) ([]string, error) {
-	cmd := fmt.Sprintf("ls -1Ap -- %s", shQuotePath(target))
+	cmd := fmt.Sprintf("ls -1Ap -- %s", srvtty.ShQuotePath(target))
 	c, err := DialOpts(profile, dialOpts{timeout: timeout})
 	if err != nil {
 		return nil, fmt.Errorf("dial: %w", err)

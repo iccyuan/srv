@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"sort"
+	"srv/internal/srvtty"
 	"strconv"
 	"strings"
 	"time"
@@ -175,7 +176,7 @@ func countUIRows(rows []uiRow) (tunnels, jobs, mcp int) {
 //	                (independent of the shell's `srv use` choice)
 //	k             kill the selected job (arms a Y/N confirm)
 func cmdUI(cfg *Config) error {
-	if !isStdinTTY() {
+	if !srvtty.IsStdinTTY() {
 		// Without a TTY there's no way to read keys; degrade to a
 		// one-shot print of the snapshot so `srv ui | less` still
 		// works (or piped into a script). Jobs are still listed --
@@ -921,12 +922,12 @@ func uiKillJob(j *JobRecord, cfg *Config) (string, error) {
 	return out, nil
 }
 
-// redrawDashboard is a thin alias over the shared redrawInPlace
+// redrawDashboard is a thin alias over the shared srvtty.RedrawInPlace
 // helper. Kept as a named entry point so the dashboard's call site
 // reads at the right level of abstraction (we're repainting a
 // dashboard, not invoking a generic terminal helper).
 func redrawDashboard(content string, prevLines int) {
-	redrawInPlace(content, prevLines)
+	srvtty.RedrawInPlace(content, prevLines)
 }
 
 // renderDashboard collects every section into a single multi-line
@@ -1991,14 +1992,14 @@ const (
 	dashboardMaxWidth = 200
 )
 
-// updateDashboardWidth re-reads terminalSize() and updates the
+// updateDashboardWidth re-reads srvtty.Size() and updates the
 // package-level width / height vars. Returns true if either axis
 // changed -- the caller uses it to schedule a full clearScreen for
 // the next frame so a shrink doesn't leave stale chars behind, and
 // to bump forceRedraw so the new frame is flushed even when the
 // snapshot data itself is unchanged.
 func updateDashboardWidth() bool {
-	w, h := terminalSize()
+	w, h := srvtty.Size()
 	if w <= 0 {
 		return false
 	}

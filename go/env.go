@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"sort"
+	"srv/internal/srvtty"
 	"strings"
 )
 
@@ -81,7 +82,7 @@ func applyRemoteEnv(profile *Profile, cmd string) string {
 		if k == "" {
 			continue
 		}
-		parts = append(parts, k+"="+shQuote(profile.Env[k]))
+		parts = append(parts, k+"="+srvtty.ShQuote(profile.Env[k]))
 	}
 	if len(parts) == 0 {
 		return cmd

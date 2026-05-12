@@ -4,6 +4,7 @@ package main
 
 import (
 	"os"
+	"srv/internal/srvutil"
 	"strings"
 	"unsafe"
 
@@ -20,22 +21,22 @@ func platformSessionID() string {
 	for i := 0; i < 20; i++ {
 		entry, ok := tree[pid]
 		if !ok {
-			return intToStr(os.Getppid())
+			return srvutil.IntToStr(os.Getppid())
 		}
 		ppid := entry.parent
 		if ppid == 0 {
-			return intToStr(os.Getppid())
+			return srvutil.IntToStr(os.Getppid())
 		}
 		parent, ok := tree[ppid]
 		if !ok {
-			return uintToStr(ppid)
+			return srvutil.UintToStr(ppid)
 		}
 		if !intermediateExes[strings.ToLower(parent.exe)] {
-			return uintToStr(ppid)
+			return srvutil.UintToStr(ppid)
 		}
 		pid = ppid
 	}
-	return intToStr(os.Getppid())
+	return srvutil.IntToStr(os.Getppid())
 }
 
 func platformPidAlive(pid int) bool {

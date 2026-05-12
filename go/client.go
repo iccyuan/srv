@@ -9,6 +9,8 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"srv/internal/srvtty"
+	"srv/internal/srvutil"
 	"strconv"
 	"strings"
 	"sync"
@@ -124,7 +126,7 @@ func dialOnce(profile *Profile, defaultUser string, mkConfig func(string) *ssh.C
 	var err error
 	for _, spec := range profile.Jump {
 		hopUser, hopHost, hopPort := parseHostSpec(spec, defaultUser, 22)
-		hopAddr := net.JoinHostPort(hopHost, intToStr(hopPort))
+		hopAddr := net.JoinHostPort(hopHost, srvutil.IntToStr(hopPort))
 		hopCfg := mkConfig(hopUser)
 		var hop *ssh.Client
 		if len(chain) == 0 {
@@ -139,7 +141,7 @@ func dialOnce(profile *Profile, defaultUser string, mkConfig func(string) *ssh.C
 		chain = append(chain, hop)
 	}
 
-	targetAddr := net.JoinHostPort(profile.Host, intToStr(profile.GetPort()))
+	targetAddr := net.JoinHostPort(profile.Host, srvutil.IntToStr(profile.GetPort()))
 	targetCfg := mkConfig(defaultUser)
 	var conn *ssh.Client
 	if len(chain) == 0 {
@@ -392,7 +394,7 @@ func (c *Client) RunInteractive(command string, cwd string, tty bool) (int, erro
 			ssh.TTY_OP_OSPEED: 14400,
 		}
 		w, h := 80, 24
-		if cw, ch := terminalSize(); cw > 0 && ch > 0 {
+		if cw, ch := srvtty.Size(); cw > 0 && ch > 0 {
 			w, h = cw, ch
 		}
 		term := os.Getenv("TERM")
@@ -403,7 +405,7 @@ func (c *Client) RunInteractive(command string, cwd string, tty bool) (int, erro
 			return -1, err
 		}
 		// Put local terminal in raw mode if possible.
-		restore, _ := makeStdinRaw()
+		restore, _ := srvtty.MakeStdinRaw()
 		if restore != nil {
 			defer restore()
 		}
@@ -411,9 +413,9 @@ func (c *Client) RunInteractive(command string, cwd string, tty bool) (int, erro
 
 	sess.Stdout = os.Stdout
 	sess.Stderr = os.Stderr
-	if isStdinTTY() && tty {
+	if srvtty.IsStdinTTY() && tty {
 		sess.Stdin = os.Stdin
-	} else if !isStdinTTY() {
+	} else if !srvtty.IsStdinTTY() {
 		// Pipe local stdin (e.g. `cat foo | srv "wc -l"`).
 		sess.Stdin = os.Stdin
 	}
@@ -447,7 +449,7 @@ func (c *Client) Shell(cwd string) (int, error) {
 		ssh.TTY_OP_OSPEED: 14400,
 	}
 	w, h := 80, 24
-	if cw, ch := terminalSize(); cw > 0 && ch > 0 {
+	if cw, ch := srvtty.Size(); cw > 0 && ch > 0 {
 		w, h = cw, ch
 	}
 	term := os.Getenv("TERM")
@@ -458,7 +460,7 @@ func (c *Client) Shell(cwd string) (int, error) {
 		return -1, err
 	}
 
-	restore, _ := makeStdinRaw()
+	restore, _ := srvtty.MakeStdinRaw()
 	if restore != nil {
 		defer restore()
 	}
@@ -469,7 +471,7 @@ func (c *Client) Shell(cwd string) (int, error) {
 
 	shellCmd := `exec "${SHELL:-/bin/bash}" -l`
 	if cwd != "" {
-		shellCmd = fmt.Sprintf("cd %s && %s", shQuotePath(cwd), shellCmd)
+		shellCmd = fmt.Sprintf("cd %s && %s", srvtty.ShQuotePath(cwd), shellCmd)
 	}
 
 	if err := sess.Run(shellCmd); err != nil {
@@ -498,10 +500,10 @@ func (c *Client) RunDetached(command string, cwd string, jobID string) (int, err
 	// the user command may contain anything (heredocs, $vars, embedded
 	// quotes) and we still ship it intact through `bash -c`.
 	wrappedCmd := fmt.Sprintf("(%s); echo $? > %s", command, exitPath)
-	encoded := base64Encode(wrappedCmd)
+	encoded := srvtty.Base64Encode(wrappedCmd)
 	wrapped := fmt.Sprintf(
 		"mkdir -p ~/.srv-jobs && cd %s && (nohup bash -c \"$(echo %s | base64 -d)\" </dev/null >%s 2>&1 & echo $!)",
-		shQuotePath(cwdOrTilde(cwd)), encoded, logPath,
+		srvtty.ShQuotePath(cwdOrTilde(cwd)), encoded, logPath,
 	)
 	res, err := c.RunCapture(wrapped, "")
 	if err != nil {
@@ -513,7 +515,7 @@ func (c *Client) RunDetached(command string, cwd string, jobID string) (int, err
 	pidStr := ""
 	for _, line := range strings.Split(strings.TrimSpace(res.Stdout), "\n") {
 		line = strings.TrimSpace(line)
-		if line != "" && allDigits(line) {
+		if line != "" && srvutil.AllDigits(line) {
 			pidStr = line
 		}
 	}
@@ -647,7 +649,7 @@ func wrapWithCwd(command, cwd string) string {
 	if cwd == "" {
 		return command
 	}
-	return fmt.Sprintf("cd %s && (\n%s\n)", shQuotePath(cwd), command)
+	return fmt.Sprintf("cd %s && (\n%s\n)", srvtty.ShQuotePath(cwd), command)
 }
 
 func cwdOrTilde(cwd string) string {
@@ -704,8 +706,8 @@ func loadPrivateKey(path string) (ssh.Signer, error) {
 	signer, err := ssh.ParsePrivateKey(b)
 	if err != nil {
 		// Could be passphrase-protected. Try prompting if interactive.
-		if _, ok := err.(*ssh.PassphraseMissingError); ok && isStdinTTY() {
-			pass, perr := promptPassphrase(path)
+		if _, ok := err.(*ssh.PassphraseMissingError); ok && srvtty.IsStdinTTY() {
+			pass, perr := srvtty.PromptPassphrase(path)
 			if perr != nil {
 				return nil, perr
 			}

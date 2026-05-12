@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"srv/internal/srvutil"
 	"strconv"
 	"strings"
 	"time"
@@ -269,5 +270,5 @@ func nowISO() string {
 // random hex chars.
 func genJobID() string {
 	t := time.Now().Format("20060102-150405")
-	return fmt.Sprintf("%s-%s", t, randHex4())
+	return fmt.Sprintf("%s-%s", t, srvutil.RandHex4())
 }

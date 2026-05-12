@@ -10,6 +10,8 @@ import (
 	"os/exec"
 	"path/filepath"
 	"sort"
+	"srv/internal/srvtty"
+	"srv/internal/srvutil"
 	"strconv"
 	"strings"
 	"time"
@@ -383,7 +385,7 @@ func globMatches(root, pat string) []string {
 // of characters (including /).
 func matchDoubleStar(pat, rel string) bool {
 	regex := globToRegex(pat)
-	return regexMatch(regex, rel)
+	return srvutil.RegexMatch(regex, rel)
 }
 
 // globToRegex converts a shell glob with ** into a regex.
@@ -429,11 +431,11 @@ func matchesAnyExclude(path string, patterns []string) bool {
 	parts := strings.Split(norm, "/")
 	for _, raw := range patterns {
 		pat := strings.TrimRight(raw, "/")
-		if strings.ContainsAny(pat, "/*") && regexMatch(globToRegex(pat), norm) {
+		if strings.ContainsAny(pat, "/*") && srvutil.RegexMatch(globToRegex(pat), norm) {
 			return true
 		}
 		for _, part := range parts {
-			if regexMatch(globToRegex(pat), part) {
+			if srvutil.RegexMatch(globToRegex(pat), part) {
 				return true
 			}
 		}
@@ -562,7 +564,7 @@ func tarUploadStream(profile *Profile, localRoot string, files []string, remoteR
 		tarFlag = "-xzf"
 	}
 	remoteCmd := fmt.Sprintf("mkdir -p %s && cd %s && tar %s -",
-		shQuotePath(expanded), shQuotePath(expanded), tarFlag)
+		srvtty.ShQuotePath(expanded), srvtty.ShQuotePath(expanded), tarFlag)
 
 	pr, pw := io.Pipe()
 	errCh := make(chan error, 1)
@@ -659,12 +661,12 @@ func deleteRemoteFiles(profile *Profile, remoteRoot string, files []string) (int
 		if f == "" || strings.HasPrefix(f, "../") || filepath.IsAbs(f) {
 			continue
 		}
-		parts = append(parts, shQuotePath(f))
+		parts = append(parts, srvtty.ShQuotePath(f))
 	}
 	if len(parts) == 0 {
 		return 0, nil
 	}
-	cmd := fmt.Sprintf("cd %s && rm -f -- %s", shQuotePath(expanded), strings.Join(parts, " "))
+	cmd := fmt.Sprintf("cd %s && rm -f -- %s", srvtty.ShQuotePath(expanded), strings.Join(parts, " "))
 	res, err := c.RunCapture(cmd, "")
 	if err != nil {
 		return 1, err

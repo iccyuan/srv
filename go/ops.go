@@ -9,6 +9,7 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"srv/internal/srvtty"
 	"strings"
 
 	"github.com/pkg/sftp"
@@ -117,7 +118,7 @@ func validateRemoteCwd(profile *Profile, current, target string) (string, error)
 	}
 	cmd := fmt.Sprintf(
 		"cd %s 2>/dev/null || cd ~; cd %s && pwd",
-		shQuotePath(current), shQuotePath(target),
+		srvtty.ShQuotePath(current), srvtty.ShQuotePath(target),
 	)
 	res, err := runRemoteCapture(profile, "", cmd)
 	if err != nil {
@@ -501,7 +502,7 @@ func remoteHashFirstN(c *Client, p string, n int64) (string, error) {
 	}
 	cmd := fmt.Sprintf(
 		"head -c %d -- %s | { sha256sum 2>/dev/null || shasum -a 256 2>/dev/null || openssl dgst -sha256 -hex 2>/dev/null; } | grep -oE '[0-9a-f]{64}' | head -n1",
-		n, shQuotePath(p),
+		n, srvtty.ShQuotePath(p),
 	)
 	res, err := c.RunCapture(cmd, "")
 	if err != nil {

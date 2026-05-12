@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"os"
 	"sort"
+	"srv/internal/srvtty"
+	"srv/internal/srvutil"
 	"strconv"
 	"strings"
 )
@@ -125,7 +127,7 @@ func cmdConfig(args []string, cfg *Config) error {
 		// to ~/.srv/config.json, applies across all shells). Distinct
 		// from `srv use`, which only pins for the current shell session.
 		if len(rest) == 0 {
-			if isStdinTTY() {
+			if srvtty.IsStdinTTY() {
 				items := buildPickerItems(cfg)
 				sel, ok := runProfilePicker(items, "Select global default profile (persists across shells):")
 				if !ok {
@@ -340,9 +342,9 @@ func applyProfileSet(p *Profile, key, value string) {
 	v := strings.ToLower(value)
 	asBool := func() *bool {
 		if v == "true" {
-			return boolPtr(true)
+			return srvutil.BoolPtr(true)
 		}
-		return boolPtr(false)
+		return srvutil.BoolPtr(false)
 	}
 	switch key {
 	case "host":
@@ -424,7 +426,7 @@ func cmdUse(args []string, cfg *Config) error {
 		// chosen profile to this shell session. Off a TTY (pipe / CI),
 		// fall back to printing the current pin status so scripts that
 		// already capture the output keep working.
-		if isStdinTTY() && len(cfg.Profiles) > 0 {
+		if srvtty.IsStdinTTY() && len(cfg.Profiles) > 0 {
 			items := buildPickerItems(cfg)
 			sel, ok := runProfilePicker(items, "Select a profile to pin to this shell:")
 			if !ok {

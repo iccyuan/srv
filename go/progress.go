@@ -5,6 +5,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"srv/internal/srvtty"
 	"strings"
 	"sync/atomic"
 	"time"
@@ -22,7 +23,7 @@ import (
 //     of escape-mangled garbage. There is intentionally no flag to flip
 //     this on -- the user requirement is "MCP disabled, cannot enable".
 //
-//  2. isStderrTTY() == true. CLI users with a redirected stderr
+//  2. srvtty.IsStderrTTY() == true. CLI users with a redirected stderr
 //     (`srv pull foo 2>/dev/null`, CI logs) get clean output too.
 //
 // Updates are throttled to progressRefresh so a fast loopback transfer
@@ -50,7 +51,7 @@ func newProgressMeter(label string, total int64) *progressMeter {
 		label:      label,
 		total:      total,
 		started:    time.Now(),
-		enabled:    !mcpMode && isStderrTTY(),
+		enabled:    !mcpMode && srvtty.IsStderrTTY(),
 		labelWidth: len(label),
 	}
 }

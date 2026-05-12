@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"regexp"
+	"srv/internal/srvtty"
 	"strconv"
 	"strings"
 	"time"
@@ -168,19 +169,19 @@ func needValue(args []string, i int, flag string) (string, error) {
 func (j journalCmd) toRemoteCommand() string {
 	parts := []string{"journalctl", "--no-pager", "-o", "short-iso"}
 	if j.unit != "" {
-		parts = append(parts, "-u", shQuote(j.unit))
+		parts = append(parts, "-u", srvtty.ShQuote(j.unit))
 	}
 	if j.since != "" {
-		parts = append(parts, "--since", shQuote(j.since))
+		parts = append(parts, "--since", srvtty.ShQuote(j.since))
 	}
 	if j.priority != "" {
-		parts = append(parts, "-p", shQuote(j.priority))
+		parts = append(parts, "-p", srvtty.ShQuote(j.priority))
 	}
 	if j.lines > 0 {
 		parts = append(parts, "-n", strconv.Itoa(j.lines))
 	}
 	if j.grep != "" {
-		parts = append(parts, "-g", shQuote(j.grep))
+		parts = append(parts, "-g", srvtty.ShQuote(j.grep))
 	}
 	if j.follow {
 		parts = append(parts, "-f")

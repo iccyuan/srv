@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"srv/internal/srvutil"
 	"time"
 )
 
@@ -260,7 +261,7 @@ func writeFileAtomic(path string, data []byte, perm os.FileMode) error {
 	}
 	tmp := filepath.Join(
 		filepath.Dir(path),
-		fmt.Sprintf(".%s.%d.%s.tmp", filepath.Base(path), os.Getpid(), randHex4()),
+		fmt.Sprintf(".%s.%d.%s.tmp", filepath.Base(path), os.Getpid(), srvutil.RandHex4()),
 	)
 	if err := os.WriteFile(tmp, data, perm); err != nil {
 		return err

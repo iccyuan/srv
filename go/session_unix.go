@@ -4,11 +4,12 @@ package main
 
 import (
 	"os"
+	"srv/internal/srvutil"
 	"syscall"
 )
 
 func platformSessionID() string {
-	return intToStr(os.Getppid())
+	return srvutil.IntToStr(os.Getppid())
 }
 
 func platformPidAlive(pid int) bool {

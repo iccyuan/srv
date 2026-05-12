@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"os/signal"
+	"srv/internal/srvtty"
 	"strconv"
 	"strings"
 	"syscall"
@@ -88,7 +89,7 @@ func cmdWatch(args []string, cfg *Config, profileOverride string) error {
 		latency := time.Since(start)
 
 		frame := buildWatchFrame(cmd, profName, interval, latency, res, runErr, prevOut, diff)
-		redrawInPlace(frame, prevLines)
+		srvtty.RedrawInPlace(frame, prevLines)
 		prevLines = strings.Count(frame, "\n")
 		if res != nil {
 			prevOut = res.Stdout

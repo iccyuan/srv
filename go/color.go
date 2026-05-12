@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"sort"
+	"srv/internal/srvtty"
 	"strings"
 )
 
@@ -107,7 +108,7 @@ func colorBuiltinPrologue() string {
 	if runtime.GOOS == "linux" || runtime.GOOS == "darwin" {
 		if v := os.Getenv("LS_COLORS"); v != "" {
 			b.WriteString("export LS_COLORS=")
-			b.WriteString(shQuote(v))
+			b.WriteString(srvtty.ShQuote(v))
 			b.WriteByte('\n')
 			forwarded = true
 		}
@@ -353,7 +354,7 @@ func cmdColor(args []string) error {
 			// every named preset (user files first, then built-ins,
 			// user wins on name collision). Off-TTY keeps the old usage
 			// error so scripts still get a clean signal.
-			if isStdinTTY() {
+			if srvtty.IsStdinTTY() {
 				items := buildColorPickerItems()
 				if len(items) == 0 {
 					fmt.Fprintln(os.Stderr, "(no colour presets available)")

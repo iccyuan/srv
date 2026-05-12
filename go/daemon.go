@@ -11,6 +11,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"srv/internal/srvtty"
 	"strings"
 	"sync"
 	"syscall"
@@ -558,7 +559,7 @@ func (s *daemonState) handleLs(req daemonRequest) daemonResponse {
 // runLs runs `ls -1Ap` on the remote and returns the raw entries (one
 // per line; dirs carry trailing "/").
 func (s *daemonState) runLs(c *Client, target string) ([]string, error) {
-	cmd := fmt.Sprintf("ls -1Ap -- %s", shQuotePath(target))
+	cmd := fmt.Sprintf("ls -1Ap -- %s", srvtty.ShQuotePath(target))
 	res, err := c.RunCapture(cmd, "")
 	if err != nil {
 		return nil, err
@@ -661,7 +662,7 @@ func (s *daemonState) handleCd(req daemonRequest) daemonResponse {
 	}
 	cmd := fmt.Sprintf(
 		"cd %s 2>/dev/null || cd ~; cd %s && pwd",
-		shQuotePath(current), shQuotePath(target),
+		srvtty.ShQuotePath(current), srvtty.ShQuotePath(target),
 	)
 	res, err := c.RunCapture(cmd, "")
 	if err != nil {
@@ -740,7 +741,7 @@ func (s *daemonState) handleStreamRun(req daemonRequest, wr *bufio.Writer, wrMu 
 
 	full := req.Command
 	if cwd := req.Cwd; cwd != "" {
-		full = fmt.Sprintf("cd %s && (%s)", shQuotePath(cwd), req.Command)
+		full = fmt.Sprintf("cd %s && (%s)", srvtty.ShQuotePath(cwd), req.Command)
 	}
 	if err := sess.Start(full); err != nil {
 		fail("start: " + err.Error())

@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"srv/internal/srvtty"
 	"strconv"
 	"strings"
 	"sync"
@@ -717,7 +718,7 @@ func handleMCPTail(args map[string]any, cfg *Config, profileOverride string) too
 	}
 	defer c.Close()
 
-	remoteCmd := fmt.Sprintf("tail -F -n %d %s", lines, shQuotePath(path))
+	remoteCmd := fmt.Sprintf("tail -F -n %d %s", lines, srvtty.ShQuotePath(path))
 	token := currentProgressTokenFn()
 
 	// Bound the call: close the SSH client after follow_seconds so

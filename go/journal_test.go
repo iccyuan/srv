@@ -91,7 +91,7 @@ func TestJournalCmd_ToRemoteCommand_FullShape(t *testing.T) {
 		lines: 50, grep: "ERROR", follow: true,
 	}
 	got := jc.toRemoteCommand()
-	// shQuote leaves alphanumerics + . / : etc. unquoted but always
+	// srvtty.ShQuote leaves alphanumerics + . / : etc. unquoted but always
 	// quotes anything with whitespace. Assert against the shape we
 	// expect from that contract rather than a literal one-true-string.
 	for _, frag := range []string{

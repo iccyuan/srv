@@ -2,6 +2,7 @@ package main
 
 import (
 	"reflect"
+	"srv/internal/srvutil"
 	"testing"
 	"time"
 )
@@ -54,7 +55,7 @@ func TestGlobToRegex(t *testing.T) {
 		{"foo?bar", "foo/bar", false}, // ? doesn't match /
 	}
 	for _, tc := range cases {
-		got := regexMatch(globToRegex(tc.pat), tc.path)
+		got := srvutil.RegexMatch(globToRegex(tc.pat), tc.path)
 		if got != tc.want {
 			t.Errorf("glob %q vs %q = %v; want %v", tc.pat, tc.path, got, tc.want)
 		}

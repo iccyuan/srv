@@ -5,6 +5,7 @@ import (
 	"os"
 	"os/signal"
 	"regexp"
+	"srv/internal/srvtty"
 	"strconv"
 	"strings"
 	"sync"
@@ -89,7 +90,7 @@ see also:
 	// files. -n N controls the initial backfill across all files.
 	quoted := make([]string, len(paths))
 	for i, p := range paths {
-		quoted[i] = shQuotePath(p)
+		quoted[i] = srvtty.ShQuotePath(p)
 	}
 	remoteCmd := fmt.Sprintf("tail -F -n %d %s", initial, strings.Join(quoted, " "))
 

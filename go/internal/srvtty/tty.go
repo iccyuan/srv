@@ -1,4 +1,11 @@
-package main
+// Package srvtty bundles terminal / TTY interaction helpers used by
+// srv: TTY detection, terminal-size lookup, raw-mode toggle, passphrase
+// prompt, shell quoting (for safely interpolating into /bin/sh), and
+// the in-place redraw primitive shared by `srv ui` and `srv watch`.
+//
+// Pure stdlib + golang.org/x/term -- no srv-internal deps -- so any
+// subpackage can pull this in without dragging the rest of main along.
+package srvtty
 
 import (
 	"encoding/base64"
@@ -9,21 +16,21 @@ import (
 	"golang.org/x/term"
 )
 
-// isStdinTTY returns true when stdin is connected to a terminal.
-func isStdinTTY() bool {
+// IsStdinTTY returns true when stdin is connected to a terminal.
+func IsStdinTTY() bool {
 	return term.IsTerminal(int(os.Stdin.Fd()))
 }
 
-// isStderrTTY returns true when stderr is connected to a terminal.
+// IsStderrTTY returns true when stderr is connected to a terminal.
 // Used to gate human-only chrome (progress bars, refreshing status
 // lines) so it never lands in MCP responses or piped logs.
-func isStderrTTY() bool {
+func IsStderrTTY() bool {
 	return term.IsTerminal(int(os.Stderr.Fd()))
 }
 
-// terminalSize returns (cols, rows) of stdout's terminal, or (0, 0) on
+// Size returns (cols, rows) of stdout's terminal, or (0, 0) on
 // failure / non-tty.
-func terminalSize() (int, int) {
+func Size() (int, int) {
 	w, h, err := term.GetSize(int(os.Stdout.Fd()))
 	if err != nil {
 		return 0, 0
@@ -31,9 +38,9 @@ func terminalSize() (int, int) {
 	return w, h
 }
 
-// makeStdinRaw puts the local stdin terminal in raw mode and returns a
-// restore function. Returns nil restore if stdin isn't a terminal.
-func makeStdinRaw() (func(), error) {
+// MakeStdinRaw puts the local stdin terminal in raw mode and returns
+// a restore function. Returns nil restore if stdin isn't a terminal.
+func MakeStdinRaw() (func(), error) {
 	fd := int(os.Stdin.Fd())
 	if !term.IsTerminal(fd) {
 		return nil, nil
@@ -45,8 +52,10 @@ func makeStdinRaw() (func(), error) {
 	return func() { _ = term.Restore(fd, state) }, nil
 }
 
-// promptPassphrase reads a passphrase from /dev/tty (or stdin) without echo.
-func promptPassphrase(keyPath string) ([]byte, error) {
+// PromptPassphrase reads a passphrase from /dev/tty (or stdin) without
+// echo. Always writes the prompt to stderr so stdout redirection
+// doesn't swallow it.
+func PromptPassphrase(keyPath string) ([]byte, error) {
 	fmt.Fprintf(os.Stderr, "Enter passphrase for %s: ", keyPath)
 	defer fmt.Fprintln(os.Stderr)
 	pass, err := term.ReadPassword(int(os.Stdin.Fd()))
@@ -56,9 +65,10 @@ func promptPassphrase(keyPath string) ([]byte, error) {
 	return pass, nil
 }
 
-// shQuote single-quotes a string for safe inclusion in a /bin/sh command.
-// Replaces internal single quotes with the standard '\” dance.
-func shQuote(s string) string {
+// ShQuote single-quotes a string for safe inclusion in a /bin/sh
+// command. Replaces internal single quotes with the standard '\”
+// dance.
+func ShQuote(s string) string {
 	if s == "" {
 		return "''"
 	}
@@ -68,37 +78,38 @@ func shQuote(s string) string {
 	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
 }
 
-// shQuotePath is shQuote for filesystem paths, but it preserves a leading
-// `~` or `~/` so the remote shell still does tilde expansion. Without this,
-// `cd '~'` would look for a literal directory named "~" and fail.
-func shQuotePath(p string) string {
+// ShQuotePath is ShQuote for filesystem paths, but it preserves a
+// leading `~` or `~/` so the remote shell still does tilde expansion.
+// Without this, `cd '~'` would look for a literal directory named "~"
+// and fail.
+func ShQuotePath(p string) string {
 	switch {
 	case p == "~":
 		return "~"
 	case strings.HasPrefix(p, "~/"):
-		return "~/" + shQuote(p[2:])
+		return "~/" + ShQuote(p[2:])
 	default:
-		return shQuote(p)
+		return ShQuote(p)
 	}
 }
 
-// base64Encode returns the base64 encoding of s.
-func base64Encode(s string) string {
+// Base64Encode returns the base64 encoding of s. Thin wrapper that
+// removes one import + two casts at call sites.
+func Base64Encode(s string) string {
 	return base64.StdEncoding.EncodeToString([]byte(s))
 }
 
-// redrawInPlace overwrites a previous N-line frame with `content` in
+// RedrawInPlace overwrites a previous N-line frame with `content` in
 // a single Fprint, avoiding the "blank-then-refill" flash that an
 // erase-first sequence would produce.
 //
 // Caller maintains prevLines (= line count of the last call's
-// content) and passes 0 on the first render. The function emits its
-// output to stderr so it stays out of the way when stdout is being
-// piped / redirected.
+// content) and passes 0 on the first render. Output goes to stderr so
+// it stays out of the way when stdout is being piped / redirected.
 //
 // Shared between `srv ui` (the dashboard) and `srv watch` (periodic
 // snapshot) so both get the same flicker-free repaint behaviour.
-func redrawInPlace(content string, prevLines int) {
+func RedrawInPlace(content string, prevLines int) {
 	var sb strings.Builder
 	if prevLines > 0 {
 		// Cursor up, then carriage-return to column 0. No erase yet --
@@ -112,17 +123,4 @@ func redrawInPlace(content string, prevLines int) {
 	// shorter than the old (orphan lines below would otherwise stay).
 	sb.WriteString("\x1b[J")
 	fmt.Fprint(os.Stderr, sb.String())
-}
-
-// allDigits reports whether every rune in s is an ASCII digit.
-func allDigits(s string) bool {
-	if s == "" {
-		return false
-	}
-	for _, r := range s {
-		if r < '0' || r > '9' {
-			return false
-		}
-	}
-	return true
 }

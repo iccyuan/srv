@@ -4,6 +4,7 @@ import (
 	"encoding/base64"
 	"fmt"
 	"os"
+	"srv/internal/srvtty"
 	"strings"
 	"time"
 
@@ -113,7 +114,7 @@ func cmdSudo(args []string, cfg *Config, opts globalOpts) error {
 // from arbitrary stdin (would surface in shell history if `--no-cache
 // </file`-style mistakes happen).
 func promptSudoPassword(user string) (string, error) {
-	if !isStdinTTY() {
+	if !srvtty.IsStdinTTY() {
 		return "", fmt.Errorf("stdin is not a tty; cannot prompt (use cache or run from an interactive shell)")
 	}
 	label := user
