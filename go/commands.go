@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"srv/internal/completion"
 	"srv/internal/install"
 
 	"srv/internal/i18n"
@@ -61,7 +62,7 @@ var subcommands = []subcommand{
 		fmt.Printf("srv %s\n", Version)
 		return nil
 	}},
-	{name: "completion", noConfig: true, handler: func(c cmdCtx) error { return cmdCompletion(c.args) }},
+	{name: "completion", noConfig: true, handler: func(c cmdCtx) error { return completion.Cmd(c.args, userVisibleSubcommands()) }},
 	{name: "install", noConfig: true, handler: func(c cmdCtx) error {
 		snap := install.Snap{Version: Version}
 		if cfg, _ := LoadConfig(); cfg != nil {

@@ -1,4 +1,4 @@
-package main
+package completion
 
 import (
 	"bytes"
@@ -279,9 +279,13 @@ __SRV_CASES__
 }
 `
 
-func cmdCompletion(args []string) error {
+// Cmd is the `srv completion` subcommand entry point. The `subs` slice
+// is the user-visible subcommand list; the caller supplies it (rather
+// than this package walking the command registry) so completion has
+// no reverse dep on package main.
+func Cmd(args, subs []string) error {
 	if len(args) == 0 {
-		return exitErr(1, "usage: srv completion <bash|zsh|powershell> [--install]")
+		return fmt.Errorf("usage: srv completion <bash|zsh|powershell> [--install]")
 	}
 	// Parse optional --install flag and find the shell name. Flag order
 	// is irrelevant: `srv completion bash --install` and
@@ -299,10 +303,10 @@ func cmdCompletion(args []string) error {
 		}
 	}
 	if shell == "" {
-		return exitErr(1, "usage: srv completion <bash|zsh|powershell> [--install]")
+		return fmt.Errorf("usage: srv completion <bash|zsh|powershell> [--install]")
 	}
 
-	script, canon, err := buildCompletionScript(shell)
+	script, canon, err := buildCompletionScript(shell, subs)
 	if err != nil {
 		return err
 	}
@@ -315,16 +319,16 @@ func cmdCompletion(args []string) error {
 
 // buildCompletionScript renders the per-shell completion script and
 // returns it along with the canonical shell name (bash / zsh /
-// powershell). Splitting this from cmdCompletion lets --install reuse
-// the same renderer without duplicating the placeholder substitutions.
-func buildCompletionScript(shell string) (string, string, error) {
+// powershell). Splitting this from Cmd lets --install reuse the same
+// renderer without duplicating the placeholder substitutions.
+func buildCompletionScript(shell string, subs []string) (string, string, error) {
 	// The bash and PowerShell scripts get their `subs` list rendered
 	// from the live registry so adding a new subcommand only requires
 	// a commands.go entry, not three parallel hand-edits. zsh keeps its
 	// hand-curated array because each entry carries a description shown
 	// in the `_describe` menu -- worth preserving over OCP purity.
-	bashSubs := strings.Join(userVisibleSubcommands(), " ")
-	psSubs := "'" + strings.Join(userVisibleSubcommands(), "','") + "'"
+	bashSubs := strings.Join(subs, " ")
+	psSubs := "'" + strings.Join(subs, "','") + "'"
 
 	switch shell {
 	case "bash":
@@ -353,7 +357,7 @@ func buildCompletionScript(shell string) (string, string, error) {
 		out = strings.ReplaceAll(out, "& srv _ls", "& "+quoted+" _ls")
 		return out, "powershell", nil
 	}
-	return "", "", exitErr(1, "error: unknown shell %q (expected bash/zsh/powershell)", shell)
+	return "", "", fmt.Errorf("unknown shell %q (expected bash/zsh/powershell)", shell)
 }
 
 // Markers wrap the loader block in the user's rc file so subsequent
