@@ -15,6 +15,8 @@ import (
 	"fmt"
 	"os"
 	"sort"
+	"srv/internal/jobs"
+	"srv/internal/srvutil"
 	"strings"
 
 	"srv/internal/config"
@@ -190,3 +192,37 @@ func ApplyEnv(profile *config.Profile, cmd string) string {
 // some Go toolchains (session is reached transitively via config
 // helpers GetCwd/SetCwd).
 var _ = session.ID
+
+// SpawnDetached runs `userCmd` on the remote with nohup, returns the
+// newly-persisted jobs.Record. Used by `srv -d <cmd>` (CLI) and the
+// `run` MCP tool's background=true mode.
+func SpawnDetached(profileName string, profile *config.Profile, userCmd string) (*jobs.Record, error) {
+	cwd := config.GetCwd(profileName, profile)
+
+	c, err := sshx.Dial(profile)
+	if err != nil {
+		return nil, err
+	}
+	defer c.Close()
+
+	jobID := srvutil.GenJobID()
+	pid, err := c.RunDetached(ApplyEnv(profile, userCmd), cwd, jobID)
+	if err != nil {
+		return nil, err
+	}
+	rec := &jobs.Record{
+		ID:      jobID,
+		Profile: profileName,
+		Cmd:     userCmd,
+		Cwd:     cwd,
+		Pid:     pid,
+		Log:     "~/.srv-jobs/" + jobID + ".log",
+		Started: srvutil.NowISO(),
+	}
+	jf := jobs.Load()
+	jf.Jobs = append(jf.Jobs, rec)
+	if err := jobs.Save(jf); err != nil {
+		return rec, err
+	}
+	return rec, nil
+}

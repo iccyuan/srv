@@ -15,3 +15,5 @@ var (
 	resolveRemotePath = remote.ResolvePath
 	applyRemoteEnv    = remote.ApplyEnv
 )
+
+var spawnDetached = remote.SpawnDetached

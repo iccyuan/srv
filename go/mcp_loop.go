@@ -23,18 +23,18 @@ var mcpMode bool
 
 // currentProgressToken carries the per-request progress token from the
 // loop down to whichever streaming handler is dispatched. Plain global
-// is safe because the loop is strictly serial -- one tools/call at a
+// is safe because the loop is strictly serial -- one mcpTools/call at a
 // time, set on entry, cleared on exit. Handlers that spawn goroutines
 // snapshot it before returning so the goroutines see a stable value
 // even if the next request blanks the global.
 var currentProgressToken any
 
 // currentProgressTokenFn returns whatever was stamped onto the running
-// request. Streaming-capable tools call this to find out if the client
+// request. Streaming-capable mcpTools call this to find out if the client
 // asked for streaming (non-nil) or wants the synchronous shape (nil).
 func currentProgressTokenFn() any { return currentProgressToken }
 
-// cmdMcp is the stdio MCP server entry point. Reads JSON-RPC frames from
+// Run is the stdio MCP server entry point. Reads JSON-RPC frames from
 // stdin one line at a time, dispatches by method, writes responses to
 // stdout. Logs lifecycle events to ~/.srv/mcp.log so disconnects can be
 // post-mortem'd (the client doesn't surface why a session ended).
@@ -71,17 +71,17 @@ func cmdMcp(cfg *Config) error {
 		switch req.Method {
 		case "initialize":
 			mcpSend(mcpResponse(req.ID, map[string]any{
-				"protocolVersion": mcpProtocolVersion,
-				"capabilities":    map[string]any{"tools": map[string]any{"listChanged": false}},
+				"protocolVersion": protocolVersion,
+				"capabilities":    map[string]any{"mcpTools": map[string]any{"listChanged": false}},
 				"serverInfo":      map[string]any{"name": "srv", "version": Version},
 			}, nil))
 		case "notifications/initialized":
 			// no response for notifications
 		case "ping":
 			mcpSend(mcpResponse(req.ID, map[string]any{}, nil))
-		case "tools/list":
-			mcpSend(mcpResponse(req.ID, map[string]any{"tools": mcpToolDefs()}, nil))
-		case "tools/call":
+		case "mcpTools/list":
+			mcpSend(mcpResponse(req.ID, map[string]any{"mcpTools": mcpToolDefs()}, nil))
+		case "mcpTools/call":
 			var p struct {
 				Name      string         `json:"name"`
 				Arguments map[string]any `json:"arguments"`
@@ -92,7 +92,7 @@ func cmdMcp(cfg *Config) error {
 			if err := json.Unmarshal(req.Params, &p); err != nil {
 				mcpSend(mcpResponse(req.ID, nil, &jsonRPCError{
 					Code:    -32602,
-					Message: "invalid tools/call params: " + err.Error(),
+					Message: "invalid mcpTools/call params: " + err.Error(),
 				}))
 				continue
 			}
@@ -105,7 +105,7 @@ func cmdMcp(cfg *Config) error {
 				cfg2 = newConfig()
 			}
 			// Stash the progress token before dispatch and clear it
-			// after, so streaming tools can read it via
+			// after, so streaming mcpTools can read it via
 			// currentProgressTokenFn(). Loop is serial so the global is
 			// race-free; per-handler goroutines that outlive the call
 			// must snapshot the value themselves.
@@ -133,7 +133,7 @@ func cmdMcp(cfg *Config) error {
 // safeMCPHandle isolates a tool handler from the request loop: any panic
 // inside mcpHandleTool is converted into an isError tool result so the
 // MCP server stays alive for subsequent calls. The panic itself is
-// logged to mcp.log first so a hard crash later (mcpSend BrokenPipe etc.)
+// logged to mcp.log first so a hard crash later (Send BrokenPipe etc.)
 // still leaves a trail. Stack would be ideal here but it inflates the
 // log; the (tool, panic) pair is usually enough to localise via git
 // blame.

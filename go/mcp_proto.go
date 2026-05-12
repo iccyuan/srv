@@ -11,7 +11,7 @@ import (
 // helpers, and a small read-error classifier the loop uses to label
 // stdin-EOF vs other failures in the diagnostic log.
 
-const mcpProtocolVersion = "2024-11-05"
+const protocolVersion = "2024-11-05"
 
 type jsonRPCRequest struct {
 	JSONRPC string          `json:"jsonrpc"`
@@ -33,14 +33,14 @@ type jsonRPCError struct {
 }
 
 // mcpSendMu serializes writes to stdout so concurrent emitters can't
-// interleave bytes mid-frame. The synchronous tools/call path doesn't
+// interleave bytes mid-frame. The synchronous mcpTools/call path doesn't
 // need it (one writer at a time), but the streaming run path has its
 // stdout/stderr forwarder goroutines emitting progress notifications
 // in parallel with whatever else, so every write goes through the
 // mutex to keep frames atomic.
 var mcpSendMu sync.Mutex
 
-// mcpSend marshals a response to stdout terminated with a newline (the
+// Send marshals a response to stdout terminated with a newline (the
 // stdio MCP framing). Recovers from BrokenPipe so a client that closes
 // mid-write doesn't crash the loop.
 func mcpSend(obj any) {
@@ -55,18 +55,18 @@ func mcpSend(obj any) {
 	os.Stdout.Write([]byte("\n"))
 }
 
-// mcpNotification is the JSON-RPC 2.0 shape for server-to-client
+// notification is the JSON-RPC 2.0 shape for server-to-client
 // notifications (no `id`, the client doesn't reply). Used today for
 // `notifications/progress` so the streaming `run_stream` tool can
 // push partial output before its final tool result lands.
-type mcpNotification struct {
+type notification struct {
 	JSONRPC string `json:"jsonrpc"`
 	Method  string `json:"method"`
 	Params  any    `json:"params,omitempty"`
 }
 
 // progressParams is the payload of a `notifications/progress` message.
-// `progressToken` echoes the value the client sent in tools/call meta;
+// `progressToken` echoes the value the client sent in mcpTools/call meta;
 // `progress` is a monotonic counter (we use byte count); `message` is
 // the human-readable chunk -- for run_stream that's the streamed line.
 type progressParams struct {
@@ -78,13 +78,13 @@ type progressParams struct {
 // mcpProgress emits one `notifications/progress` to the client. Caller
 // is responsible for monotonic `progress` -- we don't auto-increment.
 // When token is nil (caller didn't pass _meta.progressToken) this is a
-// no-op so streaming tools degrade gracefully under non-streaming
+// no-op so streaming mcpTools degrade gracefully under non-streaming
 // clients.
 func mcpProgress(token any, progress int, message string) {
 	if token == nil {
 		return
 	}
-	mcpSend(mcpNotification{
+	mcpSend(notification{
 		JSONRPC: "2.0",
 		Method:  "notifications/progress",
 		Params: progressParams{
@@ -140,7 +140,7 @@ func guardBlocked(tool, reason string) toolResult {
 // mcpJSONResult returns a tool result whose Content is a *compact* JSON
 // rendering of `info`, with no separate StructuredContent. Both fields
 // reach the MCP client; duplicating the same JSON in pretty-printed text
-// AND a structured payload doubled the tokens many tools were spending
+// AND a structured payload doubled the tokens many mcpTools were spending
 // on every call. Compact text is enough -- the model parses it fine and
 // pretty-printing was costing ~30% extra whitespace tokens on top.
 func mcpJSONResult(info any) toolResult {

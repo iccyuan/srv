@@ -18,8 +18,8 @@ import (
 )
 
 // MCP tool registry. ONE source of truth: mcpToolDefs() (advertised to
-// the client via tools/list) and mcpHandleTool() (dispatch on
-// tools/call) both read from `mcpTools`. Adding a tool means appending
+// the client via mcpTools/list) and mcpHandleTool() (dispatch on
+// mcpTools/call) both read from `mcpTools`. Adding a tool means appending
 // a single entry below; the def-list and the dispatch switch can never
 // drift. Same OCP pattern as the CLI subcommand registry in commands.go.
 //
@@ -176,7 +176,7 @@ var runForeverPatterns = []*regexp.Regexp{
 // runRejectSync inspects a command planned for synchronous execution and
 // returns a non-empty hint if it would block the MCP turn for too long.
 // AI clients reach for sleep+poll loops by reflex, but those tie up the
-// MCP per-tool timeout and produce the "tools no longer available" red
+// MCP per-tool timeout and produce the "mcpTools no longer available" red
 // dot. We catch the patterns here and route the model toward
 // background=true / wait_job. Empty return = command is fine to run sync.
 func runRejectSync(cmd string) string {
@@ -374,7 +374,7 @@ type mcpTool struct {
 
 // strSchema builds a string-type JSON schema fragment. Empty desc maps
 // to a bare {"type": "string"} -- shaving "description":"" off every
-// passthrough field keeps the tools/list payload compact.
+// passthrough field keeps the mcpTools/list payload compact.
 func strSchema(desc string) map[string]any {
 	if desc == "" {
 		return map[string]any{"type": "string"}
@@ -453,7 +453,7 @@ func isMeaningfulFilter(s string) bool {
 }
 
 // requireStreamFilter is the gate that follow-mode MCP streaming
-// tools call before kicking off a stream. Rule: any `follow_seconds
+// mcpTools call before kicking off a stream. Rule: any `follow_seconds
 // > 0` requires at least one meaningful output filter. Earlier
 // versions exempted "short" follows (≤5s), but a chatty log can flood
 // the per-call progress channel even in five seconds, and the
@@ -561,7 +561,7 @@ func handleMCPRun(args map[string]any, cfg *Config, profileOverride string) tool
 // handleMCPRunStream is the streaming variant of `run`. While the
 // remote command executes, every line of stdout/stderr is pushed to
 // the client as a `notifications/progress` notification tagged with
-// the caller's progressToken. The final `tools/call` response still
+// the caller's progressToken. The final `mcpTools/call` response still
 // carries the full captured output (capped at mcpRunTextMax) and the
 // exit code -- progress notifications are informational, not the
 // authoritative output, so a client that ignores them still gets the
@@ -569,7 +569,7 @@ func handleMCPRun(args map[string]any, cfg *Config, profileOverride string) tool
 //
 // Why this exists: the synchronous `run` tool is bound by the MCP
 // per-tool timeout (Claude Code default 60s) -- a 30s build sits
-// silent until completion and risks the "tools no longer available"
+// silent until completion and risks the "mcpTools no longer available"
 // red dot if it slips past the bound. Streaming keeps progress
 // flowing so the client doesn't time out, and lets the model see
 // partial output before the command finishes.
@@ -648,7 +648,7 @@ func handleMCPRunStream(args map[string]any, cfg *Config, profileOverride string
 
 // handleMCPTail follows a remote file for a bounded duration and
 // streams new lines to the client via `notifications/progress`. The
-// final tools/call response returns the full accumulated output
+// final mcpTools/call response returns the full accumulated output
 // (capped at mcpRunTextMax) plus structured metadata.
 //
 // Why not just use `run` with `tail -F`: synchronous `run` rejects
@@ -1365,7 +1365,7 @@ func handleMCPDetach(args map[string]any, cfg *Config, profileOverride string) t
 // Why separate from `run`: mixing the fan-out shape into the `run`
 // tool's schema would force callers to handle both "single result"
 // and "array of results" depending on whether `group` was set. Keeping
-// it separate gives both tools narrow, predictable response shapes.
+// it separate gives both mcpTools narrow, predictable response shapes.
 func handleMCPRunGroup(args map[string]any, cfg *Config, profileOverride string) toolResult {
 	groupName, _ := args["group"].(string)
 	if groupName == "" {
@@ -1672,7 +1672,7 @@ func handleMCPKillJob(args map[string]any, cfg *Config, profileOverride string) 
 
 // -----------------------------------------------------------------------------
 // Registry. Each entry pairs a toolDef (advertised to the client via
-// tools/list) with its handler (called from tools/call). Order here is
+// mcpTools/list) with its handler (called from mcpTools/call). Order here is
 // only a presentation choice; mcpToolMap below makes lookup O(1).
 // -----------------------------------------------------------------------------
 
@@ -1697,7 +1697,7 @@ var mcpTools = []mcpTool{
 	{
 		def: toolDef{
 			Name:        "journal",
-			Description: "Read or follow systemd journal on the remote. Mirrors journalctl's flag shape: `unit` (-u), `since`, `priority` (-p), `lines` (-n), `grep` (-g, server-side). Pass `follow_seconds` > 0 to stream new lines via `notifications/progress` for that many seconds (cap 60); leave 0 for a one-shot read. Use this in place of `run \"journalctl ...\"` so the bounded-follow case has a real tool surface instead of getting rejected as a long-blocking pattern.\n\nToken-economy gates (MCP only):\n  - ANY follow_seconds > 0 REQUIRES at least one of unit / since / priority / grep -- progress notifications during follow are unbounded by the result-text cap.\n  - `lines` is clamped to 2000.\n  - follow_seconds capped at 60s.\n\nSibling tools (pick by source):\n  - `tail`      -> any remote file by path\n  - `tail_log`  -> output of a detached srv job (by job_id, not path)",
+			Description: "Read or follow systemd journal on the remote. Mirrors journalctl's flag shape: `unit` (-u), `since`, `priority` (-p), `lines` (-n), `grep` (-g, server-side). Pass `follow_seconds` > 0 to stream new lines via `notifications/progress` for that many seconds (cap 60); leave 0 for a one-shot read. Use this in place of `run \"journalctl ...\"` so the bounded-follow case has a real tool surface instead of getting rejected as a long-blocking pattern.\n\nToken-economy gates (MCP only):\n  - ANY follow_seconds > 0 REQUIRES at least one of unit / since / priority / grep -- progress notifications during follow are unbounded by the result-text cap.\n  - `lines` is clamped to 2000.\n  - follow_seconds capped at 60s.\n\nSibling mcpTools (pick by source):\n  - `tail`      -> any remote file by path\n  - `tail_log`  -> output of a detached srv job (by job_id, not path)",
 			InputSchema: map[string]any{
 				"type": "object",
 				"properties": map[string]any{
@@ -1716,7 +1716,7 @@ var mcpTools = []mcpTool{
 	{
 		def: toolDef{
 			Name:        "tail",
-			Description: "Read the last N lines of a remote file. With follow_seconds > 0, also streams new lines via `notifications/progress` for that duration. Use the one-shot form for log spot-checks; use the follow form when you actually need to watch a log change mid-deploy.\n\nToken-economy gates (MCP only):\n  - ANY follow_seconds > 0 REQUIRES a `grep` regex. Even short follows can flood progress notifications; the 64 KiB final-result cap does NOT cap the progress stream.\n  - `lines` is clamped to 1000.\n  - follow_seconds capped at 60s.\n\nFor one-shot reads (default), no grep is required -- the `lines` cap is the bound.\n\nSibling tools (pick by source):\n  - `journal`   -> systemd unit logs (use this for any service log on a systemd host; never `tail /var/log/journal/...`)\n  - `tail_log`  -> output of a detached srv job (by job_id, not path)",
+			Description: "Read the last N lines of a remote file. With follow_seconds > 0, also streams new lines via `notifications/progress` for that duration. Use the one-shot form for log spot-checks; use the follow form when you actually need to watch a log change mid-deploy.\n\nToken-economy gates (MCP only):\n  - ANY follow_seconds > 0 REQUIRES a `grep` regex. Even short follows can flood progress notifications; the 64 KiB final-result cap does NOT cap the progress stream.\n  - `lines` is clamped to 1000.\n  - follow_seconds capped at 60s.\n\nFor one-shot reads (default), no grep is required -- the `lines` cap is the bound.\n\nSibling mcpTools (pick by source):\n  - `journal`   -> systemd unit logs (use this for any service log on a systemd host; never `tail /var/log/journal/...`)\n  - `tail_log`  -> output of a detached srv job (by job_id, not path)",
 			InputSchema: map[string]any{
 				"type": "object",
 				"properties": map[string]any{
@@ -1734,7 +1734,7 @@ var mcpTools = []mcpTool{
 	{
 		def: toolDef{
 			Name:        "run_stream",
-			Description: "Streaming variant of `run`. Output is pushed to the client as `notifications/progress` messages while the command runs, then the final tool result delivers the full captured output. Use this for medium-length commands (~20-90s builds, tests, deploys) where synchronous `run` would risk the per-tool timeout: progress keeps the call alive, the model sees partial output mid-flight, and the final result still arrives as the authoritative payload.\n\nThe client must pass `_meta.progressToken` on tools/call for the notifications to be delivered -- without it, this falls back to a synchronous shape identical to `run`.\n\nSame token-economy gate as `run`: `cat <file>` / bare `dmesg` / unfiltered `journalctl` / `find /` without flags are rejected. Streaming makes unbounded output WORSE (progress notifications add token cost on top of the final result), so the gate applies more aggressively here too.",
+			Description: "Streaming variant of `run`. Output is pushed to the client as `notifications/progress` messages while the command runs, then the final tool result delivers the full captured output. Use this for medium-length commands (~20-90s builds, tests, deploys) where synchronous `run` would risk the per-tool timeout: progress keeps the call alive, the model sees partial output mid-flight, and the final result still arrives as the authoritative payload.\n\nThe client must pass `_meta.progressToken` on mcpTools/call for the notifications to be delivered -- without it, this falls back to a synchronous shape identical to `run`.\n\nSame token-economy gate as `run`: `cat <file>` / bare `dmesg` / unfiltered `journalctl` / `find /` without flags are rejected. Streaming makes unbounded output WORSE (progress notifications add token cost on top of the final result), so the gate applies more aggressively here too.",
 			InputSchema: map[string]any{
 				"type": "object",
 				"properties": map[string]any{
@@ -1984,7 +1984,7 @@ var mcpTools = []mcpTool{
 	{
 		def: toolDef{
 			Name:        "tail_log",
-			Description: "Read the last N lines of a detached job's log file (by job_id). Resolves the id to ~/.srv-jobs/<id>.log on the remote and runs `tail -n LINES` there. One-shot only -- use `wait_job` for the polling pattern that pairs with `detach` / `run background=true`.\n\nSibling tools (pick by source):\n  - `tail`     -> any remote file by path (with optional follow + grep)\n  - `journal`  -> systemd unit logs",
+			Description: "Read the last N lines of a detached job's log file (by job_id). Resolves the id to ~/.srv-jobs/<id>.log on the remote and runs `tail -n LINES` there. One-shot only -- use `wait_job` for the polling pattern that pairs with `detach` / `run background=true`.\n\nSibling mcpTools (pick by source):\n  - `tail`     -> any remote file by path (with optional follow + grep)\n  - `journal`  -> systemd unit logs",
 			InputSchema: map[string]any{
 				"type": "object",
 				"properties": map[string]any{
@@ -2056,7 +2056,7 @@ func init() {
 	}
 }
 
-// mcpToolDefs returns the slice of toolDef advertised on tools/list.
+// mcpToolDefs returns the slice of toolDef advertised on mcpTools/list.
 // Derived from the registry so the def-list and the dispatcher cannot
 // drift -- both come from the same source.
 func mcpToolDefs() []toolDef {
@@ -2067,7 +2067,7 @@ func mcpToolDefs() []toolDef {
 	return defs
 }
 
-// mcpHandleTool dispatches a tools/call request through the registry.
+// mcpHandleTool dispatches a mcpTools/call request through the registry.
 // Unknown names return a textual error -- spec doesn't require a more
 // structured "tool not found" form for that case.
 func mcpHandleTool(name string, args map[string]any, cfg *Config) toolResult {

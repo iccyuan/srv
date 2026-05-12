@@ -6,41 +6,10 @@ import (
 	"strings"
 
 	"srv/internal/jobs"
-	"srv/internal/srvutil"
 )
 
-// spawnDetached runs `userCmd` on the remote with nohup, returns the new
-// jobs.Record (already persisted to jobs.json).
-func spawnDetached(profileName string, profile *Profile, userCmd string) (*jobs.Record, error) {
-	cwd := GetCwd(profileName, profile)
-
-	c, err := Dial(profile)
-	if err != nil {
-		return nil, err
-	}
-	defer c.Close()
-
-	jobID := srvutil.GenJobID()
-	pid, err := c.RunDetached(applyRemoteEnv(profile, userCmd), cwd, jobID)
-	if err != nil {
-		return nil, err
-	}
-	rec := &jobs.Record{
-		ID:      jobID,
-		Profile: profileName,
-		Cmd:     userCmd,
-		Cwd:     cwd,
-		Pid:     pid,
-		Log:     fmt.Sprintf("~/.srv-jobs/%s.log", jobID),
-		Started: srvutil.NowISO(),
-	}
-	jf := jobs.Load()
-	jf.Jobs = append(jf.Jobs, rec)
-	if err := jobs.Save(jf); err != nil {
-		return rec, err
-	}
-	return rec, nil
-}
+// spawnDetached moved to srv/internal/remote.SpawnDetached. Aliased
+// in remote_alias.go.
 
 func cmdDetach(args []string, cfg *Config, profileOverride string) error {
 	if len(args) == 0 {
