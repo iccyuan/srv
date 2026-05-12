@@ -22,6 +22,13 @@
 | Open a remote file locally | `srv open logs/app.log` |
 | Long-running background task | `srv -d ./build.sh` |
 | Inspect background jobs | `srv jobs` / `srv logs <id> -f` |
+| Live-follow a remote file | `srv tail [-f] [--grep RE] <path>` |
+| Follow a systemd unit | `srv journal -u <unit> [-f]` |
+| Periodic command view (in-place) | `srv watch -n 1 "ps aux \| head"` |
+| Stream remote top | `srv top` |
+| Run on a profile group in parallel | `srv -G <group> <cmd>` |
+| Remote sudo (no-echo password prompt) | `srv sudo <cmd>` |
+| One-screen state overview | `srv ui` |
 | Diagnose connection issues | `srv check` |
 | Interactive (vim/htop) | `srv -t <cmd>` |
 | Claude Code integration | See [Claude Code / Codex integration](#claude-code--codex-integration) |
@@ -32,6 +39,11 @@
 2. [Install](#install)
 3. [Quickstart](#quickstart)
 4. [Subcommands](#subcommands)
+   - [Live remote views](#live-remote-views)
+   - [Parallel fan-out (profile groups)](#parallel-fan-out-profile-groups)
+   - [Remote sudo](#remote-sudo)
+   - [State dashboard (srv ui)](#state-dashboard-srv-ui)
+   - [Per-project pin (.srv-project)](#per-project-pin-srv-project)
 5. [Profile keys](#profile-keys)
 6. [Multi-server, multi-terminal](#multi-server-multi-terminal)
 7. [Network resilience](#network-resilience)
@@ -297,20 +309,94 @@ Files are anchored at the git toplevel (git mode) or current dir (other modes); 
 
 `--delete` currently works in git mode only. Use `--delete --dry-run` first: it prints `delete <path>` entries and does not touch the remote. Non-dry-run deletes are capped at 20 files by default; use `--yes` or `--delete-limit N` when the preview is expected.
 
-### Port forwarding (`srv tunnel`)
+### Live remote views
 
-`ssh -L` / `ssh -R` equivalent. Common case: a dev server / Jupyter / DB on the remote, your local browser or client connects through it; reverse mode exposes a local service on the remote loopback port.
+Five commands share one auto-reconnect engine (exponential backoff 1s -> 2s -> 4s, capped at 30s). Pick by source:
 
 ```
+srv tail [-f] [-n N] [--grep RE] <path>...    # any remote file
+srv journal [-u UNIT] [--since TIME] [-f]     # systemd unit log
+srv logs <id> [-f]                            # detached-job output
+srv watch [-n SECS] [--diff] <cmd>            # periodic in-place command
+srv top [-n SECS]                             # streamed `top -b`
+```
+
+`tail` / `journal` / `top` survive SSH drops -- they reconnect and keep streaming. `watch --diff` highlights changed lines. `srv -t top` is the pty-in-place variant; `srv top` is the scrolling log variant.
+
+### Parallel fan-out (profile groups)
+
+Name a set of profiles, then fan a command out across them in parallel:
+
+```
+srv group set web web-1 web-2 web-3       # create / replace
+srv group list                             # show all groups
+srv group show web                         # show members
+srv group remove web                       # delete
+
+srv -G web "uptime"                        # parallel on all three
+srv -G web "systemctl restart nginx"
+```
+
+Output is one section per profile with a `N succeeded, M failed.` summary line. The shell exit code is the max non-zero across members; dial failures surface as 255 to distinguish them from a real `exit 1` from the command. The MCP equivalent is the `run_group` tool.
+
+### Remote sudo
+
+```
+srv sudo systemctl restart nginx     # prompts for password locally (no echo)
+srv sudo apt update                  # reuses cached password within ~5 min
+srv sudo --no-cache <cmd>            # always prompt, never store
+srv sudo --cache-ttl 10m <cmd>       # custom TTL (daemon caps at 60min)
+srv sudo --clear-cache               # drop the cached entry now
+```
+
+Password is read with `term.ReadPassword` (no echo, no shell history) and piped to remote `sudo -S`. Cache lives in daemon process memory only -- never written to disk; auto-evicted on exit 1 (likely auth failure).
+
+### State dashboard (srv ui)
+
+```
+srv ui            # one-screen dashboard; auto-refreshes on data change (no flicker)
+```
+
+Shows active profile / cwd / project pin, daemon status, saved tunnels (running ones in yellow), the last 5 MCP tool calls, detached jobs, and recent sessions. `q` to quit, `r` to force a redraw.
+
+### Per-project pin (.srv-project)
+
+Drop a `.srv-project` JSON file at a repo root:
+
+```json
+{ "profile": "prod-db", "cwd": "/srv/app" }
+```
+
+Any `srv` invocation from that directory or any subdirectory auto-pins the profile and remote cwd, so you don't have to `srv use` each new shell or MCP session. Particularly valuable for MCP: each Claude Code project lands directly on the right profile instead of falling back to the global default.
+
+Profile precedence: `-P` > `srv use` > `$SRV_PROFILE` > **`.srv-project`** > global default.
+Cwd precedence: session cwd > `$SRV_CWD` > **`.srv-project.cwd`** > `profile.default_cwd`.
+
+`srv project` prints the currently resolved pin.
+
+### Port forwarding (`srv tunnel`)
+
+`ssh -L` / `ssh -R` equivalent with two modes: one-shot foreground or saved daemon-hosted persistent.
+
+```
+# one-shot foreground (Ctrl-C to stop)
 srv tunnel 8080            # local 127.0.0.1:8080  ->  remote 127.0.0.1:8080
 srv tunnel 8080:9090       # local 127.0.0.1:8080  ->  remote 127.0.0.1:9090
 srv tunnel 8080:db:5432    # local 127.0.0.1:8080  ->  db:5432 (resolved on the remote)
 srv tunnel -R 9000:3000    # remote 127.0.0.1:9000 -> local 127.0.0.1:3000
+
+# named + persistent (daemon-hosted; survives CLI exit)
+srv tunnel add db -L 5432:db.internal:5432 -P prod --autostart
+srv tunnel up db                   # start (daemon must be running)
+srv tunnel down db                 # stop
+srv tunnel list                    # saved tunnels + live status
+srv tunnel show db                 # one tunnel's full definition
+srv tunnel remove db               # delete the saved definition
 ```
 
-Behavior: `Ctrl-C` stops it; if the SSH connection itself drops, `srv tunnel` notices and stops too. Each incoming connection runs in its own goroutine (bidirectional `io.Copy`). The local side binds `127.0.0.1` only — not exposed to the LAN.
+`--autostart` brings the tunnel up automatically when the daemon starts. When the daemon exits all tunnels stop; bringing the daemon back up + autostart restores them.
 
-> Reverse direction (`-R`, exposing a local service to the remote) is not implemented yet — add on demand.
+Behavior (one-shot): `Ctrl-C` stops it; if the SSH connection drops, the tunnel notices and stops too. Each incoming connection runs in its own goroutine (bidirectional `io.Copy`). The local side binds `127.0.0.1` only -- not exposed to the LAN.
 
 ### Edit a remote file locally (`srv edit`)
 
@@ -560,9 +646,31 @@ srv -d "python long.py"
 
 ### Option 2: MCP server (structured tools)
 
-Claude Code gets 21 tools via stdio MCP (`run`, `cd`, `pwd`, `use`, `status`, `check`, `list_profiles`, `doctor`, `daemon_status`, `env`, `diff`, `push`, `pull`, `sync`, `sync_delete_dry_run`, `list_dir`, `detach`, `list_jobs`, `tail_log`, `wait_job`, `kill_job`). The MCP server's session id = the Claude Code process PID, so each Claude Code instance is independent.
+Claude Code gets the following tools via stdio MCP, grouped by purpose. Each Claude Code instance gets its own session id (= the MCP server process PID), so multiple conversations don't share state.
+
+| Category | Tools |
+|---|---|
+| Profile / session | `use` `cd` `pwd` `status` `list_profiles` |
+| Diagnostics | `check` `doctor` `daemon_status` `list_dir` |
+| Run | `run` `run_stream` `run_group` `detach` `wait_job` `kill_job` `list_jobs` |
+| Log viewing | `tail` `journal` `tail_log` |
+| Env / transfer | `env` `diff` `push` `pull` `sync` `sync_delete_dry_run` |
 
 `detach` + `wait_job` is the recommended pattern for long-running commands -- see [Detached jobs](#detached-jobs) above. `list_dir` lets the model enumerate remote directories structurally without burning tokens on `run "ls ..."` and inheriting its ANSI noise.
+
+#### MCP token-economy gates
+
+To stop "the model sends one `cat /var/log/syslog` and burns a six-figure token bill" outcomes, a handful of tools enforce hard preconditions before any remote work happens. Rejected calls return `IsError=true` with a `rejected_reason` field the client can branch on; the message text includes a ready-to-copy example for the model.
+
+| Tool | Trigger | Required to proceed |
+|---|---|---|
+| `tail` | `follow_seconds > 0` (any value) | `grep` non-empty (not `.*` / `.+` -- those are detected as bypasses) |
+| `journal` | `follow_seconds > 0` (any value) | at least one of `unit` / `since` / `priority` / `grep` |
+| `run` | `cat <file>`, bare `dmesg`, unfiltered `journalctl`, `find /...` | a downstream limiter (`\| head`, `\| tail`, `\| grep`, `\| wc`, ...) OR use the dedicated tool (`tail` / `journal`) |
+| `run_stream` | Same rules as `run` | Same |
+| `lines` clamps | -- | `tail` capped at 1000, `journal` at 2000, `follow_seconds` at 60 |
+
+These gates only apply on the MCP path; the CLI counterparts (`srv tail`, `srv journal`, `srv run`) are unconstrained -- a human paying bandwidth and scroll-time isn't the same problem as a model paying tokens.
 
 **Claude Code** — pick one of three scopes depending on how you want it shared:
 
@@ -627,6 +735,7 @@ Remote `~/.srv-jobs/<id>.log` holds detached-job logs (auto-created).
 | `SRV_CWD` | Fallback cwd when no session cwd is set (2.6.2). In MCP registrations, set `"env": {"SRV_CWD": "/mnt/project/foo"}` so each new MCP session lands directly in the project directory instead of `~`. Priority: session pin > `$SRV_CWD` > `profile.default_cwd`. |
 | `SRV_LANG` | UI language (`en` / `zh` / `auto`); overrides system-locale detection. Lower priority than `lang` in config. Default: `auto`. |
 | `SRV_HINTS` | `0` / `false` / `off` disables typo hints. Higher priority than config or `--no-hints` flag. |
+| `SRV_GUARD` | `1` / `true` / `on` / `yes` force-enables the MCP high-risk confirmation gate (overrides any per-session `srv guard` setting). |
 
 ---
 

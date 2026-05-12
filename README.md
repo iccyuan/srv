@@ -21,6 +21,13 @@
 | 端口转发 | `srv tunnel 8080` |
 | 后台运行长任务 | `srv -d ./build.sh` |
 | 查看后台任务日志 | `srv jobs` / `srv logs <id> -f` |
+| 跟踪任意远端日志 | `srv tail [-f] [--grep RE] <path>` |
+| 跟踪 systemd 服务日志 | `srv journal -u <unit> [-f]` |
+| 周期性命令视图 | `srv watch -n 1 "ps aux \| head"` |
+| 远端 top | `srv top` |
+| 并行多机执行 | `srv -G <group> <cmd>` |
+| 远程 sudo(本地无回显输密码)| `srv sudo <cmd>` |
+| 状态总览(profile/daemon/tunnel/job)| `srv ui` |
 | 诊断连接问题 | `srv check` / `srv check --rtt` |
 | 诊断本地配置 | `srv doctor` |
 | 交互式命令 | `srv -t htop` |
@@ -32,6 +39,11 @@
 - [安装](#安装)
 - [快速开始](#快速开始)
 - [常用命令](#常用命令)
+  - [实时观察远端](#实时观察远端)
+  - [并行执行(profile groups)](#并行执行profile-groups)
+  - [远程 sudo](#远程-sudo)
+  - [状态总览(srv ui)](#状态总览srv-ui)
+  - [项目级 profile pin(.srv-project)](#项目级-profile-pinsrv-project)
 - [Profile 配置](#profile-配置)
 - [会话模型](#会话模型)
 - [网络稳定性](#网络稳定性)
@@ -250,18 +262,96 @@ wait_job { id, max_wait_seconds: 8 }                -> status=completed exit_cod
                                          （本地 jobs.json 自动清理）
 ```
 
-`wait_job` 的等待循环跑在远端 bash 里（单次 SSH 往返完成 N 秒等待），`max_wait_seconds` 默认 8，硬上限 15，让 Claude Code 保持响应，不会长时间卡在单次工具调用里。模型可以在两次 wait_job 之间穿插别的工具调用。`status=killed` 表示 PID 在没写 `.exit` 的情况下消失了（被外部 SIGKILL）。
+`wait_job` 的等待循环跑在远端 bash 里(单次 SSH 往返完成 N 秒等待),`max_wait_seconds` 默认 8,硬上限 15,让 Claude Code 保持响应,不会长时间卡在单次工具调用里。模型可以在两次 wait_job 之间穿插别的工具调用。`status=killed` 表示 PID 在没写 `.exit` 的情况下消失了(被外部 SIGKILL)。
+
+### 实时观察远端
+
+五条命令共享同一个自动重连引擎(SSH 断了指数退避重连,1s → 2s → 4s …封顶 30s),按数据源选:
+
+```sh
+srv tail [-f] [-n N] [--grep RE] <path>...     # 任意远端文件
+srv journal [-u UNIT] [--since TIME] [-f]      # systemd 服务日志
+srv logs <id> [-f]                             # detached job 的输出
+srv watch [-n SECS] [--diff] <cmd>             # 周期跑同一条命令,原地刷新
+srv top [-n SECS]                              # 流式拉取 `top -b`
+```
+
+`tail` / `journal` / `top` 在 SSH 断线时不会退出,会自动重连续看。`watch --diff` 高亮变化行;`srv -t top` 是「pty 原地刷新」版,`srv top` 是「滚动 log」版。
+
+### 并行执行(profile groups)
+
+把一组 profile 命名,然后用 `-G <group>` 一次跑遍:
+
+```sh
+srv group set web web-1 web-2 web-3        # 定义组(创建或替换)
+srv group list                              # 列出所有组
+srv group show web                          # 显示组成员
+srv group remove web                        # 删除
+
+srv -G web "uptime"                         # 在三台机器上并行执行
+srv -G web "systemctl restart nginx"
+```
+
+输出按 profile 分块,末尾有 `N succeeded, M failed.` 总结。退出码 = 所有成员里最大的非零 exit code(dial 失败显示为 255 以区分命令真 exit 1)。MCP 端有对应 `run_group` 工具。
+
+### 远程 sudo
+
+```sh
+srv sudo systemctl restart nginx     # 本地无回显输入密码,管道喂 `sudo -S`
+srv sudo apt update                  # 5 分钟内复用 daemon 内存里的缓存
+srv sudo --no-cache <cmd>            # 每次都重新提示,不缓存
+srv sudo --cache-ttl 10m <cmd>       # 自定义 TTL(daemon 端上限 60min)
+srv sudo --clear-cache               # 主动清掉当前 profile 的缓存
+```
+
+密码用 `term.ReadPassword` 读,本地终端不回显也不进 shell 历史;只缓存在 daemon 进程内存,从不写盘;exit 1(认证失败)时自动失效缓存。
+
+### 状态总览(srv ui)
+
+```sh
+srv ui            # 一屏 dashboard,自动刷新(无变化不重绘,不闪烁)
+```
+
+显示活跃 profile / cwd / 项目 pin、daemon 状态、saved tunnels(运行中标黄)、recent MCP tool calls(最近 5 次)、detached jobs、最近 sessions。`q` 退出,`r` 强制重绘。
+
+### 项目级 profile pin(.srv-project)
+
+在仓库根放一个 `.srv-project`:
+
+```json
+{ "profile": "prod-db", "cwd": "/srv/app" }
+```
+
+之后从该目录或任意子目录调用 `srv` 都会自动 pin 这个 profile + cwd,不用每次 `srv use`。对 MCP 特别有用 —— 每个 Claude Code 项目都会自动落到正确的 profile,不会用全局 default 跑错地方。
+
+Profile 优先级:`-P` > `srv use` > `$SRV_PROFILE` > **`.srv-project`** > 全局 default。
+Cwd 优先级:session cwd > `$SRV_CWD` > **`.srv-project.cwd`** > `profile.default_cwd`。
+
+`srv project` 看当前解析到的 pin。
 
 ### 端口转发
 
+两种用法:一次性前台 vs daemon 托管的命名持久 tunnel。
+
 ```sh
+# one-shot 前台,Ctrl-C 退出
 srv tunnel 8080
 srv tunnel 8080:9090
 srv tunnel 8080:db:5432
 srv tunnel -R 9000:3000
+
+# 命名 + 持久(daemon 托管,CLI 退出后继续运行)
+srv tunnel add db -L 5432:db.internal:5432 -P prod --autostart
+srv tunnel up db                   # 启动(daemon 必须在跑)
+srv tunnel down db                 # 停止
+srv tunnel list                    # 列出 saved + 运行状态
+srv tunnel show db                 # 单个详情
+srv tunnel remove db               # 删除定义
 ```
 
-默认本地监听 `127.0.0.1`。`-R` 是反向转发：远端端口转到本地服务。
+`--autostart` 在 daemon 启动时自动拉起。daemon 退出时所有 tunnel 一并停止;再次 `srv daemon` 起来 + autostart 即可恢复。
+
+默认本地监听 `127.0.0.1`。`-R` 是反向转发:远端端口转到本地服务。
 
 ### daemon 和补全
 
@@ -385,11 +475,33 @@ command = "D:\\WorkSpace\\server\\srv\\srv.exe"
 args = ["mcp"]
 ```
 
-MCP 工具包括：`run`、`cd`、`pwd`、`use`、`status`、`check`、`list_profiles`、`doctor`、`daemon_status`、`env`、`diff`、`push`、`pull`、`sync`、`sync_delete_dry_run`、`list_dir`、`detach`、`list_jobs`、`tail_log`、`wait_job`、`kill_job`。
+MCP 工具按用途分组:
 
-`wait_job` 与 `detach` 配合是长任务的推荐模式（见上文「后台任务」章节）。`list_dir` 给模型按结构化方式枚举远端目录，比让它拼 `run "ls ..."` 省 token 且不被 ANSI 颜色污染。
+| 类别 | 工具 |
+|---|---|
+| Profile / 会话 | `use` `cd` `pwd` `status` `list_profiles` |
+| 诊断 | `check` `doctor` `daemon_status` `list_dir` |
+| 执行 | `run` `run_stream` `run_group` `detach` `wait_job` `kill_job` `list_jobs` |
+| 日志查看 | `tail` `journal` `tail_log` |
+| 环境 / 传输 | `env` `diff` `push` `pull` `sync` `sync_delete_dry_run` |
 
-为节省上下文，MCP 的大输出会截断，`sync` 等工具只返回必要摘要。
+`wait_job` 与 `detach` 配合是长任务的推荐模式(见上文「后台任务」)。`list_dir` 给模型按结构化方式枚举远端目录,比让它拼 `run "ls ..."` 省 token 且不被 ANSI 颜色污染。
+
+#### MCP token-economy gates
+
+为防止"模型一行 `cat /var/log/syslog` 烧光一回合"这种事,几个流式 / 大输出工具加了硬校验,**不通过直接拒绝、message 里给可复用 example**:
+
+| 工具 | 触发条件 | 必须传 |
+|---|---|---|
+| `tail` | `follow_seconds > 0`(任何值)| `grep` 非空(不能是 `.*` / `.+` 这种 bypass)|
+| `journal` | `follow_seconds > 0`(任何值)| `unit` / `since` / `priority` / `grep` 至少一个 |
+| `run` | `cat <file>` / bare `dmesg` / 无过滤 `journalctl` / `find /` | 下游加 `\| head`/`\| tail`/`\| grep`/`\| wc` 等限制器,或用专用工具(`tail`/`journal`)|
+| `run_stream` | 同 `run` 规则 | 同 `run` 规则 |
+| 通用 | `lines` 参数 | `tail` clamp 1000,`journal` clamp 2000,`follow_seconds` clamp 60 |
+
+拒绝 toolResult 带 `rejected_reason="unbounded_streaming"` / `"unbounded_output"` 结构化字段,模型可程序化分支。
+
+为节省上下文,MCP 的大输出会截断(`run` 类 64 KiB 顶),`sync` 等工具只返回必要摘要。
 
 ## 本地文件
 
@@ -416,6 +528,7 @@ daemon.log        自动启动 daemon 的日志
 | `SRV_CWD` | 没有 session cwd 时的 fallback cwd，适合 MCP 项目配置 |
 | `SRV_LANG` | UI 语言：`en` / `zh` / `auto` |
 | `SRV_HINTS` | `0` / `false` / `off` 禁用 typo hint |
+| `SRV_GUARD` | `1` / `true` / `on` / `yes` 强制开启 MCP 高风险确认 gate(优先级高于 `srv guard` session pin)|
 
 ## 排障
 
