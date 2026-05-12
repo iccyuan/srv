@@ -3,11 +3,16 @@ package main
 import (
 	"fmt"
 	"srv/internal/completion"
+	"srv/internal/config"
+	"srv/internal/daemon"
+	"srv/internal/group"
 	"srv/internal/install"
 	"srv/internal/project"
 	"srv/internal/streams"
+	"srv/internal/syncx"
 	"srv/internal/theme"
 	"srv/internal/tunnel"
+	"srv/internal/ui"
 
 	"srv/internal/i18n"
 )
@@ -33,7 +38,7 @@ type cmdHandler func(ctx cmdCtx) error
 // global-flag values that some handlers care about.
 type cmdCtx struct {
 	args            []string
-	cfg             *Config
+	cfg             *config.Config
 	profileOverride string
 	// group is the -G / --group flag, populated when the user wants to
 	// fan-out a command across a named profile group. Currently honored
@@ -49,7 +54,7 @@ type subcommand struct {
 	name     string   // primary name -- shown in help, drives dispatch
 	aliases  []string // alternate names that hit the same handler (e.g. exec → run)
 	handler  cmdHandler
-	noConfig bool // skip LoadConfig before dispatch (help/version/install/completion/init load lazily)
+	noConfig bool // skip config.Load before dispatch (help/version/install/completion/init load lazily)
 	hidden   bool // internal helper -- excluded from help and from typo-hint candidates
 }
 
@@ -69,7 +74,7 @@ var subcommands = []subcommand{
 	{name: "completion", noConfig: true, handler: func(c cmdCtx) error { return completion.Cmd(c.args, userVisibleSubcommands()) }},
 	{name: "install", noConfig: true, handler: func(c cmdCtx) error {
 		snap := install.Snap{Version: Version}
-		if cfg, _ := LoadConfig(); cfg != nil {
+		if cfg, _ := config.Load(); cfg != nil {
 			snap.ProfileCount = len(cfg.Profiles)
 			snap.ProfileDefault = cfg.DefaultProfile
 		}
@@ -77,9 +82,9 @@ var subcommands = []subcommand{
 	}},
 	{name: "init", noConfig: true, handler: func(c cmdCtx) error {
 		// init creates config; load empty if missing.
-		cfg, _ := LoadConfig()
+		cfg, _ := config.Load()
 		if cfg == nil {
-			cfg = newConfig()
+			cfg = config.New()
 		}
 		return cmdInit(cfg)
 	}},
@@ -104,7 +109,7 @@ var subcommands = []subcommand{
 	// Transfer / view.
 	{name: "push", handler: func(c cmdCtx) error { return cmdPush(c.args, c.cfg, c.profileOverride) }},
 	{name: "pull", handler: func(c cmdCtx) error { return cmdPull(c.args, c.cfg, c.profileOverride) }},
-	{name: "sync", handler: func(c cmdCtx) error { return cmdSync(c.args, c.cfg, c.profileOverride) }},
+	{name: "sync", handler: func(c cmdCtx) error { return syncx.Cmd(c.args, c.cfg, c.profileOverride) }},
 	{name: "edit", handler: func(c cmdCtx) error { return cmdEdit(c.args, c.cfg, c.profileOverride) }},
 	{name: "open", handler: func(c cmdCtx) error { return cmdOpen(c.args, c.cfg, c.profileOverride) }},
 	{name: "code", handler: func(c cmdCtx) error { return cmdCode(c.args, c.cfg, c.profileOverride) }},
@@ -121,13 +126,13 @@ var subcommands = []subcommand{
 	{name: "mcp", handler: func(c cmdCtx) error { return cmdMcp(c.cfg) }},
 	{name: "guard", handler: func(c cmdCtx) error { return cmdGuard(c.args) }},
 	{name: "color", handler: func(c cmdCtx) error { return theme.Cmd(c.args) }},
-	{name: "daemon", handler: func(c cmdCtx) error { return cmdDaemon(c.args) }},
+	{name: "daemon", handler: func(c cmdCtx) error { return daemon.Cmd(c.args) }},
 	{name: "project", noConfig: true, handler: func(c cmdCtx) error { return project.Cmd(c.args) }},
-	{name: "group", handler: func(c cmdCtx) error { return cmdGroup(c.args, c.cfg) }},
+	{name: "group", handler: func(c cmdCtx) error { return group.Cmd(c.args, c.cfg) }},
 	{name: "sudo", handler: func(c cmdCtx) error {
 		return cmdSudo(c.args, c.cfg, globalOpts{profile: c.profileOverride})
 	}},
-	{name: "ui", handler: func(c cmdCtx) error { return cmdUI(c.cfg) }},
+	{name: "ui", handler: func(c cmdCtx) error { return ui.Cmd(c.cfg) }},
 	{name: "tail", handler: func(c cmdCtx) error { return streams.Tail(c.args, c.cfg, c.profileOverride) }},
 	{name: "watch", handler: func(c cmdCtx) error { return streams.Watch(c.args, c.cfg, c.profileOverride) }},
 	{name: "journal", handler: func(c cmdCtx) error { return streams.Journal(c.args, c.cfg, c.profileOverride) }},
@@ -137,7 +142,7 @@ var subcommands = []subcommand{
 	// otherwise wrap with the typo-hint emitter.
 	{name: "run", aliases: []string{"exec"}, handler: func(c cmdCtx) error {
 		if c.group != "" {
-			return cmdRunGroup(c.args, c.cfg, c.group)
+			return group.RunCmd(c.args, c.cfg, c.group)
 		}
 		if c.detach {
 			return cmdDetach(c.args, c.cfg, c.profileOverride)

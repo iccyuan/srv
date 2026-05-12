@@ -4,11 +4,12 @@ import (
 	"fmt"
 	"os"
 	"sort"
+	"srv/internal/config"
 	"strings"
 )
 
-func cmdEnv(args []string, cfg *Config, profileOverride string) error {
-	name, profile, err := ResolveProfile(cfg, profileOverride)
+func cmdEnv(args []string, cfg *config.Config, profileOverride string) error {
+	name, profile, err := config.Resolve(cfg, profileOverride)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		return exitCode(1)
@@ -36,7 +37,7 @@ func cmdEnv(args []string, cfg *Config, profileOverride string) error {
 			profile.Env = map[string]string{}
 		}
 		profile.Env[args[1]] = strings.Join(args[2:], " ")
-		if err := SaveConfig(cfg); err != nil {
+		if err := config.Save(cfg); err != nil {
 			fmt.Fprintln(os.Stderr, err)
 			return exitCode(1)
 		}
@@ -47,13 +48,13 @@ func cmdEnv(args []string, cfg *Config, profileOverride string) error {
 			return exitCode(2)
 		}
 		delete(profile.Env, args[1])
-		if err := SaveConfig(cfg); err != nil {
+		if err := config.Save(cfg); err != nil {
 			fmt.Fprintln(os.Stderr, err)
 			return exitCode(1)
 		}
 	case "clear":
 		profile.Env = nil
-		if err := SaveConfig(cfg); err != nil {
+		if err := config.Save(cfg); err != nil {
 			fmt.Fprintln(os.Stderr, err)
 			return exitCode(1)
 		}

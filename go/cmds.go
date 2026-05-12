@@ -6,18 +6,22 @@ import (
 	"fmt"
 	"os"
 	"sort"
+	"srv/internal/config"
 	"srv/internal/i18n"
 	"srv/internal/picker"
+	"srv/internal/remote"
 	"srv/internal/session"
 	"srv/internal/srvpath"
 	"srv/internal/srvtty"
 	"srv/internal/srvutil"
+	"srv/internal/sshx"
 	"srv/internal/theme"
+	"srv/internal/transfer"
 	"strconv"
 	"strings"
 )
 
-func cmdInit(cfg *Config) error {
+func cmdInit(cfg *config.Config) error {
 	fmt.Println("Configure a new SSH profile (Ctrl+C to abort).")
 	rd := bufio.NewReader(os.Stdin)
 	name := prompt(rd, "profile name", "prod")
@@ -42,9 +46,9 @@ func cmdInit(cfg *Config) error {
 	defaultCwd := prompt(rd, "default cwd", "~")
 
 	if cfg.Profiles == nil {
-		cfg.Profiles = map[string]*Profile{}
+		cfg.Profiles = map[string]*config.Profile{}
 	}
-	cfg.Profiles[name] = &Profile{
+	cfg.Profiles[name] = &config.Profile{
 		Host:         host,
 		User:         user,
 		Port:         port,
@@ -54,7 +58,7 @@ func cmdInit(cfg *Config) error {
 	if cfg.DefaultProfile == "" {
 		cfg.DefaultProfile = name
 	}
-	if err := SaveConfig(cfg); err != nil {
+	if err := config.Save(cfg); err != nil {
 		return exitErr(1, "error: %v", err)
 	}
 	fmt.Printf("saved profile %q to %s\n", name, srvpath.Config())
@@ -82,7 +86,7 @@ func prompt(rd *bufio.Reader, q, def string) string {
 	return v
 }
 
-func cmdConfig(args []string, cfg *Config) error {
+func cmdConfig(args []string, cfg *config.Config) error {
 	if len(args) == 0 {
 		return exitErr(1, "%s", i18n.T("usage.config"))
 	}
@@ -139,7 +143,7 @@ func cmdConfig(args []string, cfg *Config) error {
 					return nil
 				}
 				cfg.DefaultProfile = sel
-				if err := SaveConfig(cfg); err != nil {
+				if err := config.Save(cfg); err != nil {
 					return exitErr(1, "error: %v", err)
 				}
 				fmt.Printf("global default profile = %s\n", sel)
@@ -157,7 +161,7 @@ func cmdConfig(args []string, cfg *Config) error {
 			return exitErr(1, "%s", i18n.T("err.profile_not_found", rest[0]))
 		}
 		cfg.DefaultProfile = rest[0]
-		if err := SaveConfig(cfg); err != nil {
+		if err := config.Save(cfg); err != nil {
 			return exitErr(1, "error: %v", err)
 		}
 		fmt.Printf("global default profile = %s\n", rest[0])
@@ -177,7 +181,7 @@ func cmdConfig(args []string, cfg *Config) error {
 				break
 			}
 		}
-		if err := SaveConfig(cfg); err != nil {
+		if err := config.Save(cfg); err != nil {
 			return exitErr(1, "error: %v", err)
 		}
 		fmt.Printf("removed %s\n", rest[0])
@@ -191,7 +195,7 @@ func cmdConfig(args []string, cfg *Config) error {
 		if !ok {
 			return exitErr(1, "%s", i18n.T("err.profile_not_found", target))
 		}
-		out := map[string]*Profile{target: p}
+		out := map[string]*config.Profile{target: p}
 		b, _ := json.MarshalIndent(out, "", "  ")
 		fmt.Println(string(b))
 		return nil
@@ -207,7 +211,7 @@ func cmdConfig(args []string, cfg *Config) error {
 			return exitErr(1, "%s", i18n.T("err.profile_not_found", prof))
 		}
 		applyProfileSet(p, key, value)
-		if err := SaveConfig(cfg); err != nil {
+		if err := config.Save(cfg); err != nil {
 			return exitErr(1, "error: %v", err)
 		}
 		fmt.Printf("%s.%s = %s\n", prof, key, value)
@@ -228,12 +232,12 @@ func cmdConfig(args []string, cfg *Config) error {
 		if err != nil {
 			return exitErr(1, "error: %v", err)
 		}
-		var next Profile
+		var next config.Profile
 		if err := json.Unmarshal(edited, &next); err != nil {
 			return exitErr(1, "error: edited profile is not valid JSON: %v", err)
 		}
 		cfg.Profiles[target] = &next
-		if err := SaveConfig(cfg); err != nil {
+		if err := config.Save(cfg); err != nil {
 			return exitErr(1, "error: %v", err)
 		}
 		fmt.Printf("updated profile %s\n", target)
@@ -248,7 +252,7 @@ func cmdConfig(args []string, cfg *Config) error {
 //	srv config global <key>              # show one
 //	srv config global <key> <value>      # set one
 //	srv config global <key> --clear      # reset to default
-func cmdConfigGlobal(args []string, cfg *Config) error {
+func cmdConfigGlobal(args []string, cfg *config.Config) error {
 	if len(args) == 0 {
 		printGlobalConfig(cfg)
 		return nil
@@ -290,13 +294,13 @@ func cmdConfigGlobal(args []string, cfg *Config) error {
 	default:
 		return exitErr(1, "%s", i18n.T("err.global_unknown_key", key))
 	}
-	if err := SaveConfig(cfg); err != nil {
+	if err := config.Save(cfg); err != nil {
 		return exitErr(1, "error: %v", err)
 	}
 	return printOneGlobal(cfg, key)
 }
 
-func printGlobalConfig(cfg *Config) {
+func printGlobalConfig(cfg *config.Config) {
 	fmt.Printf("hints           = %s\n", boolDisplay(cfg.Hints, true))
 	langDisplay := cfg.Lang
 	if langDisplay == "" {
@@ -310,7 +314,7 @@ func printGlobalConfig(cfg *Config) {
 	fmt.Printf("default_profile = %s\n", def)
 }
 
-func printOneGlobal(cfg *Config, key string) error {
+func printOneGlobal(cfg *config.Config, key string) error {
 	switch key {
 	case "hints":
 		fmt.Printf("hints = %s\n", boolDisplay(cfg.Hints, true))
@@ -343,7 +347,7 @@ func boolDisplay(p *bool, defaultVal bool) string {
 
 // applyProfileSet writes value into the profile field named by key. Bool
 // strings ("true"/"false") and digit strings auto-convert.
-func applyProfileSet(p *Profile, key, value string) {
+func applyProfileSet(p *config.Profile, key, value string) {
 	v := strings.ToLower(value)
 	asBool := func() *bool {
 		if v == "true" {
@@ -425,7 +429,7 @@ func applyProfileSet(p *Profile, key, value string) {
 	}
 }
 
-func cmdUse(args []string, cfg *Config) error {
+func cmdUse(args []string, cfg *config.Config) error {
 	if len(args) == 0 {
 		// On a TTY, `srv use` opens an interactive picker that pins the
 		// chosen profile to this shell session. Off a TTY (pipe / CI),
@@ -437,12 +441,12 @@ func cmdUse(args []string, cfg *Config) error {
 			if !ok {
 				return nil
 			}
-			sid, err := SetSessionProfile(sel)
+			sid, err := config.SetSessionProfile(sel)
 			if err != nil {
 				return exitErr(1, "error: %v", err)
 			}
 			cwd := cfg.Profiles[sel].GetDefaultCwd()
-			if c := GetCwd(sel, cfg.Profiles[sel]); c != "" {
+			if c := config.GetCwd(sel, cfg.Profiles[sel]); c != "" {
 				cwd = c
 			}
 			fmt.Printf("session %s: pinned to %q  (cwd: %s)\n", sid, sel, cwd)
@@ -483,7 +487,7 @@ func cmdUse(args []string, cfg *Config) error {
 	}
 	a := args[0]
 	if a == "--clear" || a == "-" || a == "-c" {
-		sid, err := SetSessionProfile("")
+		sid, err := config.SetSessionProfile("")
 		if err != nil {
 			return exitErr(1, "error: %v", err)
 		}
@@ -493,24 +497,24 @@ func cmdUse(args []string, cfg *Config) error {
 	if _, ok := cfg.Profiles[a]; !ok {
 		return exitErr(1, "%s", i18n.T("err.profile_not_found", a))
 	}
-	sid, err := SetSessionProfile(a)
+	sid, err := config.SetSessionProfile(a)
 	if err != nil {
 		return exitErr(1, "error: %v", err)
 	}
 	cwd := cfg.Profiles[a].GetDefaultCwd()
-	if c := GetCwd(a, cfg.Profiles[a]); c != "" {
+	if c := config.GetCwd(a, cfg.Profiles[a]); c != "" {
 		cwd = c
 	}
 	fmt.Printf("session %s: pinned to %q  (cwd: %s)\n", sid, a, cwd)
 	return nil
 }
 
-func cmdCd(path string, cfg *Config, profileOverride string) error {
-	name, profile, err := ResolveProfile(cfg, profileOverride)
+func cmdCd(path string, cfg *config.Config, profileOverride string) error {
+	name, profile, err := config.Resolve(cfg, profileOverride)
 	if err != nil {
 		return exitErr(1, "%v", err)
 	}
-	newCwd, err := changeRemoteCwd(name, profile, path)
+	newCwd, err := remote.ChangeCwd(name, profile, path)
 	if err != nil {
 		printDiagError(err, profile)
 		return exitCode(1)
@@ -519,17 +523,17 @@ func cmdCd(path string, cfg *Config, profileOverride string) error {
 	return nil
 }
 
-func cmdPwd(cfg *Config, profileOverride string) error {
-	name, profile, err := ResolveProfile(cfg, profileOverride)
+func cmdPwd(cfg *config.Config, profileOverride string) error {
+	name, profile, err := config.Resolve(cfg, profileOverride)
 	if err != nil {
 		return exitErr(1, "%v", err)
 	}
-	fmt.Println(GetCwd(name, profile))
+	fmt.Println(config.GetCwd(name, profile))
 	return nil
 }
 
-func cmdStatus(cfg *Config, profileOverride string) error {
-	name, profile, err := ResolveProfile(cfg, profileOverride)
+func cmdStatus(cfg *config.Config, profileOverride string) error {
+	name, profile, err := config.Resolve(cfg, profileOverride)
 	if err != nil {
 		return exitErr(1, "%v", err)
 	}
@@ -553,7 +557,7 @@ func cmdStatus(cfg *Config, profileOverride string) error {
 	if profile.IdentityFile != "" {
 		fmt.Printf("key     : %s\n", profile.IdentityFile)
 	}
-	fmt.Printf("cwd     : %s\n", GetCwd(name, profile))
+	fmt.Printf("cwd     : %s\n", config.GetCwd(name, profile))
 	fmt.Printf("session : %s\n", sid)
 	multiplex := profile.Multiplex == nil || *profile.Multiplex
 	fmt.Printf("defaults: multiplex=%v  compression=%v  connect_timeout=%ds\n",
@@ -561,13 +565,13 @@ func cmdStatus(cfg *Config, profileOverride string) error {
 	return nil
 }
 
-func cmdShell(cfg *Config, profileOverride string) error {
-	name, profile, err := ResolveProfile(cfg, profileOverride)
+func cmdShell(cfg *config.Config, profileOverride string) error {
+	name, profile, err := config.Resolve(cfg, profileOverride)
 	if err != nil {
 		return exitErr(1, "%v", err)
 	}
-	cwd := GetCwd(name, profile)
-	c, err := Dial(profile)
+	cwd := config.GetCwd(name, profile)
+	c, err := sshx.Dial(profile)
 	if err != nil {
 		printDiagError(err, profile)
 		return exitCode(255)
@@ -580,16 +584,16 @@ func cmdShell(cfg *Config, profileOverride string) error {
 	return exitCode(rc)
 }
 
-func cmdRun(args []string, cfg *Config, profileOverride string, tty bool) error {
+func cmdRun(args []string, cfg *config.Config, profileOverride string, tty bool) error {
 	if len(args) == 0 {
 		return exitErr(1, "error: nothing to run.")
 	}
-	name, profile, err := ResolveProfile(cfg, profileOverride)
+	name, profile, err := config.Resolve(cfg, profileOverride)
 	if err != nil {
 		return exitErr(1, "%v", err)
 	}
 	cmd := strings.Join(args, " ")
-	cmd = applyRemoteEnv(profile, cmd)
+	cmd = remote.ApplyEnv(profile, cmd)
 	// TTY mode allocates a real interactive shell on the remote that
 	// sources ~/.bashrc itself, so colour just works -- skip our hook.
 	// Non-TTY (`srv ls`, etc.) is what we have to fix up: see
@@ -599,11 +603,11 @@ func cmdRun(args []string, cfg *Config, profileOverride string, tty bool) error 
 			cmd = prologue + cmd
 		}
 	}
-	cwd := GetCwd(name, profile)
-	return exitCode(runRemoteStream(profile, cwd, cmd, tty))
+	cwd := config.GetCwd(name, profile)
+	return exitCode(remote.RunStream(profile, cwd, cmd, tty))
 }
 
-func cmdPush(args []string, cfg *Config, profileOverride string) error {
+func cmdPush(args []string, cfg *config.Config, profileOverride string) error {
 	args, recursive := stripRecursive(args)
 	if len(args) == 0 {
 		return exitErr(1, "%s", i18n.T("usage.push"))
@@ -612,42 +616,42 @@ func cmdPush(args []string, cfg *Config, profileOverride string) error {
 	if _, err := os.Stat(local); err != nil {
 		return exitErr(1, "%s", i18n.T("err.local_path_missing", local))
 	}
-	name, profile, err := ResolveProfile(cfg, profileOverride)
+	name, profile, err := config.Resolve(cfg, profileOverride)
 	if err != nil {
 		return exitErr(1, "%v", err)
 	}
-	cwd := GetCwd(name, profile)
-	remote := ""
+	cwd := config.GetCwd(name, profile)
+	rpath := ""
 	if len(args) > 1 {
-		remote = args[1]
+		rpath = args[1]
 	} else {
-		remote = baseName(local)
+		rpath = baseName(local)
 	}
-	abs := resolveRemotePath(remote, cwd)
-	rc, _, err := pushPath(profile, local, abs, recursive)
+	abs := remote.ResolvePath(rpath, cwd)
+	rc, _, err := transfer.PushPath(profile, local, abs, recursive)
 	if err != nil {
 		printDiagError(err, profile)
 	}
 	return exitCode(rc)
 }
 
-func cmdPull(args []string, cfg *Config, profileOverride string) error {
+func cmdPull(args []string, cfg *config.Config, profileOverride string) error {
 	args, recursive := stripRecursive(args)
 	if len(args) == 0 {
 		return exitErr(1, "%s", i18n.T("usage.pull"))
 	}
-	remote := args[0]
+	rpath := args[0]
 	local := "."
 	if len(args) > 1 {
 		local = args[1]
 	}
-	name, profile, err := ResolveProfile(cfg, profileOverride)
+	name, profile, err := config.Resolve(cfg, profileOverride)
 	if err != nil {
 		return exitErr(1, "%v", err)
 	}
-	cwd := GetCwd(name, profile)
-	abs := resolveRemotePath(remote, cwd)
-	rc, _, err := pullPath(profile, abs, local, recursive)
+	cwd := config.GetCwd(name, profile)
+	abs := remote.ResolvePath(rpath, cwd)
+	rc, _, err := transfer.PullPath(profile, abs, local, recursive)
 	if err != nil {
 		printDiagError(err, profile)
 	}

@@ -7,11 +7,17 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"srv/internal/config"
+	"srv/internal/daemon"
+	"srv/internal/group"
 	"srv/internal/jobs"
 	"srv/internal/progress"
+	"srv/internal/remote"
 	"srv/internal/session"
 	"srv/internal/srvtty"
+	"srv/internal/sshx"
 	"srv/internal/syncx"
+	"srv/internal/transfer"
 	"strconv"
 	"strings"
 	"sync"
@@ -366,7 +372,7 @@ func mcpDetachedResult(rec *jobs.Record) toolResult {
 // mcpToolHandler is the uniform handler signature. The dispatcher
 // extracts profileOverride from args once and passes it explicitly so
 // each handler doesn't repeat the extraction.
-type mcpToolHandler func(args map[string]any, cfg *Config, profileOverride string) toolResult
+type mcpToolHandler func(args map[string]any, cfg *config.Config, profileOverride string) toolResult
 
 type mcpTool struct {
 	def     toolDef
@@ -401,13 +407,13 @@ func intSchema(def int, desc string) map[string]any {
 	return out
 }
 
-// resolveMCPProfile is the per-handler wrapper around ResolveProfile.
+// resolveMCPProfile is the per-handler wrapper around config.Resolve.
 // Returns (name, profile, nil) on success or ("", nil, errResult) when
 // resolution fails -- callers `return *errResult` to short-circuit.
-// This replaces the 12-call repetition of ResolveProfile + mcpTextErr
+// This replaces the 12-call repetition of config.Resolve + mcpTextErr
 // across the registry.
-func resolveMCPProfile(cfg *Config, override string) (string, *Profile, *toolResult) {
-	name, prof, err := ResolveProfile(cfg, override)
+func resolveMCPProfile(cfg *config.Config, override string) (string, *config.Profile, *toolResult) {
+	name, prof, err := config.Resolve(cfg, override)
 	if err != nil {
 		r := mcpTextErr(err.Error())
 		return "", nil, &r
@@ -507,7 +513,7 @@ func clampLines(asked, max int) (int, bool) {
 // dispatch loop.
 // -----------------------------------------------------------------------------
 
-func handleMCPRun(args map[string]any, cfg *Config, profileOverride string) toolResult {
+func handleMCPRun(args map[string]any, cfg *config.Config, profileOverride string) toolResult {
 	cmd, _ := args["command"].(string)
 	if cmd == "" {
 		return mcpTextErr("error: command is required")
@@ -522,7 +528,7 @@ func handleMCPRun(args map[string]any, cfg *Config, profileOverride string) tool
 	}
 	background, _ := args["background"].(bool)
 	if background {
-		rec, err := spawnDetached(profName, prof, cmd)
+		rec, err := remote.SpawnDetached(profName, prof, cmd)
 		if err != nil {
 			return mcpTextErr(err.Error())
 		}
@@ -542,8 +548,8 @@ func handleMCPRun(args map[string]any, cfg *Config, profileOverride string) tool
 	if label, msg := runRejectUnfiltered(cmd); label != "" {
 		return runRejectUnfilteredMessage(label, msg)
 	}
-	cwd := GetCwd(profName, prof)
-	res, _ := runRemoteCapture(prof, cwd, cmd)
+	cwd := config.GetCwd(profName, prof)
+	res, _ := remote.RunCapture(prof, cwd, cmd)
 	text, truncatedBytes := buildMCPRunText(res, cwd)
 	structured := map[string]any{
 		"exit_code": res.ExitCode,
@@ -574,7 +580,7 @@ func handleMCPRun(args map[string]any, cfg *Config, profileOverride string) tool
 // red dot if it slips past the bound. Streaming keeps progress
 // flowing so the client doesn't time out, and lets the model see
 // partial output before the command finishes.
-func handleMCPRunStream(args map[string]any, cfg *Config, profileOverride string) toolResult {
+func handleMCPRunStream(args map[string]any, cfg *config.Config, profileOverride string) toolResult {
 	cmd, _ := args["command"].(string)
 	if cmd == "" {
 		return mcpTextErr("error: command is required")
@@ -594,7 +600,7 @@ func handleMCPRunStream(args map[string]any, cfg *Config, profileOverride string
 	if errResult != nil {
 		return *errResult
 	}
-	cwd := GetCwd(profName, prof)
+	cwd := config.GetCwd(profName, prof)
 	token := currentProgressTokenFn()
 
 	// Direct dial -- the daemon's stream_run op exists but is wired for
@@ -602,7 +608,7 @@ func handleMCPRunStream(args map[string]any, cfg *Config, profileOverride string
 	// require yet another adapter. Cold handshake hits the same ~2.7s
 	// cost as any non-pooled tool, which is fine for an explicitly-
 	// streaming call (the streaming masks the dial cost).
-	c, err := Dial(prof)
+	c, err := sshx.Dial(prof)
 	if err != nil {
 		return mcpTextErr(fmt.Sprintf("dial: %v", err))
 	}
@@ -612,7 +618,7 @@ func handleMCPRunStream(args map[string]any, cfg *Config, profileOverride string
 	// progress to drive a UI bar; bytes is meaningful enough without
 	// knowing the unbounded total.
 	var emitted int
-	onChunk := func(_ StreamChunkKind, line string) {
+	onChunk := func(_ sshx.StreamChunkKind, line string) {
 		emitted += len(line)
 		mcpProgress(token, emitted, line)
 	}
@@ -622,7 +628,7 @@ func handleMCPRunStream(args map[string]any, cfg *Config, profileOverride string
 		return mcpTextErr(fmt.Sprintf("stream run: %v", runErr))
 	}
 
-	res := &RunCaptureResult{
+	res := &sshx.RunCaptureResult{
 		Stdout:   stdout,
 		Stderr:   stderr,
 		ExitCode: exitCode,
@@ -658,7 +664,7 @@ func handleMCPRunStream(args map[string]any, cfg *Config, profileOverride string
 // for up to follow_seconds (max 60s), then return -- the model gets
 // real-time progress mid-call AND a deterministic upper bound on the
 // turn duration.
-func handleMCPTail(args map[string]any, cfg *Config, profileOverride string) toolResult {
+func handleMCPTail(args map[string]any, cfg *config.Config, profileOverride string) toolResult {
 	path, _ := args["path"].(string)
 	if path == "" {
 		return mcpTextErr("path is required")
@@ -716,7 +722,7 @@ func handleMCPTail(args map[string]any, cfg *Config, profileOverride string) too
 		return *errResult
 	}
 
-	c, err := Dial(prof)
+	c, err := sshx.Dial(prof)
 	if err != nil {
 		return mcpTextErr(fmt.Sprintf("dial: %v", err))
 	}
@@ -740,7 +746,7 @@ func handleMCPTail(args map[string]any, cfg *Config, profileOverride string) too
 	var capturedBytes int
 	var capped bool
 	var buf strings.Builder
-	onChunk := func(_ StreamChunkKind, line string) {
+	onChunk := func(_ sshx.StreamChunkKind, line string) {
 		if re != nil && !re.MatchString(line) {
 			return
 		}
@@ -783,13 +789,13 @@ func handleMCPTail(args map[string]any, cfg *Config, profileOverride string) too
 	}
 }
 
-func handleMCPCd(args map[string]any, cfg *Config, profileOverride string) toolResult {
+func handleMCPCd(args map[string]any, cfg *config.Config, profileOverride string) toolResult {
 	path, _ := args["path"].(string)
 	profName, prof, errResult := resolveMCPProfile(cfg, profileOverride)
 	if errResult != nil {
 		return *errResult
 	}
-	newCwd, err := changeRemoteCwd(profName, prof, path)
+	newCwd, err := remote.ChangeCwd(profName, prof, path)
 	if err != nil {
 		return mcpTextErr(err.Error())
 	}
@@ -799,22 +805,22 @@ func handleMCPCd(args map[string]any, cfg *Config, profileOverride string) toolR
 	}
 }
 
-func handleMCPPwd(args map[string]any, cfg *Config, profileOverride string) toolResult {
+func handleMCPPwd(args map[string]any, cfg *config.Config, profileOverride string) toolResult {
 	profName, prof, errResult := resolveMCPProfile(cfg, profileOverride)
 	if errResult != nil {
 		return *errResult
 	}
-	cwd := GetCwd(profName, prof)
+	cwd := config.GetCwd(profName, prof)
 	return toolResult{
 		Content:           []toolContent{{Type: "text", Text: cwd}},
 		StructuredContent: map[string]any{"cwd": cwd, "profile": profName},
 	}
 }
 
-func handleMCPUse(args map[string]any, cfg *Config, profileOverride string) toolResult {
+func handleMCPUse(args map[string]any, cfg *config.Config, profileOverride string) toolResult {
 	clear, _ := args["clear"].(bool)
 	if clear {
-		sid, _ := SetSessionProfile("")
+		sid, _ := config.SetSessionProfile("")
 		return toolResult{
 			Content:           []toolContent{{Type: "text", Text: fmt.Sprintf("session %s: unpinned", sid)}},
 			StructuredContent: map[string]any{"session": sid, "profile": nil},
@@ -840,14 +846,14 @@ func handleMCPUse(args map[string]any, cfg *Config, profileOverride string) tool
 	if _, ok := cfg.Profiles[target]; !ok {
 		return mcpTextErr(fmt.Sprintf("profile %q not found", target))
 	}
-	sid, _ := SetSessionProfile(target)
+	sid, _ := config.SetSessionProfile(target)
 	return toolResult{
 		Content:           []toolContent{{Type: "text", Text: fmt.Sprintf("session %s: pinned to %q", sid, target)}},
 		StructuredContent: map[string]any{"session": sid, "profile": target},
 	}
 }
 
-func handleMCPStatus(args map[string]any, cfg *Config, profileOverride string) toolResult {
+func handleMCPStatus(args map[string]any, cfg *config.Config, profileOverride string) toolResult {
 	profName, prof, errResult := resolveMCPProfile(cfg, profileOverride)
 	if errResult != nil {
 		return *errResult
@@ -865,7 +871,7 @@ func handleMCPStatus(args map[string]any, cfg *Config, profileOverride string) t
 		"user":          prof.User,
 		"port":          prof.GetPort(),
 		"identity_file": prof.IdentityFile,
-		"cwd":           GetCwd(profName, prof),
+		"cwd":           config.GetCwd(profName, prof),
 		"session":       sid,
 		"multiplex":     multiplex,
 		"compression":   prof.GetCompression(),
@@ -873,7 +879,7 @@ func handleMCPStatus(args map[string]any, cfg *Config, profileOverride string) t
 	})
 }
 
-func handleMCPListProfiles(args map[string]any, cfg *Config, profileOverride string) toolResult {
+func handleMCPListProfiles(args map[string]any, cfg *config.Config, profileOverride string) toolResult {
 	sid, rec := session.Touch()
 	var pinned any
 	if rec.Profile != nil {
@@ -891,7 +897,7 @@ func handleMCPListProfiles(args map[string]any, cfg *Config, profileOverride str
 	})
 }
 
-func handleMCPCheck(args map[string]any, cfg *Config, profileOverride string) toolResult {
+func handleMCPCheck(args map[string]any, cfg *config.Config, profileOverride string) toolResult {
 	profName, prof, errResult := resolveMCPProfile(cfg, profileOverride)
 	if errResult != nil {
 		return *errResult
@@ -928,20 +934,20 @@ func handleMCPCheck(args map[string]any, cfg *Config, profileOverride string) to
 	}
 }
 
-func handleMCPDoctor(args map[string]any, cfg *Config, profileOverride string) toolResult {
+func handleMCPDoctor(args map[string]any, cfg *config.Config, profileOverride string) toolResult {
 	checks, ok := doctorChecks(cfg, profileOverride)
 	res := mcpJSONResult(map[string]any{"ok": ok, "checks": checks})
 	res.IsError = !ok
 	return res
 }
 
-func handleMCPDaemonStatus(args map[string]any, cfg *Config, profileOverride string) toolResult {
-	conn := daemonDial(time.Second)
+func handleMCPDaemonStatus(args map[string]any, cfg *config.Config, profileOverride string) toolResult {
+	conn := daemon.DialSock(time.Second)
 	if conn == nil {
 		return mcpJSONResult(map[string]any{"running": false})
 	}
 	defer conn.Close()
-	resp, err := daemonCall(conn, daemonRequest{Op: "status"}, 2*time.Second)
+	resp, err := daemon.Call(conn, daemon.Request{Op: "status"}, 2*time.Second)
 	if err != nil || resp == nil {
 		return mcpTextErr(fmt.Sprintf("daemon status failed: %v", err))
 	}
@@ -953,7 +959,7 @@ func handleMCPDaemonStatus(args map[string]any, cfg *Config, profileOverride str
 	})
 }
 
-func handleMCPEnv(args map[string]any, cfg *Config, profileOverride string) toolResult {
+func handleMCPEnv(args map[string]any, cfg *config.Config, profileOverride string) toolResult {
 	action, _ := args["action"].(string)
 	if action == "" {
 		action = "list"
@@ -974,7 +980,7 @@ func handleMCPEnv(args map[string]any, cfg *Config, profileOverride string) tool
 			prof.Env = map[string]string{}
 		}
 		prof.Env[key] = value
-		if err := SaveConfig(cfg); err != nil {
+		if err := config.Save(cfg); err != nil {
 			return mcpTextErr(err.Error())
 		}
 	case "unset":
@@ -982,12 +988,12 @@ func handleMCPEnv(args map[string]any, cfg *Config, profileOverride string) tool
 			return mcpTextErr("key is required")
 		}
 		delete(prof.Env, key)
-		if err := SaveConfig(cfg); err != nil {
+		if err := config.Save(cfg); err != nil {
 			return mcpTextErr(err.Error())
 		}
 	case "clear":
 		prof.Env = nil
-		if err := SaveConfig(cfg); err != nil {
+		if err := config.Save(cfg); err != nil {
 			return mcpTextErr(err.Error())
 		}
 	default:
@@ -996,7 +1002,7 @@ func handleMCPEnv(args map[string]any, cfg *Config, profileOverride string) tool
 	return mcpJSONResult(map[string]any{"profile": profName, "env": prof.Env})
 }
 
-func handleMCPDiff(args map[string]any, cfg *Config, profileOverride string) toolResult {
+func handleMCPDiff(args map[string]any, cfg *config.Config, profileOverride string) toolResult {
 	local, _ := args["local"].(string)
 	if local == "" {
 		return mcpTextErr("local is required")
@@ -1013,7 +1019,7 @@ func handleMCPDiff(args map[string]any, cfg *Config, profileOverride string) too
 	}
 }
 
-func handleMCPPush(args map[string]any, cfg *Config, profileOverride string) toolResult {
+func handleMCPPush(args map[string]any, cfg *config.Config, profileOverride string) toolResult {
 	local, _ := args["local"].(string)
 	if local == "" {
 		return mcpTextErr("local is required")
@@ -1025,12 +1031,12 @@ func handleMCPPush(args map[string]any, cfg *Config, profileOverride string) too
 	if errResult != nil {
 		return *errResult
 	}
-	cwd := GetCwd(profName, prof)
-	remote, _ := args["remote"].(string)
-	if remote == "" {
-		remote = filepath.Base(local)
+	cwd := config.GetCwd(profName, prof)
+	rpath, _ := args["remote"].(string)
+	if rpath == "" {
+		rpath = filepath.Base(local)
 	}
-	abs := resolveRemotePath(remote, cwd)
+	abs := remote.ResolvePath(rpath, cwd)
 	st, _ := os.Stat(local)
 	recursive := false
 	if rb, ok := args["recursive"].(bool); ok {
@@ -1040,7 +1046,7 @@ func handleMCPPush(args map[string]any, cfg *Config, profileOverride string) too
 		recursive = true
 	}
 	start := time.Now()
-	rc, finalRemote, perr := pushPath(prof, local, abs, recursive)
+	rc, finalRemote, perr := transfer.PushPath(prof, local, abs, recursive)
 	duration := time.Since(start)
 	var bytes int64
 	if rc == 0 {
@@ -1071,27 +1077,27 @@ func handleMCPPush(args map[string]any, cfg *Config, profileOverride string) too
 	}
 }
 
-func handleMCPPull(args map[string]any, cfg *Config, profileOverride string) toolResult {
-	remote, _ := args["remote"].(string)
-	if remote == "" {
+func handleMCPPull(args map[string]any, cfg *config.Config, profileOverride string) toolResult {
+	rpath, _ := args["remote"].(string)
+	if rpath == "" {
 		return mcpTextErr("remote is required")
 	}
 	profName, prof, errResult := resolveMCPProfile(cfg, profileOverride)
 	if errResult != nil {
 		return *errResult
 	}
-	cwd := GetCwd(profName, prof)
+	cwd := config.GetCwd(profName, prof)
 	local, _ := args["local"].(string)
 	if local == "" {
 		local = "."
 	}
-	abs := resolveRemotePath(remote, cwd)
+	abs := remote.ResolvePath(rpath, cwd)
 	recursive := false
 	if rb, ok := args["recursive"].(bool); ok {
 		recursive = rb
 	}
 	start := time.Now()
-	rc, finalLocal, perr := pullPath(prof, abs, local, recursive)
+	rc, finalLocal, perr := transfer.PullPath(prof, abs, local, recursive)
 	duration := time.Since(start)
 	var bytes int64
 	if rc == 0 {
@@ -1122,12 +1128,12 @@ func handleMCPPull(args map[string]any, cfg *Config, profileOverride string) too
 	}
 }
 
-func handleMCPSync(args map[string]any, cfg *Config, profileOverride string) toolResult {
+func handleMCPSync(args map[string]any, cfg *config.Config, profileOverride string) toolResult {
 	profName, prof, errResult := resolveMCPProfile(cfg, profileOverride)
 	if errResult != nil {
 		return *errResult
 	}
-	o := &syncOpts{GitScope: "all"}
+	o := &syncx.Options{GitScope: "all"}
 	if v, ok := args["remote_root"].(string); ok {
 		o.RemoteRoot = v
 	}
@@ -1203,21 +1209,21 @@ func handleMCPSync(args map[string]any, cfg *Config, profileOverride string) too
 			return mcpTextErr("no mode resolved (not a git repo and no include/since/files)")
 		}
 	}
-	cwd := GetCwd(profName, prof)
+	cwd := config.GetCwd(profName, prof)
 	remoteRoot := cwd
 	if o.RemoteRoot != "" {
-		remoteRoot = resolveRemotePath(o.RemoteRoot, cwd)
+		remoteRoot = remote.ResolvePath(o.RemoteRoot, cwd)
 	} else if prof.SyncRoot != "" {
-		remoteRoot = resolveRemotePath(prof.SyncRoot, cwd)
+		remoteRoot = remote.ResolvePath(prof.SyncRoot, cwd)
 	}
 	allExcludes := append([]string{}, o.Exclude...)
 	allExcludes = append(allExcludes, prof.SyncExclude...)
 	allExcludes = append(allExcludes, syncx.DefaultExcludes...)
-	files, err := collectSyncFiles(o, localRoot, allExcludes)
+	files, err := syncx.CollectFiles(o, localRoot, allExcludes)
 	if err != nil {
 		return mcpTextErr(err.Error())
 	}
-	deletes, err := collectSyncDeletes(o, localRoot, allExcludes)
+	deletes, err := syncx.CollectDeletes(o, localRoot, allExcludes)
 	if err != nil {
 		return mcpTextErr(err.Error())
 	}
@@ -1261,10 +1267,10 @@ func handleMCPSync(args map[string]any, cfg *Config, profileOverride string) too
 	var terr error
 	start := time.Now()
 	if len(files) > 0 {
-		rc, terr = tarUploadStream(prof, localRoot, files, remoteRoot)
+		rc, terr = syncx.TarUploadStream(prof, localRoot, files, remoteRoot)
 	}
 	if rc == 0 && len(deletes) > 0 {
-		rc, terr = deleteRemoteFiles(prof, remoteRoot, deletes)
+		rc, terr = syncx.DeleteRemoteFiles(prof, remoteRoot, deletes)
 	}
 	duration := time.Since(start)
 	var bytes int64
@@ -1302,7 +1308,7 @@ func handleMCPSync(args map[string]any, cfg *Config, profileOverride string) too
 	}
 }
 
-func handleMCPSyncDeleteDryRun(args map[string]any, cfg *Config, profileOverride string) toolResult {
+func handleMCPSyncDeleteDryRun(args map[string]any, cfg *config.Config, profileOverride string) toolResult {
 	profName, prof, errResult := resolveMCPProfile(cfg, profileOverride)
 	if errResult != nil {
 		return *errResult
@@ -1315,19 +1321,19 @@ func handleMCPSyncDeleteDryRun(args map[string]any, cfg *Config, profileOverride
 		return mcpTextErr("not in a git repo")
 	}
 	root, _ = filepath.Abs(root)
-	o := &syncOpts{Mode: "git", GitScope: "all", Delete: true, DryRun: true}
+	o := &syncx.Options{Mode: "git", GitScope: "all", Delete: true, DryRun: true}
 	allExcludes := append([]string{}, prof.SyncExclude...)
 	allExcludes = append(allExcludes, syncx.DefaultExcludes...)
-	deletes, err := collectSyncDeletes(o, root, allExcludes)
+	deletes, err := syncx.CollectDeletes(o, root, allExcludes)
 	if err != nil {
 		return mcpTextErr(err.Error())
 	}
-	cwd := GetCwd(profName, prof)
+	cwd := config.GetCwd(profName, prof)
 	remoteRoot := cwd
 	if v, _ := args["remote_root"].(string); v != "" {
-		remoteRoot = resolveRemotePath(v, cwd)
+		remoteRoot = remote.ResolvePath(v, cwd)
 	} else if prof.SyncRoot != "" {
-		remoteRoot = resolveRemotePath(prof.SyncRoot, cwd)
+		remoteRoot = remote.ResolvePath(prof.SyncRoot, cwd)
 	}
 	text := fmt.Sprintf("would delete %d files from %s\n%s", len(deletes), remoteRoot, strings.Join(deletes, "\n"))
 	return toolResult{
@@ -1340,7 +1346,7 @@ func handleMCPSyncDeleteDryRun(args map[string]any, cfg *Config, profileOverride
 	}
 }
 
-func handleMCPDetach(args map[string]any, cfg *Config, profileOverride string) toolResult {
+func handleMCPDetach(args map[string]any, cfg *config.Config, profileOverride string) toolResult {
 	cmd, _ := args["command"].(string)
 	if cmd == "" {
 		return mcpTextErr("command is required")
@@ -1353,7 +1359,7 @@ func handleMCPDetach(args map[string]any, cfg *Config, profileOverride string) t
 	if errResult != nil {
 		return *errResult
 	}
-	rec, err := spawnDetached(profName, prof, cmd)
+	rec, err := remote.SpawnDetached(profName, prof, cmd)
 	if err != nil {
 		return mcpTextErr(err.Error())
 	}
@@ -1367,7 +1373,7 @@ func handleMCPDetach(args map[string]any, cfg *Config, profileOverride string) t
 // tool's schema would force callers to handle both "single result"
 // and "array of results" depending on whether `group` was set. Keeping
 // it separate gives both mcpTools narrow, predictable response shapes.
-func handleMCPRunGroup(args map[string]any, cfg *Config, profileOverride string) toolResult {
+func handleMCPRunGroup(args map[string]any, cfg *config.Config, profileOverride string) toolResult {
 	groupName, _ := args["group"].(string)
 	if groupName == "" {
 		return mcpTextErr("group is required")
@@ -1386,7 +1392,7 @@ func handleMCPRunGroup(args map[string]any, cfg *Config, profileOverride string)
 	if why := runRejectSync(cmd); why != "" {
 		return mcpTextErr(runRejectMessage(cmd, why))
 	}
-	results, err := runGroup(cfg, groupName, cmd)
+	results, err := group.Run(cfg, groupName, cmd)
 	if err != nil {
 		return mcpTextErr(err.Error())
 	}
@@ -1437,7 +1443,7 @@ func handleMCPRunGroup(args map[string]any, cfg *Config, profileOverride string)
 	}
 }
 
-func handleMCPListJobs(args map[string]any, cfg *Config, profileOverride string) toolResult {
+func handleMCPListJobs(args map[string]any, cfg *config.Config, profileOverride string) toolResult {
 	rs := jobs.Load().Jobs
 	if profileOverride != "" {
 		out := rs[:0]
@@ -1451,7 +1457,7 @@ func handleMCPListJobs(args map[string]any, cfg *Config, profileOverride string)
 	return mcpJSONResult(map[string]any{"jobs": rs})
 }
 
-func handleMCPTailLog(args map[string]any, cfg *Config, profileOverride string) toolResult {
+func handleMCPTailLog(args map[string]any, cfg *config.Config, profileOverride string) toolResult {
 	jid, _ := args["id"].(string)
 	lines := 200
 	if v, ok := args["lines"].(float64); ok {
@@ -1466,7 +1472,7 @@ func handleMCPTailLog(args map[string]any, cfg *Config, profileOverride string) 
 	if !ok {
 		return mcpTextErr(fmt.Sprintf("profile %q not found", j.Profile))
 	}
-	res, _ := runRemoteCapture(prof, "", fmt.Sprintf("tail -n %d %s", lines, j.Log))
+	res, _ := remote.RunCapture(prof, "", fmt.Sprintf("tail -n %d %s", lines, j.Log))
 	text := res.Stdout
 	if text == "" {
 		text = res.Stderr
@@ -1478,7 +1484,7 @@ func handleMCPTailLog(args map[string]any, cfg *Config, profileOverride string) 
 	}
 }
 
-func handleMCPWaitJob(args map[string]any, cfg *Config, profileOverride string) toolResult {
+func handleMCPWaitJob(args map[string]any, cfg *config.Config, profileOverride string) toolResult {
 	jid, _ := args["id"].(string)
 	maxWait := mcpWaitJobDefaultSeconds
 	if v, ok := args["max_wait_seconds"].(float64); ok && v > 0 {
@@ -1526,7 +1532,7 @@ echo STATUS=running
 tail -n %d %s
 `, maxWait, exitFile, exitFile, tailLines, j.Log, j.Pid, tailLines, j.Log, tailLines, j.Log)
 	start := time.Now()
-	res, _ := runRemoteCapture(prof, "", script)
+	res, _ := remote.RunCapture(prof, "", script)
 	waited := time.Since(start).Seconds()
 
 	lines := strings.SplitN(res.Stdout, "\n", 2)
@@ -1593,7 +1599,7 @@ tail -n %d %s
 	}
 }
 
-func handleMCPListDir(args map[string]any, cfg *Config, profileOverride string) toolResult {
+func handleMCPListDir(args map[string]any, cfg *config.Config, profileOverride string) toolResult {
 	path, _ := args["path"].(string)
 	dirsOnly, _ := args["dirs_only"].(bool)
 	limit := 500
@@ -1635,7 +1641,7 @@ func handleMCPListDir(args map[string]any, cfg *Config, profileOverride string) 
 	}
 }
 
-func handleMCPKillJob(args map[string]any, cfg *Config, profileOverride string) toolResult {
+func handleMCPKillJob(args map[string]any, cfg *config.Config, profileOverride string) toolResult {
 	jid, _ := args["id"].(string)
 	sig, _ := args["signal"].(string)
 	if sig == "" {
@@ -1651,7 +1657,7 @@ func handleMCPKillJob(args map[string]any, cfg *Config, profileOverride string) 
 		return mcpTextErr(fmt.Sprintf("profile %q not found", j.Profile))
 	}
 	cmd := fmt.Sprintf("kill -%s %d 2>/dev/null && echo killed || echo 'no such pid'", sig, j.Pid)
-	res, _ := runRemoteCapture(prof, "", cmd)
+	res, _ := remote.RunCapture(prof, "", cmd)
 	out := jf.Jobs[:0]
 	for _, x := range jf.Jobs {
 		if x.ID != j.ID {
@@ -2071,7 +2077,7 @@ func mcpToolDefs() []toolDef {
 // mcpHandleTool dispatches a mcpTools/call request through the registry.
 // Unknown names return a textual error -- spec doesn't require a more
 // structured "tool not found" form for that case.
-func mcpHandleTool(name string, args map[string]any, cfg *Config) toolResult {
+func mcpHandleTool(name string, args map[string]any, cfg *config.Config) toolResult {
 	profileOverride, _ := args["profile"].(string)
 	if t, ok := mcpToolMap[name]; ok {
 		return t.handler(args, cfg, profileOverride)
@@ -2082,7 +2088,7 @@ func mcpHandleTool(name string, args map[string]any, cfg *Config) toolResult {
 // buildMCPRunText assembles the textual payload returned by the `run`
 // tool, capping the combined stdout+stderr at mcpRunTextMax. Returns
 // (text, truncatedBytes); truncatedBytes is 0 when the output fit.
-func buildMCPRunText(res *RunCaptureResult, cwd string) (string, int) {
+func buildMCPRunText(res *sshx.RunCaptureResult, cwd string) (string, int) {
 	text := res.Stdout
 	if res.Stderr != "" {
 		if text != "" {

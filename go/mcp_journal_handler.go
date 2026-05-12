@@ -2,6 +2,9 @@ package main
 
 import (
 	"fmt"
+	"srv/internal/config"
+	"srv/internal/remote"
+	"srv/internal/sshx"
 	"strings"
 	"time"
 
@@ -19,7 +22,7 @@ import (
 //     grep so a chatty system journal can't flood progress
 //     notifications. The CLI counterpart has no such gate -- this is
 //     purely an MCP rule.
-func handleMCPJournal(args map[string]any, cfg *Config, profileOverride string) toolResult {
+func handleMCPJournal(args map[string]any, cfg *config.Config, profileOverride string) toolResult {
 	unit, _ := args["unit"].(string)
 	since, _ := args["since"].(string)
 	priority, _ := args["priority"].(string)
@@ -51,7 +54,7 @@ func handleMCPJournal(args map[string]any, cfg *Config, profileOverride string) 
 	if errResult != nil {
 		return *errResult
 	}
-	cwd := GetCwd(profName, prof)
+	cwd := config.GetCwd(profName, prof)
 
 	jc := streams.JournalCmd{
 		Unit: unit, Since: since, Priority: priority, Lines: lines, Grep: grep,
@@ -60,7 +63,7 @@ func handleMCPJournal(args map[string]any, cfg *Config, profileOverride string) 
 	remoteCmd := jc.ToRemoteCommand()
 
 	if follow == 0 {
-		res, _ := runRemoteCapture(prof, cwd, remoteCmd)
+		res, _ := remote.RunCapture(prof, cwd, remoteCmd)
 		text, truncatedBytes := buildMCPRunText(res, cwd)
 		structured := map[string]any{
 			"exit_code":     res.ExitCode,
@@ -81,7 +84,7 @@ func handleMCPJournal(args map[string]any, cfg *Config, profileOverride string) 
 	// Follow mode: bounded tail-style streaming. Same shape as the
 	// `tail` MCP tool -- dial direct, time-out via client close,
 	// stream chunks via progress notifications.
-	c, err := Dial(prof)
+	c, err := sshx.Dial(prof)
 	if err != nil {
 		return mcpTextErr(fmt.Sprintf("dial: %v", err))
 	}
@@ -98,7 +101,7 @@ func handleMCPJournal(args map[string]any, cfg *Config, profileOverride string) 
 	var buf strings.Builder
 	var captured int
 	var capped bool
-	onChunk := func(_ StreamChunkKind, line string) {
+	onChunk := func(_ sshx.StreamChunkKind, line string) {
 		if captured+len(line) <= mcpRunTextMax {
 			buf.WriteString(line)
 			captured += len(line)

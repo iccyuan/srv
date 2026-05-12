@@ -3,24 +3,26 @@ package main
 import (
 	"fmt"
 	"sort"
+	"srv/internal/config"
+	"srv/internal/remote"
 	"strings"
 
 	"srv/internal/jobs"
 )
 
-// spawnDetached moved to srv/internal/remote.SpawnDetached. Aliased
+// remote.SpawnDetached moved to srv/internal/remote.SpawnDetached. Aliased
 // in remote_alias.go.
 
-func cmdDetach(args []string, cfg *Config, profileOverride string) error {
+func cmdDetach(args []string, cfg *config.Config, profileOverride string) error {
 	if len(args) == 0 {
 		return exitErr(1, "error: srv -d needs a command.")
 	}
-	name, profile, err := ResolveProfile(cfg, profileOverride)
+	name, profile, err := config.Resolve(cfg, profileOverride)
 	if err != nil {
 		return exitErr(1, "%v", err)
 	}
 	userCmd := strings.Join(args, " ")
-	rec, err := spawnDetached(name, profile, userCmd)
+	rec, err := remote.SpawnDetached(name, profile, userCmd)
 	if err != nil {
 		return exitErr(1, "error: %v", err)
 	}
@@ -31,7 +33,7 @@ func cmdDetach(args []string, cfg *Config, profileOverride string) error {
 	return nil
 }
 
-func cmdJobs(cfg *Config, profileOverride string) error {
+func cmdJobs(cfg *config.Config, profileOverride string) error {
 	rs := jobs.Load().Jobs
 	if profileOverride != "" {
 		filtered := rs[:0]
@@ -58,7 +60,7 @@ func cmdJobs(cfg *Config, profileOverride string) error {
 	return nil
 }
 
-func cmdLogs(args []string, cfg *Config, profileOverride string) error {
+func cmdLogs(args []string, cfg *config.Config, profileOverride string) error {
 	if len(args) == 0 || args[0] == "-f" || args[0] == "--follow" {
 		return exitErr(1, `usage: srv logs <id> [-f]                    output of a detached job (~/.srv-jobs/<id>.log)
 see also:
@@ -85,10 +87,10 @@ see also:
 	if follow {
 		cmd = "tail -f " + j.Log
 	}
-	return exitCode(runRemoteStream(prof, "", cmd, follow))
+	return exitCode(remote.RunStream(prof, "", cmd, follow))
 }
 
-func cmdKill(args []string, cfg *Config, profileOverride string) error {
+func cmdKill(args []string, cfg *config.Config, profileOverride string) error {
 	if len(args) == 0 {
 		return exitErr(1, "usage: srv kill <id>")
 	}
@@ -111,7 +113,7 @@ func cmdKill(args []string, cfg *Config, profileOverride string) error {
 		return exitErr(1, "error: profile %q (from job) not found.", j.Profile)
 	}
 	cmd := fmt.Sprintf("kill -%s %d 2>/dev/null && echo killed || echo 'no such pid (already exited?)'", sig, j.Pid)
-	rc := runRemoteStream(prof, "", cmd, false)
+	rc := remote.RunStream(prof, "", cmd, false)
 	// Drop the job record.
 	out := jf.Jobs[:0]
 	for _, x := range jf.Jobs {

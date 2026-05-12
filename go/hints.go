@@ -3,6 +3,7 @@ package main
 import (
 	"fmt"
 	"os"
+	"srv/internal/config"
 	"srv/internal/i18n"
 	"strings"
 )
@@ -53,7 +54,7 @@ func hintCandidates() []string {
 
 // hintsAllowed reports whether to fire hint output for this invocation.
 // Honors SRV_HINTS env, --no-hints flag, and cfg.Hints in that order.
-func hintsAllowed(cfg *Config, opts globalOpts) bool {
+func hintsAllowed(cfg *config.Config, opts globalOpts) bool {
 	if v := strings.ToLower(os.Getenv("SRV_HINTS")); v == "0" || v == "false" || v == "off" || v == "no" {
 		return false
 	}
@@ -154,7 +155,7 @@ func levenshtein(a, b string) int {
 // emitTypoHintPre prints a one-line hint to stderr when the dispatcher
 // is about to send `sub` to the remote and there's a near-match local
 // subcommand. No-op when hints are disabled.
-func emitTypoHintPre(cfg *Config, opts globalOpts, sub string) {
+func emitTypoHintPre(cfg *config.Config, opts globalOpts, sub string) {
 	if !hintsAllowed(cfg, opts) {
 		return
 	}
@@ -167,7 +168,7 @@ func emitTypoHintPre(cfg *Config, opts globalOpts, sub string) {
 // remote command can't be found (exit 127). Used by both the default
 // "fall through to remote" dispatch path and the explicit `srv run`
 // subcommand.
-func cmdRunWithHints(args []string, cfg *Config, opts globalOpts) error {
+func cmdRunWithHints(args []string, cfg *config.Config, opts globalOpts) error {
 	err := cmdRun(args, cfg, opts.profile, opts.tty)
 	rc := exitCodeOf(err)
 	if rc == 127 && len(args) > 0 {
@@ -180,7 +181,7 @@ func cmdRunWithHints(args []string, cfg *Config, opts globalOpts) error {
 // 127 ("command not found"). `cmd` is the remote command line (or just
 // its first token, the actual exec name). We pull the first whitespace-
 // delimited word out and check it against the candidate table.
-func emitTypoHintPostFailure(cfg *Config, opts globalOpts, cmd string, exitCode int) {
+func emitTypoHintPostFailure(cfg *config.Config, opts globalOpts, cmd string, exitCode int) {
 	if exitCode != 127 {
 		return
 	}

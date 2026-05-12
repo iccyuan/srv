@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"srv/internal/config"
 	"srv/internal/daemon"
 	"srv/internal/srvio"
 	"srv/internal/srvpath"
@@ -30,7 +31,7 @@ import (
 // argument passing silently drops empty string arguments -- without this
 // branch, `srv run <space><TAB>` from PS would invoke the binary as
 // `srv _ls` (no args) and get nothing, leaving completion blank.
-func cmdInternalLs(args []string, cfg *Config, profileOverride string) error {
+func cmdInternalLs(args []string, cfg *config.Config, profileOverride string) error {
 	prefix := ""
 	if len(args) > 0 {
 		prefix = args[0]
@@ -54,12 +55,12 @@ func cmdInternalLs(args []string, cfg *Config, profileOverride string) error {
 // Resolution order: file cache (5s TTL) -> daemon (pooled SSH) ->
 // auto-spawn daemon -> direct dial fallback. Same hierarchy cmdInternalLs
 // has always used; pulled out so the MCP `list_dir` tool can reuse it.
-func listRemoteEntries(prefix string, cfg *Config, profileOverride string) ([]string, error) {
-	name, profile, err := ResolveProfile(cfg, profileOverride)
+func listRemoteEntries(prefix string, cfg *config.Config, profileOverride string) ([]string, error) {
+	name, profile, err := config.Resolve(cfg, profileOverride)
 	if err != nil {
 		return nil, err
 	}
-	cwd := GetCwd(name, profile)
+	cwd := config.GetCwd(name, profile)
 	dirPart, basePart := sshx.SplitRemotePrefix(prefix)
 	target := sshx.RemoteListTarget(dirPart, cwd)
 
@@ -76,7 +77,7 @@ func listRemoteEntries(prefix string, cfg *Config, profileOverride string) ([]st
 	if entries, ok := daemon.TryLs(name, cwd, prefix); ok {
 		return entries, nil
 	}
-	if ensureDaemon() {
+	if daemon.Ensure() {
 		if entries, ok := daemon.TryLs(name, cwd, prefix); ok {
 			return entries, nil
 		}
@@ -107,9 +108,9 @@ func matchEntries(entries []string, dirPart, basePart string) []string {
 // remoteList runs `ls -1Ap <dir>` and returns one entry per line. Dirs
 // carry a trailing "/". Hidden entries are included (so `srv cd .ssh/`
 // completes), `.` and `..` are skipped.
-func remoteList(profile *Profile, target string, timeout time.Duration) ([]string, error) {
+func remoteList(profile *config.Profile, target string, timeout time.Duration) ([]string, error) {
 	cmd := fmt.Sprintf("ls -1Ap -- %s", srvtty.ShQuotePath(target))
-	c, err := DialOpts(profile, DialOptions{Timeout: timeout})
+	c, err := sshx.DialOpts(profile, sshx.DialOptions{Timeout: timeout})
 	if err != nil {
 		return nil, fmt.Errorf("dial: %w", err)
 	}

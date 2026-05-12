@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"srv/internal/config"
 	"srv/internal/mcplog"
 	"srv/internal/progress"
 	"srv/internal/project"
@@ -38,7 +39,7 @@ func currentProgressTokenFn() any { return currentProgressToken }
 // stdin one line at a time, dispatches by method, writes responses to
 // stdout. Logs lifecycle events to ~/.srv/mcp.log so disconnects can be
 // post-mortem'd (the client doesn't surface why a session ended).
-func cmdMcp(cfg *Config) error {
+func cmdMcp(cfg *config.Config) error {
 	mcpMode = true
 	i18n.SetMCPMode(true)
 	project.SetSilent(true)
@@ -100,9 +101,9 @@ func cmdMcp(cfg *Config) error {
 			if args == nil {
 				args = map[string]any{}
 			}
-			cfg2, _ := LoadConfig()
+			cfg2, _ := config.Load()
 			if cfg2 == nil {
-				cfg2 = newConfig()
+				cfg2 = config.New()
 			}
 			// Stash the progress token before dispatch and clear it
 			// after, so streaming mcpTools can read it via
@@ -137,7 +138,7 @@ func cmdMcp(cfg *Config) error {
 // still leaves a trail. Stack would be ideal here but it inflates the
 // log; the (tool, panic) pair is usually enough to localise via git
 // blame.
-func safeMCPHandle(name string, args map[string]any, cfg *Config) (res toolResult) {
+func safeMCPHandle(name string, args map[string]any, cfg *config.Config) (res toolResult) {
 	defer func() {
 		if r := recover(); r != nil {
 			mcplog.Logf("tool=%s panic=%v", name, r)

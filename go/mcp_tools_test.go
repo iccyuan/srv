@@ -2,6 +2,7 @@ package main
 
 import (
 	"srv/internal/jobs"
+	"srv/internal/sshx"
 	"strings"
 	"testing"
 )
@@ -146,7 +147,7 @@ func TestRunRejectSync(t *testing.T) {
 }
 
 func TestBuildMCPRunText_NoTruncation(t *testing.T) {
-	res := &RunCaptureResult{
+	res := &sshx.RunCaptureResult{
 		Stdout:   "hello\nworld",
 		Stderr:   "",
 		ExitCode: 0,
@@ -164,7 +165,7 @@ func TestBuildMCPRunText_NoTruncation(t *testing.T) {
 }
 
 func TestBuildMCPRunText_StderrFenced(t *testing.T) {
-	res := &RunCaptureResult{
+	res := &sshx.RunCaptureResult{
 		Stdout:   "out",
 		Stderr:   "err",
 		ExitCode: 1,
@@ -180,7 +181,7 @@ func TestBuildMCPRunText_StderrFenced(t *testing.T) {
 
 func TestBuildMCPRunText_TruncatesAtCap(t *testing.T) {
 	big := strings.Repeat("a", mcpRunTextMax+1234)
-	res := &RunCaptureResult{Stdout: big, ExitCode: 0}
+	res := &sshx.RunCaptureResult{Stdout: big, ExitCode: 0}
 	text, truncated := buildMCPRunText(res, "/x")
 	if truncated != 1234 {
 		t.Errorf("truncated = %d, want 1234", truncated)

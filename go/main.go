@@ -9,6 +9,8 @@ import (
 	"fmt"
 	"os"
 	"srv/internal/clierr"
+	"srv/internal/config"
+	"srv/internal/group"
 
 	"srv/internal/i18n"
 )
@@ -20,10 +22,10 @@ var Version = "2.6.6"
 func init() {
 	// Let the i18n package read Config.Lang lazily without having to
 	// import package main. Provider is invoked the first time T() is
-	// called from a non-MCP context, so LoadConfig's disk read stays
+	// called from a non-MCP context, so config.Load's disk read stays
 	// off the hot startup path.
 	i18n.SetConfigLangProvider(func() string {
-		if cfg, _ := LoadConfig(); cfg != nil {
+		if cfg, _ := config.Load(); cfg != nil {
 			return cfg.Lang
 		}
 		return ""
@@ -172,12 +174,12 @@ func run(args []string) int {
 	}
 	needCfg := !known || !cmd.noConfig
 	if needCfg {
-		cfg, err := LoadConfig()
+		cfg, err := config.Load()
 		if err != nil {
 			fatal("%v", err)
 		}
 		if cfg == nil {
-			cfg = newConfig()
+			cfg = config.New()
 		}
 		ctx.cfg = cfg
 	}
@@ -191,7 +193,7 @@ func run(args []string) int {
 	// run still proceeds (their command might be the right one).
 	emitTypoHintPre(ctx.cfg, opts, sub)
 	if opts.group != "" {
-		return translateExit(cmdRunGroup(rest, ctx.cfg, opts.group))
+		return translateExit(group.RunCmd(rest, ctx.cfg, opts.group))
 	}
 	if opts.detach {
 		return translateExit(cmdDetach(rest, ctx.cfg, opts.profile))

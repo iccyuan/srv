@@ -6,6 +6,8 @@ import (
 	"net"
 	"os"
 	"sort"
+	"srv/internal/config"
+	"srv/internal/sshx"
 	"strconv"
 	"strings"
 	"time"
@@ -23,7 +25,7 @@ type CheckResult struct {
 // timeout. Returns a diagnosis tag matching the Python version's set:
 // ok / no-key / host-key-changed / dns / refused / no-route /
 // tcp-timeout / timeout / perm-denied / unknown.
-func runCheck(profile *Profile) *CheckResult {
+func runCheck(profile *config.Profile) *CheckResult {
 	res := &CheckResult{}
 
 	// The dial budget must stay strictly inside the outer 15s timeout --
@@ -38,7 +40,7 @@ func runCheck(profile *Profile) *CheckResult {
 
 	done := make(chan *CheckResult, 1)
 	go func() {
-		c, err := DialOpts(profile, DialOptions{
+		c, err := sshx.DialOpts(profile, sshx.DialOptions{
 			StrictHostKey: false, // accept-new like the Python version
 			Timeout:       dialTimeout,
 		})
@@ -136,7 +138,7 @@ func classifyDialError(err error) string {
 }
 
 // checkAdvice returns the actionable lines for a given diagnosis.
-func checkAdvice(diag string, profile *Profile, profileName string) []string {
+func checkAdvice(diag string, profile *config.Profile, profileName string) []string {
 	user := profile.User
 	host := profile.Host
 	port := profile.GetPort()
@@ -220,7 +222,7 @@ func checkAdvice(diag string, profile *Profile, profileName string) []string {
 // printDiagError writes an error to stderr, augmenting with a diagnosis tag
 // and actionable fix steps if the error matches a known SSH failure mode
 // (no-key / refused / dns / etc.). Falls back to the raw error otherwise.
-func printDiagError(err error, profile *Profile) {
+func printDiagError(err error, profile *config.Profile) {
 	if err == nil {
 		return
 	}
@@ -240,7 +242,7 @@ func printDiagError(err error, profile *Profile) {
 	}
 }
 
-func cmdCheck(args []string, cfg *Config, profileOverride string) error {
+func cmdCheck(args []string, cfg *config.Config, profileOverride string) error {
 	rtt := false
 	count := 10
 	interval := 200 * time.Millisecond
@@ -274,7 +276,7 @@ func cmdCheck(args []string, cfg *Config, profileOverride string) error {
 		}
 	}
 
-	name, profile, err := ResolveProfile(cfg, profileOverride)
+	name, profile, err := config.Resolve(cfg, profileOverride)
 	if err != nil {
 		return exitErr(1, "%v", err)
 	}
@@ -325,7 +327,7 @@ func cmdCheck(args []string, cfg *Config, profileOverride string) error {
 //
 // Returns 1 if more than half the probes were lost (link is unusable),
 // otherwise 0.
-func runRTTProbe(profile *Profile, name string, count int, interval time.Duration) int {
+func runRTTProbe(profile *config.Profile, name string, count int, interval time.Duration) int {
 	user := profile.User
 	host := profile.Host
 	target := host
@@ -334,7 +336,7 @@ func runRTTProbe(profile *Profile, name string, count int, interval time.Duratio
 	}
 	fmt.Printf("rtt probe %s: %s:%d  (%d samples, %v interval)\n\n", name, target, profile.GetPort(), count, interval)
 
-	c, err := DialOpts(profile, DialOptions{StrictHostKey: false})
+	c, err := sshx.DialOpts(profile, sshx.DialOptions{StrictHostKey: false})
 	if err != nil {
 		printDiagError(err, profile)
 		return 1

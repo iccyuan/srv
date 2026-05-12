@@ -9,13 +9,16 @@ import (
 	"path"
 	"path/filepath"
 	"runtime"
+	"srv/internal/config"
 	"srv/internal/daemon"
+	"srv/internal/remote"
 	"srv/internal/srvpath"
 	"srv/internal/syncx"
+	"srv/internal/transfer"
 	"strings"
 )
 
-func cmdDoctor(args []string, cfg *Config, profileOverride string) error {
+func cmdDoctor(args []string, cfg *config.Config, profileOverride string) error {
 	asJSON := len(args) > 0 && args[0] == "--json"
 	rows, ok := doctorChecks(cfg, profileOverride)
 	for _, row := range rows {
@@ -47,7 +50,7 @@ func cmdDoctor(args []string, cfg *Config, profileOverride string) error {
 	return exitCode(1)
 }
 
-func doctorChecks(cfg *Config, profileOverride string) ([]map[string]any, bool) {
+func doctorChecks(cfg *config.Config, profileOverride string) ([]map[string]any, bool) {
 	ok := true
 	rows := []map[string]any{}
 	check := func(name string, pass bool, detail string) {
@@ -79,7 +82,7 @@ func doctorChecks(cfg *Config, profileOverride string) ([]map[string]any, bool) 
 	} else {
 		check("daemon", true, "not running; will auto-spawn for hot paths")
 	}
-	if _, _, err := ResolveProfile(cfg, profileOverride); err != nil {
+	if _, _, err := config.Resolve(cfg, profileOverride); err != nil {
 		check("active profile", false, err.Error())
 	}
 	return rows, ok
@@ -118,25 +121,25 @@ func editJSONValue(v any, pattern string) ([]byte, error) {
 	return os.ReadFile(tmpPath)
 }
 
-func cmdOpen(args []string, cfg *Config, profileOverride string) error {
+func cmdOpen(args []string, cfg *config.Config, profileOverride string) error {
 	if len(args) == 0 {
 		fmt.Fprintln(os.Stderr, "usage: srv open <remote_file>")
 		return exitCode(2)
 	}
-	name, profile, err := ResolveProfile(cfg, profileOverride)
+	name, profile, err := config.Resolve(cfg, profileOverride)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		return exitCode(1)
 	}
-	cwd := GetCwd(name, profile)
-	remote := resolveRemotePath(args[0], cwd)
+	cwd := config.GetCwd(name, profile)
+	remote := remote.ResolvePath(args[0], cwd)
 	tmpDir, err := os.MkdirTemp("", "srv-open-")
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "srv open:", err)
 		return exitCode(1)
 	}
 	local := filepath.Join(tmpDir, path.Base(strings.TrimRight(remote, "/")))
-	if rc, _, err := pullPath(profile, remote, local, false); err != nil || rc != 0 {
+	if rc, _, err := transfer.PullPath(profile, remote, local, false); err != nil || rc != 0 {
 		if err != nil {
 			fmt.Fprintln(os.Stderr, "srv open:", err)
 		}
@@ -161,16 +164,16 @@ func openLocal(p string) error {
 	}
 }
 
-func cmdCode(args []string, cfg *Config, profileOverride string) error {
-	name, profile, err := ResolveProfile(cfg, profileOverride)
+func cmdCode(args []string, cfg *config.Config, profileOverride string) error {
+	name, profile, err := config.Resolve(cfg, profileOverride)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		return exitCode(1)
 	}
-	cwd := GetCwd(name, profile)
+	cwd := config.GetCwd(name, profile)
 	target := cwd
 	if len(args) > 0 {
-		target = resolveRemotePath(args[0], cwd)
+		target = remote.ResolvePath(args[0], cwd)
 	}
 	host := profile.Host
 	if profile.User != "" {
@@ -194,7 +197,7 @@ func runLocal(name string, args ...string) int {
 	return 0
 }
 
-func cmdDiff(args []string, cfg *Config, profileOverride string) error {
+func cmdDiff(args []string, cfg *config.Config, profileOverride string) error {
 	if len(args) == 0 {
 		return exitErr(2, "usage: srv diff <local_file> [remote_file]")
 	}
@@ -214,25 +217,25 @@ func cmdDiff(args []string, cfg *Config, profileOverride string) error {
 	return exitCode(rc)
 }
 
-func diffLocalRemote(cfg *Config, profileOverride, local, remoteArg string) (string, int, error) {
+func diffLocalRemote(cfg *config.Config, profileOverride, local, remoteArg string) (string, int, error) {
 	if _, err := os.Stat(local); err != nil {
 		return "", 1, err
 	}
-	name, profile, err := ResolveProfile(cfg, profileOverride)
+	name, profile, err := config.Resolve(cfg, profileOverride)
 	if err != nil {
 		return "", 1, err
 	}
 	if remoteArg == "" {
 		remoteArg = local
 	}
-	remote := resolveRemotePath(remoteArg, GetCwd(name, profile))
+	remote := remote.ResolvePath(remoteArg, config.GetCwd(name, profile))
 	tmpDir, err := os.MkdirTemp("", "srv-diff-")
 	if err != nil {
 		return "", 1, err
 	}
 	defer os.RemoveAll(tmpDir)
 	remoteLocal := filepath.Join(tmpDir, filepath.Base(local)+".remote")
-	if rc, _, err := pullPath(profile, remote, remoteLocal, false); err != nil || rc != 0 {
+	if rc, _, err := transfer.PullPath(profile, remote, remoteLocal, false); err != nil || rc != 0 {
 		if err != nil {
 			return "", 1, err
 		}
@@ -260,7 +263,7 @@ func diffLocalRemote(cfg *Config, profileOverride, local, remoteArg string) (str
 	return fmt.Sprintf("files differ: %s %s\n", local, remote), rc, nil
 }
 
-func cmdDiffChanged(args []string, cfg *Config, profileOverride string) error {
+func cmdDiffChanged(args []string, cfg *config.Config, profileOverride string) error {
 	root := syncx.FindGitRoot(syncx.MustCwd())
 	if root == "" {
 		fmt.Fprintln(os.Stderr, "srv diff --changed: not in a git repo")

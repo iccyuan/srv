@@ -8,6 +8,9 @@ import (
 	"path"
 	"path/filepath"
 	"runtime"
+	"srv/internal/config"
+	"srv/internal/remote"
+	"srv/internal/sshx"
 	"srv/internal/transfer"
 	"strings"
 )
@@ -23,22 +26,22 @@ import (
 // work as-is. Without --wait, VS Code returns immediately and srv will
 // observe "no changes" -- the user is responsible for configuring their
 // editor to block until close.
-func cmdEdit(args []string, cfg *Config, profileOverride string) error {
+func cmdEdit(args []string, cfg *config.Config, profileOverride string) error {
 	if len(args) == 0 {
 		fmt.Fprintln(os.Stderr, "usage: srv edit <remote_path>")
 		return exitCode(2)
 	}
-	remote := args[0]
+	rpath := args[0]
 
-	name, profile, err := ResolveProfile(cfg, profileOverride)
+	name, profile, err := config.Resolve(cfg, profileOverride)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		return exitCode(1)
 	}
-	cwd := GetCwd(name, profile)
-	abs := resolveRemotePath(remote, cwd)
+	cwd := config.GetCwd(name, profile)
+	abs := remote.ResolvePath(rpath, cwd)
 
-	c, err := Dial(profile)
+	c, err := sshx.Dial(profile)
 	if err != nil {
 		printDiagError(err, profile)
 		return exitCode(255)
