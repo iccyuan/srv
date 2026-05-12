@@ -25,7 +25,10 @@ import (
 //     hide partial lines; doing it locally keeps line-rate latency.
 func cmdTail(args []string, cfg *Config, profileOverride string) error {
 	if len(args) == 0 {
-		return exitErr(2, "usage: srv tail [-n LINES] [--grep REGEX] <remote-path> [<remote-path>...]")
+		return exitErr(2, `usage: srv tail [-n LINES] [--grep REGEX] <remote-path>...  any remote file (auto-reconnect)
+see also:
+  srv journal -u UNIT [-f]                      systemd journal for a service
+  srv logs <id> [-f]                            output of a detached srv job`)
 	}
 
 	initial := 10

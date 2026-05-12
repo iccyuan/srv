@@ -52,6 +52,7 @@ srv shell
 srv -t <cmd>
 srv -d <cmd>
 srv -P <profile> <cmd>
+srv -G <group> <cmd>
 srv push <local> [remote]
 srv pull <remote> [local]
 srv sync [...]
@@ -60,12 +61,20 @@ srv open <remote_file>
 srv code [remote_dir]
 srv diff [--changed] <local> [remote]
 srv env <list|set|unset|clear>
-srv tunnel [-R] <port-spec>
+srv tunnel [-R] <port-spec> | <add|up|down|list|show|remove> ...
 srv jobs
 srv logs <id> [-f]
 srv kill <id> [-9|--signal=NAME]
+srv tail [-n LINES] [--grep RE] <remote-path>...
+srv watch [-n SECS] [--diff] <cmd>
+srv journal [-u UNIT] [--since TIME] [-f] [-g RE] [-n LINES]
+srv top [-n SECS]
+srv sudo [--no-cache] [--cache-ttl <dur>] <cmd>
 srv sessions [list|show|clear|prune]
 srv daemon [status|restart|logs|prune-cache|stop]
+srv group <list|show|set|remove> ...
+srv project
+srv ui
 srv completion <bash|zsh|powershell> [--install]
 srv mcp
 srv guard [on|off|status]
@@ -73,6 +82,66 @@ srv install
 srv help
 srv version
 ```
+
+## Picking the right command
+
+Several command clusters share a mental model -- "watch a log",
+"run a command", "transfer a file". These tables show what to reach
+for given what you have.
+
+### Viewing logs
+
+| You have...                       | Command                                |
+|-----------------------------------|----------------------------------------|
+| A path on the remote              | `srv tail [-n N] [--grep RE] <path>`   |
+| A systemd unit name               | `srv journal -u UNIT [-f]`             |
+| A detached-job id                 | `srv logs <id> [-f]`                   |
+
+All three follow with `-f` and reconnect on SSH drop. They cover
+different *sources*, not different mechanics -- the right tool is
+whichever matches what you can reference.
+
+### Running a remote command
+
+| You want...                       | Command                                |
+|-----------------------------------|----------------------------------------|
+| Short, capture stdout/stderr      | `srv run <cmd>` (or `srv <cmd>`)       |
+| Interactive (vim, sudo prompt)    | `srv -t <cmd>` or `srv shell`          |
+| Long-running, background          | `srv -d <cmd>` (creates a job)         |
+| Periodic snapshot, in-place       | `srv watch [-n N] <cmd>`               |
+| Parallel across hosts             | `srv -G <group> <cmd>`                 |
+| Stream `top` indefinitely         | `srv top` (or `srv -t top` in-place)   |
+
+### Transfer
+
+| You want...                       | Command                                |
+|-----------------------------------|----------------------------------------|
+| Upload one file/dir               | `srv push <local> [remote]`            |
+| Download one file/dir             | `srv pull <remote> [local]`            |
+| Bidirectional diff before edit    | `srv diff <local> [remote]`            |
+| Open in `$EDITOR`, save back      | `srv edit <remote>`                    |
+| Pull to temp, open in OS app      | `srv open <remote>`                    |
+| Open remote folder in VS Code     | `srv code [remote_dir]`                |
+| Bulk incremental sync             | `srv sync [...]`                       |
+
+### Tunnels
+
+| You want...                       | Command                                |
+|-----------------------------------|----------------------------------------|
+| One-shot foreground tunnel        | `srv tunnel [-R] <spec>`               |
+| Named persistent (in daemon)      | `srv tunnel add <name> <spec>` then `srv tunnel up <name>` |
+| List / inspect                    | `srv tunnel list` / `srv tunnel show <name>` |
+| Auto-start on daemon boot         | `srv tunnel add ... --autostart`       |
+
+### State + dashboard
+
+| You want...                       | Command                                |
+|-----------------------------------|----------------------------------------|
+| Current profile / cwd             | `srv status` / `srv pwd`               |
+| SSH connectivity OK?              | `srv check [--rtt]`                    |
+| Full local readiness report       | `srv doctor`                           |
+| One-screen live overview          | `srv ui`                               |
+| Pinned by .srv-project?           | `srv project`                          |
 
 ## MCP
 

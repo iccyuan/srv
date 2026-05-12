@@ -138,11 +138,18 @@ func parseJournalArgs(args []string) (journalCmd, error) {
 			i++
 		case a == "-f" || a == "--follow":
 			jc.follow = true
+		case a == "-h" || a == "--help":
+			return jc, exitErr(0, `usage: srv journal [-u UNIT] [--since TIME] [-p PRI] [-g RE] [-n LINES] [-f]
+  systemd journal viewer (one-shot or live-follow on the remote)
+
+see also:
+  srv tail [-n N] [--grep RE] <path>            any remote file
+  srv logs <id> [-f]                            output of a detached srv job`)
 		case a == "--":
 			// No positional args expected; ignore the rest.
 			return jc, nil
 		default:
-			return jc, exitErr(2, "unknown journal arg %q (try -u UNIT, --since DUR, -f, -n LINES, -g RE)", a)
+			return jc, exitErr(2, "unknown journal arg %q (try -u UNIT, --since DUR, -f, -n LINES, -g RE; --help for more)", a)
 		}
 	}
 	return jc, nil

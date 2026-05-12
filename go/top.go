@@ -71,7 +71,8 @@ func cmdTop(args []string, cfg *Config, profileOverride string) error {
 	remoteCmd := strings.Join(parts, " ")
 
 	fmt.Fprintf(os.Stderr,
-		"srv top: %s   (Ctrl-C to stop, auto-reconnect on drop; use `srv -t top` for in-place mode)\n",
+		"srv top: %s   (Ctrl-C to stop, auto-reconnect on drop)\n"+
+			"  alternatives: `srv -t top` (pty, in-place)   `srv watch -n N <cmd>` (periodic any cmd)\n",
 		profile.Host)
 
 	onChunk := func(kind StreamChunkKind, line string) {

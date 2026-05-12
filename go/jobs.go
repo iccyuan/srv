@@ -156,7 +156,10 @@ func cmdJobs(cfg *Config, profileOverride string) error {
 
 func cmdLogs(args []string, cfg *Config, profileOverride string) error {
 	if len(args) == 0 || args[0] == "-f" || args[0] == "--follow" {
-		return exitErr(1, "usage: srv logs <id> [-f]")
+		return exitErr(1, `usage: srv logs <id> [-f]                    output of a detached job (~/.srv-jobs/<id>.log)
+see also:
+  srv tail [-n N] [--grep RE] <path>            any remote file (auto-reconnect)
+  srv journal -u UNIT [-f]                      systemd journal for a service`)
 	}
 	jid := args[0]
 	follow := false
