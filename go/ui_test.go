@@ -97,7 +97,7 @@ func TestBuildSelectableRows_OrderTunnelsBeforeJobs(t *testing.T) {
 		{ID: "j1", Profile: "p"},
 		{ID: "j2", Profile: "p"},
 	}
-	rows := buildSelectableRows(tunnels, jobs)
+	rows := buildSelectableRows(tunnels, jobs, nil)
 	if len(rows) != 4 {
 		t.Fatalf("expected 4 rows, got %d", len(rows))
 	}

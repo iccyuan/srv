@@ -38,9 +38,10 @@ type uiConfirm struct {
 type uiState struct {
 	cursor       int        // index into rows; -1 when rows is empty
 	rows         []uiRow    // selectable rows in display order
-	focusPane    string     // "tunnel" or "job"; Tab / h / l switches panes
+	focusPane    string     // "tunnel" / "job" / "mcp"; Tab / h / l cycles
 	tunnelCursor int        // index within the tunnel window
 	jobCursor    int        // index within the jobs window
+	mcpCursor    int        // index within the mcp recent-tools window
 	detailMode   bool       // showing the per-row detail panel
 	confirm      *uiConfirm // non-nil = popup is up, awaiting Y/N
 	showAll      bool       // include completed (`.exit` marker present) jobs
@@ -64,7 +65,7 @@ func (s *uiState) currentRow() uiRow {
 	if s == nil || len(s.rows) == 0 {
 		return uiRow{}
 	}
-	tunnels, jobs := countUIRows(s.rows)
+	tunnels, jobs, mcp := countUIRows(s.rows)
 	switch s.focusPane {
 	case "tunnel":
 		if s.tunnelCursor >= 0 && s.tunnelCursor < tunnels {
@@ -74,6 +75,11 @@ func (s *uiState) currentRow() uiRow {
 		if s.jobCursor >= 0 && s.jobCursor < jobs {
 			offset := tunnels + s.jobCursor
 			return uiRow{kind: "job", id: s.rows[offset].id, idx: s.jobCursor}
+		}
+	case "mcp":
+		if s.mcpCursor >= 0 && s.mcpCursor < mcp {
+			offset := tunnels + jobs + s.mcpCursor
+			return uiRow{kind: "mcp", id: s.rows[offset].id, idx: s.mcpCursor}
 		}
 	}
 	if s.cursor < 0 || s.cursor >= len(s.rows) {
@@ -90,16 +96,18 @@ func (s *uiState) isSelected(kind string, idx int) bool {
 	return r.kind == kind && r.idx == idx
 }
 
-func countUIRows(rows []uiRow) (tunnels, jobs int) {
+func countUIRows(rows []uiRow) (tunnels, jobs, mcp int) {
 	for _, r := range rows {
 		switch r.kind {
 		case "tunnel":
 			tunnels++
 		case "job":
 			jobs++
+		case "mcp":
+			mcp++
 		}
 	}
-	return tunnels, jobs
+	return tunnels, jobs, mcp
 }
 
 // cmdUI is `srv ui` -- a one-screen dashboard showing the bits of srv
@@ -218,7 +226,8 @@ func cmdUI(cfg *Config) error {
 		}
 		tunnelNames := sortedTunnelNames(fresh)
 		st.hiddenJobs = hidden
-		st.rows = buildSelectableRows(tunnelNames, jobs)
+		mcpRecent := readMCPStatus().RecentTools
+		st.rows = buildSelectableRows(tunnelNames, jobs, mcpRecent)
 		clampCursor(st)
 
 		// Detail is now part of the dashboard's right column,
@@ -270,17 +279,19 @@ func sortedTunnelNames(cfg *Config) []string {
 }
 
 // buildSelectableRows assembles the flat row list used by the
-// shared cursor. Tunnels come first because they appear first in
-// the dashboard; jobs follow. Keeping the order display-aligned
-// means a press of `j` moves the cursor visually downward without
-// jumping between sections.
-func buildSelectableRows(tunnels []string, jobs []*JobRecord) []uiRow {
-	rows := make([]uiRow, 0, len(tunnels)+len(jobs))
+// shared cursor. Order matches the visual stack of the left column
+// (tunnels -> jobs -> mcp recent), so a press of `j` walks the
+// cursor visually downward without jumping between sections.
+func buildSelectableRows(tunnels []string, jobs []*JobRecord, mcpRecent []mcpToolCall) []uiRow {
+	rows := make([]uiRow, 0, len(tunnels)+len(jobs)+len(mcpRecent))
 	for i, n := range tunnels {
 		rows = append(rows, uiRow{kind: "tunnel", id: n, idx: i})
 	}
 	for i, j := range jobs {
 		rows = append(rows, uiRow{kind: "job", id: j.ID, idx: i})
+	}
+	for i, tc := range mcpRecent {
+		rows = append(rows, uiRow{kind: "mcp", id: tc.Name, idx: i})
 	}
 	return rows
 }
@@ -288,7 +299,7 @@ func buildSelectableRows(tunnels []string, jobs []*JobRecord) []uiRow {
 // clampCursor keeps st.cursor in [0, len(rows)) when rows is non-
 // empty, -1 otherwise. Called every tick because rows can shrink
 // out from under the cursor (we killed a job; another shell did
-// `srv tunnel remove`).
+// `srv tunnel remove`; an MCP log line rolled off the tail).
 func clampCursor(st *uiState) {
 	n := len(st.rows)
 	if n == 0 {
@@ -296,42 +307,67 @@ func clampCursor(st *uiState) {
 		st.focusPane = ""
 		st.tunnelCursor = 0
 		st.jobCursor = 0
+		st.mcpCursor = 0
 		return
 	}
-	tunnels, jobs := countUIRows(st.rows)
+	tunnels, jobs, mcp := countUIRows(st.rows)
+
+	// First-time init / external caller dropped a raw st.cursor:
+	// derive focusPane + the matching per-pane cursor from it so the
+	// global cursor index keeps its position. Used by older callers
+	// (and tests) that drive the state by setting just .cursor + .rows.
 	if st.focusPane == "" {
 		switch {
 		case st.cursor >= 0 && st.cursor < tunnels:
 			st.focusPane = "tunnel"
 			st.tunnelCursor = st.cursor
-		case st.cursor >= tunnels && st.cursor < n:
+		case st.cursor >= tunnels && st.cursor < tunnels+jobs:
 			st.focusPane = "job"
 			st.jobCursor = st.cursor - tunnels
-		case st.cursor >= n && n > 0:
-			last := st.rows[n-1]
-			st.focusPane = last.kind
-			if last.kind == "tunnel" {
-				st.tunnelCursor = tunnels - 1
-			} else {
+		case st.cursor >= tunnels+jobs && st.cursor < n:
+			st.focusPane = "mcp"
+			st.mcpCursor = st.cursor - tunnels - jobs
+		case st.cursor >= n:
+			// Cursor past the end -- pin to the last selectable row.
+			if mcp > 0 {
+				st.focusPane = "mcp"
+				st.mcpCursor = mcp - 1
+			} else if jobs > 0 {
+				st.focusPane = "job"
 				st.jobCursor = jobs - 1
+			} else if tunnels > 0 {
+				st.focusPane = "tunnel"
+				st.tunnelCursor = tunnels - 1
 			}
-		case tunnels > 0:
-			st.focusPane = "tunnel"
-		default:
-			st.focusPane = "job"
 		}
 	}
-	if tunnels == 0 && st.focusPane == "tunnel" {
-		st.focusPane = "job"
+
+	// If the focused pane has been emptied (e.g., user killed the
+	// last job), pick the next non-empty pane in our preferred order.
+	if (st.focusPane == "tunnel" && tunnels == 0) ||
+		(st.focusPane == "job" && jobs == 0) ||
+		(st.focusPane == "mcp" && mcp == 0) ||
+		st.focusPane == "" {
+		switch {
+		case tunnels > 0:
+			st.focusPane = "tunnel"
+		case jobs > 0:
+			st.focusPane = "job"
+		case mcp > 0:
+			st.focusPane = "mcp"
+		default:
+			st.focusPane = ""
+		}
 	}
-	if jobs == 0 && st.focusPane == "job" {
-		st.focusPane = "tunnel"
-	}
+
 	if st.tunnelCursor < 0 {
 		st.tunnelCursor = 0
 	}
 	if st.jobCursor < 0 {
 		st.jobCursor = 0
+	}
+	if st.mcpCursor < 0 {
+		st.mcpCursor = 0
 	}
 	if tunnels > 0 && st.tunnelCursor >= tunnels {
 		st.tunnelCursor = tunnels - 1
@@ -339,11 +375,17 @@ func clampCursor(st *uiState) {
 	if jobs > 0 && st.jobCursor >= jobs {
 		st.jobCursor = jobs - 1
 	}
+	if mcp > 0 && st.mcpCursor >= mcp {
+		st.mcpCursor = mcp - 1
+	}
+
 	switch st.focusPane {
 	case "tunnel":
 		st.cursor = st.tunnelCursor
 	case "job":
 		st.cursor = tunnels + st.jobCursor
+	case "mcp":
+		st.cursor = tunnels + jobs + st.mcpCursor
 	default:
 		st.cursor = 0
 	}
@@ -359,78 +401,130 @@ func currentJobs() []*JobRecord {
 	return jf.Jobs
 }
 
+// focusNextPane cycles the focused pane forward through whatever
+// non-empty panes exist: tunnel -> job -> mcp -> tunnel. Empty
+// panes are skipped so Tab doesn't land in an empty section.
 func focusNextPane(st *uiState) {
-	tunnels, jobs := countUIRows(st.rows)
-	switch st.focusPane {
-	case "tunnel":
-		if jobs > 0 {
-			st.focusPane = "job"
-		}
-	case "job":
-		if tunnels > 0 {
-			st.focusPane = "tunnel"
-		}
-	default:
-		if tunnels > 0 {
-			st.focusPane = "tunnel"
-		} else if jobs > 0 {
-			st.focusPane = "job"
-		}
-	}
-	clampCursor(st)
-	st.forceRedraw = true
+	cyclePane(st, +1)
 }
 
+// focusPrevPane is the reverse direction. h / Shift-Tab / ←.
 func focusPrevPane(st *uiState) {
-	focusNextPane(st)
+	cyclePane(st, -1)
+}
+
+func cyclePane(st *uiState, dir int) {
+	tunnels, jobs, mcp := countUIRows(st.rows)
+	order := []string{"tunnel", "job", "mcp"}
+	avail := []string{}
+	for _, p := range order {
+		switch p {
+		case "tunnel":
+			if tunnels > 0 {
+				avail = append(avail, p)
+			}
+		case "job":
+			if jobs > 0 {
+				avail = append(avail, p)
+			}
+		case "mcp":
+			if mcp > 0 {
+				avail = append(avail, p)
+			}
+		}
+	}
+	if len(avail) == 0 {
+		return
+	}
+	cur := -1
+	for i, p := range avail {
+		if p == st.focusPane {
+			cur = i
+			break
+		}
+	}
+	next := (cur + dir + len(avail)) % len(avail)
+	st.focusPane = avail[next]
+	clampCursor(st)
+	st.forceRedraw = true
 }
 
 // moveFocusedRow moves the cursor in the focused pane by `delta`
 // (1 = down, -1 = up). At pane boundaries the cursor automatically
-// crosses into the next section (down past last tunnel jumps to
-// first job, up past first job jumps to last tunnel), so the user
-// can navigate every selectable row with j/k or arrow keys alone --
-// Tab is then just a fast-cross shortcut, not the only way.
+// crosses into the next non-empty section (down past last row
+// jumps to the top of the next pane; up past first row jumps to
+// the bottom of the previous pane). Plain j/k or arrow keys
+// therefore walk every selectable row across all three panes
+// without the user having to press Tab.
 func moveFocusedRow(st *uiState, delta int) {
-	tunnels, jobs := countUIRows(st.rows)
-	if tunnels+jobs == 0 {
+	if len(st.rows) == 0 {
 		return
 	}
-	switch st.focusPane {
-	case "tunnel":
-		next := st.tunnelCursor + delta
-		if next >= tunnels && jobs > 0 {
-			st.focusPane = "job"
-			st.jobCursor = 0
-		} else if next < 0 && jobs > 0 {
-			st.focusPane = "job"
-			st.jobCursor = jobs - 1
-		} else {
-			st.tunnelCursor = next
+	tunnels, jobs, mcp := countUIRows(st.rows)
+	order := []string{"tunnel", "job", "mcp"}
+	sizes := map[string]int{"tunnel": tunnels, "job": jobs, "mcp": mcp}
+	cursors := map[string]*int{
+		"tunnel": &st.tunnelCursor,
+		"job":    &st.jobCursor,
+		"mcp":    &st.mcpCursor,
+	}
+
+	if st.focusPane == "" || sizes[st.focusPane] == 0 {
+		// No focus or focus pane is empty -- jump to the first
+		// non-empty pane in display order.
+		for _, p := range order {
+			if sizes[p] > 0 {
+				st.focusPane = p
+				*cursors[p] = 0
+				break
+			}
 		}
-	case "job":
-		next := st.jobCursor + delta
-		if next >= jobs && tunnels > 0 {
-			st.focusPane = "tunnel"
-			st.tunnelCursor = 0
-		} else if next < 0 && tunnels > 0 {
-			st.focusPane = "tunnel"
-			st.tunnelCursor = tunnels - 1
-		} else {
-			st.jobCursor = next
+		st.forceRedraw = true
+		clampCursor(st)
+		return
+	}
+
+	cur := cursors[st.focusPane]
+	next := *cur + delta
+	size := sizes[st.focusPane]
+	if next >= 0 && next < size {
+		*cur = next
+		clampCursor(st)
+		st.forceRedraw = true
+		return
+	}
+
+	// Crossing a pane boundary -- find the next non-empty pane in
+	// the requested direction.
+	idx := indexOf(order, st.focusPane)
+	step := 1
+	if delta < 0 {
+		step = -1
+	}
+	for i := 1; i <= len(order); i++ {
+		p := order[(idx+i*step+len(order))%len(order)]
+		if sizes[p] == 0 {
+			continue
 		}
-	default:
-		// No focus set -- pick whichever pane has rows.
-		if tunnels > 0 {
-			st.focusPane = "tunnel"
-			st.tunnelCursor = 0
+		st.focusPane = p
+		if step > 0 {
+			*cursors[p] = 0
 		} else {
-			st.focusPane = "job"
-			st.jobCursor = 0
+			*cursors[p] = sizes[p] - 1
 		}
+		break
 	}
 	clampCursor(st)
 	st.forceRedraw = true
+}
+
+func indexOf(xs []string, v string) int {
+	for i, x := range xs {
+		if x == v {
+			return i
+		}
+	}
+	return -1
 }
 
 // handleUIKey is the input dispatcher. Returns false when the user
@@ -760,24 +854,27 @@ func renderDashboard(cfg *Config, jobs []*JobRecord, tunnelNames []string, st *u
 	btopActive(&sb, cfg)
 	btopDaemon(&sb)
 
+	mcpSnapshot := readMCPStatus()
+
 	if st == nil {
 		btopTunnels(&sb, cfg, tunnelNames, st)
 		btopJobs(&sb, jobs, st)
+		btopMCP(&sb, mcpSnapshot, st)
 	} else {
 		leftW, rightW, gap := splitColumnsWidth(dashboardWidth)
 		var leftBuf strings.Builder
 		withDashboardWidth(leftW, func() {
 			btopTunnels(&leftBuf, cfg, tunnelNames, st)
 			btopJobs(&leftBuf, jobs, st)
+			btopMCP(&leftBuf, mcpSnapshot, st)
 		})
 		var rightBuf strings.Builder
 		withDashboardWidth(rightW, func() {
-			btopDetail(&rightBuf, cfg, jobs, tunnelNames, st)
+			btopDetail(&rightBuf, cfg, jobs, tunnelNames, mcpSnapshot, st)
 		})
 		writeSideBySide(&sb, leftBuf.String(), rightBuf.String(), leftW, gap)
 	}
 
-	btopMCP(&sb)
 	btopGroups(&sb, cfg)
 	btopFooter(&sb, st)
 	if st != nil && st.confirm != nil {
@@ -1138,10 +1235,10 @@ func btopJobs(sb *strings.Builder, jobs []*JobRecord, st *uiState) {
 
 // btopDetail is the right-column panel: a live view of whatever the
 // cursor currently highlights. Updates automatically on every j/k /
-// arrow / Tab event so the user doesn't have to press Enter to "open"
-// a row -- ranger / mutt / lazygit pattern. Falls back to a hint when
-// nothing is selected (empty tunnels + empty jobs).
-func btopDetail(sb *strings.Builder, cfg *Config, jobs []*JobRecord, tunnelNames []string, st *uiState) {
+// arrow / Tab event so the user doesn't have to press Enter to
+// "open" a row -- ranger / mutt / lazygit pattern. Falls back to a
+// hint when nothing is selected.
+func btopDetail(sb *strings.Builder, cfg *Config, jobs []*JobRecord, tunnelNames []string, mcp mcpStatus, st *uiState) {
 	row := st.currentRow()
 	switch row.kind {
 	case "tunnel":
@@ -1154,9 +1251,47 @@ func btopDetail(sb *strings.Builder, cfg *Config, jobs []*JobRecord, tunnelNames
 			btopJobDetailColumn(sb, jobs[row.idx])
 			return
 		}
+	case "mcp":
+		if row.idx >= 0 && row.idx < len(mcp.RecentTools) {
+			btopMCPDetailColumn(sb, mcp.RecentTools[row.idx], mcp)
+			return
+		}
 	}
 	boxTop(sb, "detail")
 	boxLine(sb, ansiDim+"(no row selected -- move cursor with j/k or arrow keys)"+ansiReset)
+	boxBottom(sb)
+	fmt.Fprintln(sb)
+}
+
+// btopMCPDetailColumn renders one MCP tool call in the right column:
+// the parsed fields (name / dur / ok-or-err / when) plus a hint
+// pointing the user at `~/.srv/mcp.log` for the raw context if they
+// want the surrounding session output.
+func btopMCPDetailColumn(sb *strings.Builder, tc mcpToolCall, mcp mcpStatus) {
+	boxTop(sb, "mcp call detail")
+	boxLine(sb, btopKV("tool", ansiYellow+ansiBold+tc.Name+ansiReset))
+	boxLine(sb, btopKV("duration", ansiMagenta+tc.Dur+ansiReset))
+	status := dashStatus("ok", ansiGreen)
+	if !tc.OK {
+		status = dashStatus("err", ansiRed)
+	}
+	boxLine(sb, btopKV("result", status))
+	boxLine(sb, btopKV("when", tc.When.Format("2006-01-02 15:04:05")+dashMeta(" ("+fmtDuration(time.Since(tc.When))+" ago)")))
+	// Server context: which PID handled it (if still alive) or just
+	// "idle". MCP log doesn't always record the per-tool PID
+	// directly so this is a best-effort pointer.
+	if len(mcp.ActivePIDs) > 0 {
+		pids := make([]string, 0, len(mcp.ActivePIDs))
+		for _, p := range mcp.ActivePIDs {
+			pids = append(pids, strconv.Itoa(p))
+		}
+		boxLine(sb, btopKV("active", ansiGreen+strings.Join(pids, ", ")+ansiReset))
+	} else {
+		boxLine(sb, btopKV("active", dashMeta("none -- previous session")))
+	}
+	boxLine(sb, "")
+	boxLine(sb, ansiDim+"raw log: ~/.srv/mcp.log"+ansiReset)
+	boxLine(sb, ansiDim+"(read-only -- no actions available here)"+ansiReset)
 	boxBottom(sb)
 	fmt.Fprintln(sb)
 }
@@ -1230,34 +1365,43 @@ func btopTunnelDetailColumn(sb *strings.Builder, name string, cfg *Config) {
 	fmt.Fprintln(sb)
 }
 
-func btopMCP(sb *strings.Builder) {
-	st := readMCPStatus()
-	if !st.LogExists {
+// btopMCP renders the MCP panel: header row with daemon state +
+// optional active PIDs, then the recent tool-call list (selectable
+// row by row -- focused-pane visuals + cursor matching same shape
+// as Tunnels / Jobs).
+func btopMCP(sb *strings.Builder, mcp mcpStatus, st *uiState) {
+	if !mcp.LogExists {
 		return
 	}
-	boxTop(sb, "mcp")
-	if len(st.ActivePIDs) == 0 {
-		boxLine(sb, btopPair("state", dashStatus("idle", ansiDim), "last", fmtDuration(time.Since(st.LastActive))+" ago"))
+	focused := st != nil && st.focusPane == "mcp"
+	boxTopFocused(sb, fmt.Sprintf("mcp %d", len(mcp.RecentTools)), focused)
+	if len(mcp.ActivePIDs) == 0 {
+		boxLineFocused(sb, btopPair("state", dashStatus("idle", ansiDim), "last", fmtDuration(time.Since(mcp.LastActive))+" ago"), focused)
 	} else {
-		pids := make([]string, 0, len(st.ActivePIDs))
-		for _, p := range st.ActivePIDs {
+		pids := make([]string, 0, len(mcp.ActivePIDs))
+		for _, p := range mcp.ActivePIDs {
 			pids = append(pids, strconv.Itoa(p))
 		}
-		boxLine(sb, btopPair("state", dashStatus("running", ansiGreen), "pids", strings.Join(pids, ", ")))
+		boxLineFocused(sb, btopPair("state", dashStatus("running", ansiGreen), "pids", strings.Join(pids, ", ")), focused)
 	}
-	if len(st.RecentTools) > 0 {
-		boxLine(sb, ansiDim+"TOOL                  DUR      STATE    AGE"+ansiReset)
-		boxLine(sb, ansiDim+strings.Repeat("-", dashboardContentWidth)+ansiReset)
-		for _, tc := range st.RecentTools {
+	if len(mcp.RecentTools) > 0 {
+		boxLineFocused(sb, ansiDim+"  TOOL                  DUR      STATE    AGE"+ansiReset, focused)
+		boxLineFocused(sb, ansiDim+strings.Repeat("-", dashboardContentWidth)+ansiReset, focused)
+		for i, tc := range mcp.RecentTools {
 			status := dashStatus("ok", ansiGreen)
 			if !tc.OK {
 				status = dashStatus("err", ansiRed)
 			}
-			boxLine(sb, fmt.Sprintf("%-20s  %-7s  %-7s  %s",
-				ansiYellow+tc.Name+ansiReset, ansiMagenta+tc.Dur+ansiReset, status, dashMeta(fmtDuration(time.Since(tc.When))+" ago")))
+			row := fmt.Sprintf("  %-20s  %-7s  %-7s  %s",
+				ansiYellow+tc.Name+ansiReset, ansiMagenta+tc.Dur+ansiReset, status,
+				dashMeta(fmtDuration(time.Since(tc.When))+" ago"))
+			if st != nil && st.isSelected("mcp", i) {
+				row = ansiYellow + ansiBold + "> " + ansiReset + ansiReverse + row[2:] + ansiReset
+			}
+			boxLineFocused(sb, row, focused)
 		}
 	}
-	boxBottom(sb)
+	boxBottomFocused(sb, focused)
 	fmt.Fprintln(sb)
 }
 
@@ -1275,9 +1419,11 @@ func btopFooter(sb *strings.Builder, st *uiState) {
 		boxLine(sb, btopPair("focus", ansiYellow+ansiBold+strings.ToUpper(focus)+ansiReset, "mode", "window navigation"))
 		switch focus {
 		case "tunnel":
-			boxLine(sb, "actions: "+ansiYellow+"j/k"+ansiReset+" move  "+ansiYellow+"enter"+ansiReset+" details  "+ansiYellow+"space"+ansiReset+" up/down  "+ansiYellow+"x"+ansiReset+" remove  "+ansiYellow+"tab"+ansiReset+" next window")
+			boxLine(sb, "actions: "+ansiYellow+"j/k"+ansiReset+" move  "+ansiYellow+"space"+ansiReset+" up/down  "+ansiYellow+"x"+ansiReset+" remove  "+ansiYellow+"tab"+ansiReset+" next window  "+ansiYellow+"q"+ansiReset+" quit")
 		case "job":
-			boxLine(sb, "actions: "+ansiYellow+"j/k"+ansiReset+" move  "+ansiYellow+"enter"+ansiReset+" details  "+ansiYellow+"K"+ansiReset+" kill  "+ansiYellow+"a"+ansiReset+" show all  "+ansiYellow+"tab"+ansiReset+" next window")
+			boxLine(sb, "actions: "+ansiYellow+"j/k"+ansiReset+" move  "+ansiYellow+"K"+ansiReset+" kill  "+ansiYellow+"a"+ansiReset+" show all  "+ansiYellow+"tab"+ansiReset+" next window  "+ansiYellow+"q"+ansiReset+" quit")
+		case "mcp":
+			boxLine(sb, "actions: "+ansiYellow+"j/k"+ansiReset+" move  "+ansiDim+"(read-only)"+ansiReset+"  "+ansiYellow+"tab"+ansiReset+" next window  "+ansiYellow+"q"+ansiReset+" quit")
 		default:
 			boxLine(sb, "actions: "+ansiYellow+"tab"+ansiReset+" choose window  "+ansiYellow+"r"+ansiReset+" refresh  "+ansiYellow+"q"+ansiReset+" quit")
 		}
