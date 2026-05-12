@@ -198,6 +198,145 @@ func runRejectMessage(cmd, why string) string {
 	)
 }
 
+// Token-economy gates for MCP `run` / `run_stream`. The 64 KiB result
+// cap stops the model from drowning in output, but it doesn't stop
+// the WASTED tokens that get paid when the model asks for an
+// unbounded source and we serve them the wrong 64 KiB slice. Forcing
+// an explicit slicing decision usually returns more relevant content
+// AND saves tokens; the model can read the rejection and pick a
+// `head -n N` / `tail -n N` / `grep` / dedicated MCP tool path.
+
+var (
+	// catWithArg matches `cat <something>` at a command-position. We
+	// don't reject `cat` with no arg (it's just `stdin -> stdout`).
+	reBareCat = regexp.MustCompile(`(?i)(?:^|[;&|\n])\s*cat\s+\S`)
+	// dmesg / journalctl / find anywhere as a verb at command position.
+	reBareDmesg      = regexp.MustCompile(`(?i)(?:^|[;&|\n])\s*dmesg\b`)
+	reBareJournalctl = regexp.MustCompile(`(?i)(?:^|[;&|\n])\s*journalctl\b`)
+	reBareFind       = regexp.MustCompile(`(?i)(?:^|[;&|\n])\s*find\s+/`)
+
+	// Pipe into a limiter -- if we see this anywhere, downstream is
+	// bounded and we let the call through. Conservative list of
+	// commands that genuinely bound output.
+	reDownstreamLimiter = regexp.MustCompile(`(?i)\|\s*(head|tail|grep|awk|sed|wc|cut|jq|sort|uniq|column|less|more|fold|tr|xxd|od)\b`)
+	// head -n N / head -c N anywhere in the pipeline counts as a
+	// bound, even without piping (e.g. `head -n 100 file`).
+	reHeadBounded = regexp.MustCompile(`(?i)\bhead\s+-[cnN][= ]?\s*\d`)
+	// tail with -n N (default 10 lines, but explicit is explicit).
+	reTailBounded = regexp.MustCompile(`(?i)\btail\s+-n[= ]?\s*\d`)
+	// journalctl-flag detector. -u / --unit / --since / --until /
+	// -S / -U / -n / -g / --grep / -p / --priority / -k / -f all
+	// constrain output. Anchored to the `journalctl` token so a
+	// random `-u` elsewhere doesn't satisfy it.
+	reJournalctlFiltered = regexp.MustCompile(`(?i)\bjournalctl\b[^|;&\n]*?(\s-u\b|\s--unit\b|\s--since\b|\s--until\b|\s-S\b|\s-U\b|\s-n\b|\s-g\b|\s--grep\b|\s-p\b|\s--priority\b|\s-k\b|\s-f\b)`)
+	// find-flag detector. Any of the narrowing predicates counts.
+	reFindFiltered = regexp.MustCompile(`(?i)\bfind\b[^|;&\n]*?\s-(maxdepth|name|iname|type|newer|mtime|mmin|size|path|prune|regex|wholename)\b`)
+)
+
+// runRejectUnfiltered checks `cmd` (already quote-stripped) for
+// "dumps everything" patterns. Returns (label, message) when the
+// command would likely produce unbounded output; ("", "") to proceed.
+//
+// Patterns checked, in order:
+//   - `cat <file>`           (no native limit; demand slicing)
+//   - `dmesg`                (kernel ring buffer; demand filter pipe)
+//   - `journalctl ...`       (without -u / --since / -p / -g / -n / -k / -f)
+//   - `find /path ...`       (without -maxdepth / -name / -type / ...)
+//
+// Each check is short-circuited by a "downstream limiter": a pipe
+// into head / tail / grep / wc / ... is enough to call the output
+// bounded, since the model has made an explicit slicing decision.
+func runRejectUnfiltered(cmd string) (string, string) {
+	stripped := stripShellQuotedContent(cmd)
+	// Trust the model when there's any downstream limiter or an
+	// explicit head/tail -n N anywhere -- it has chosen a slice.
+	if reDownstreamLimiter.MatchString(stripped) ||
+		reHeadBounded.MatchString(stripped) ||
+		reTailBounded.MatchString(stripped) {
+		return "", ""
+	}
+
+	if reBareCat.MatchString(stripped) {
+		return "cat", "`cat <file>` returns the whole file with no native limit. Pick a slice:\n" +
+			"  run { command: \"head -n 100 <file>\" }\n" +
+			"  run { command: \"tail -n 100 <file>\" }\n" +
+			"  run { command: \"grep PATTERN <file>\" }\n" +
+			"  tail { path: \"<file>\", lines: 100 }   (dedicated MCP tool, no `cat` needed)"
+	}
+	if reBareDmesg.MatchString(stripped) {
+		return "dmesg", "`dmesg` dumps the entire kernel ring buffer (often hundreds of KB). Add a downstream slicer:\n" +
+			"  run { command: \"dmesg | tail -n 100\" }\n" +
+			"  run { command: \"dmesg | grep -i error\" }"
+	}
+	if reBareJournalctl.MatchString(stripped) && !reJournalctlFiltered.MatchString(stripped) {
+		return "journalctl", "`journalctl` with no filter returns the whole journal. Use the dedicated MCP tool:\n" +
+			"  journal { unit: \"nginx.service\", lines: 100 }\n" +
+			"or add a filter to the run call:\n" +
+			"  run { command: \"journalctl -u nginx -n 100\" }\n" +
+			"  run { command: \"journalctl --since '10 min ago' -p err\" }"
+	}
+	if reBareFind.MatchString(stripped) && !reFindFiltered.MatchString(stripped) {
+		return "find", "`find <path>` with no narrowing flags can traverse arbitrarily large trees. Add one of: -maxdepth N, -name PATTERN, -type f/d, -newer FILE, -mtime N.\n" +
+			"  run { command: \"find /var/log -maxdepth 2 -name '*.log'\" }"
+	}
+	return "", ""
+}
+
+// stripShellQuotedContent removes the contents (but not the
+// delimiters) of double / single-quoted strings in `s`. Used to keep
+// the unbounded-pattern matchers from false-positiving on `echo "cat
+// foo"` or `grep "journalctl" log`. Best-effort: backslash escapes
+// inside double quotes are honored, single-quoted runs are literal,
+// $'...' and heredocs are not modeled.
+func stripShellQuotedContent(s string) string {
+	var b strings.Builder
+	b.Grow(len(s))
+	inDouble, inSingle, escape := false, false, false
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		if escape {
+			escape = false
+			continue
+		}
+		if c == '\\' && inDouble {
+			escape = true
+			continue
+		}
+		if c == '"' && !inSingle {
+			inDouble = !inDouble
+			b.WriteByte(c)
+			continue
+		}
+		if c == '\'' && !inDouble {
+			inSingle = !inSingle
+			b.WriteByte(c)
+			continue
+		}
+		if inDouble || inSingle {
+			// Drop quoted byte but keep a placeholder space so word
+			// boundaries on either side of the quoted region still
+			// work (e.g. `echo "rm -rf"` shouldn't make `echo` and
+			// `-rf` look adjacent).
+			b.WriteByte(' ')
+			continue
+		}
+		b.WriteByte(c)
+	}
+	return b.String()
+}
+
+// runRejectUnfilteredMessage formats the rejection into the standard
+// MCP shape: a clear text explanation + structured metadata the
+// client can branch on.
+func runRejectUnfilteredMessage(label, body string) toolResult {
+	r := mcpTextErr("rejected: " + body)
+	r.StructuredContent = map[string]any{
+		"rejected_reason": "unbounded_output",
+		"pattern":         label,
+	}
+	return r
+}
+
 func mcpDetachedResult(rec *JobRecord) toolResult {
 	info := map[string]any{
 		"job_id":    rec.ID,
@@ -400,6 +539,13 @@ func handleMCPRun(args map[string]any, cfg *Config, profileOverride string) tool
 	if why := runRejectSync(cmd); why != "" {
 		return mcpTextErr(runRejectMessage(cmd, why))
 	}
+	// Token-economy gate: reject `cat <file>` / `dmesg` / unfiltered
+	// `journalctl` / unfiltered `find /` and friends -- they have no
+	// native upper bound, so even the 64 KiB result cap pays tokens for
+	// the wrong slice. Model is told exactly what slicer to add.
+	if label, msg := runRejectUnfiltered(cmd); label != "" {
+		return runRejectUnfilteredMessage(label, msg)
+	}
 	cwd := GetCwd(profName, prof)
 	res, _ := runRemoteCapture(prof, cwd, cmd)
 	text, truncatedBytes := buildMCPRunText(res, cwd)
@@ -440,6 +586,13 @@ func handleMCPRunStream(args map[string]any, cfg *Config, profileOverride string
 	confirm, _ := args["confirm"].(bool)
 	if blocked := guardCheckRisky("run_stream", cmd, confirm); blocked != nil {
 		return *blocked
+	}
+	// Same token-economy gate as plain `run` -- streaming makes the
+	// unbounded-source problem worse, not better, since progress
+	// notifications add their own token cost on top of the final
+	// result.
+	if label, msg := runRejectUnfiltered(cmd); label != "" {
+		return runRejectUnfilteredMessage(label, msg)
 	}
 	profName, prof, errResult := resolveMCPProfile(cfg, profileOverride)
 	if errResult != nil {
@@ -1532,7 +1685,7 @@ var mcpTools = []mcpTool{
 	{
 		def: toolDef{
 			Name:        "run",
-			Description: "Run a remote shell command. Synchronous by default (blocks until completion).\n\nREJECTED in synchronous mode (use background=true instead):\n  - `sleep N` where N > 5\n  - `tail -f`, `watch`, `journalctl -f` and similar never-terminating patterns\n\nFor anything expected to take more than ~10s (builds, installs, tests, big greps, sleep+poll loops), set background=true. The command starts as a detached job and returns a job_id immediately; then poll with wait_job in short (<=15s) chunks. Synchronous mode is bound by the client's per-tool timeout (Claude Code default 60s).",
+			Description: "Run a remote shell command. Synchronous by default (blocks until completion).\n\nREJECTED in synchronous mode (use background=true instead):\n  - `sleep N` where N > 5\n  - `tail -f`, `watch`, `journalctl -f` and similar never-terminating patterns\n\nREJECTED as unbounded-output (token economy -- add a slicer):\n  - `cat <file>`           -> use `head -n N <file>` or `tail -n N <file>` or the `tail` MCP tool\n  - `dmesg`                -> pipe into `tail -n N` or `grep PATTERN`\n  - `journalctl` w/o flags -> use the `journal` MCP tool or add -u/--since/-p/-g/-n\n  - `find /` w/o flags     -> add -maxdepth N / -name PATTERN / -type / etc.\nDownstream limiters (`| head`, `| tail`, `| grep`, `| wc`, etc.) satisfy the gate.\n\nFor anything expected to take more than ~10s (builds, installs, tests, big greps, sleep+poll loops), set background=true. The command starts as a detached job and returns a job_id immediately; then poll with wait_job in short (<=15s) chunks. Synchronous mode is bound by the client's per-tool timeout (Claude Code default 60s).",
 			InputSchema: map[string]any{
 				"type": "object",
 				"properties": map[string]any{
@@ -1586,7 +1739,7 @@ var mcpTools = []mcpTool{
 	{
 		def: toolDef{
 			Name:        "run_stream",
-			Description: "Streaming variant of `run`. Output is pushed to the client as `notifications/progress` messages while the command runs, then the final tool result delivers the full captured output. Use this for medium-length commands (~20-90s builds, tests, deploys) where synchronous `run` would risk the per-tool timeout: progress keeps the call alive, the model sees partial output mid-flight, and the final result still arrives as the authoritative payload.\n\nThe client must pass `_meta.progressToken` on tools/call for the notifications to be delivered -- without it, this falls back to a synchronous shape identical to `run`.",
+			Description: "Streaming variant of `run`. Output is pushed to the client as `notifications/progress` messages while the command runs, then the final tool result delivers the full captured output. Use this for medium-length commands (~20-90s builds, tests, deploys) where synchronous `run` would risk the per-tool timeout: progress keeps the call alive, the model sees partial output mid-flight, and the final result still arrives as the authoritative payload.\n\nThe client must pass `_meta.progressToken` on tools/call for the notifications to be delivered -- without it, this falls back to a synchronous shape identical to `run`.\n\nSame token-economy gate as `run`: `cat <file>` / bare `dmesg` / unfiltered `journalctl` / `find /` without flags are rejected. Streaming makes unbounded output WORSE (progress notifications add token cost on top of the final result), so the gate applies more aggressively here too.",
 			InputSchema: map[string]any{
 				"type": "object",
 				"properties": map[string]any{
