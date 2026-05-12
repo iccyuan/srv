@@ -48,6 +48,11 @@ type uiState struct {
 	lastFrame    string
 	prevLines    int
 	forceRedraw  bool
+	// needFullClear arms a \x1b[2J before the next frame write.
+	// Set by updateDashboardWidth on resize so the new (smaller)
+	// frame doesn't leave stripes of stale chars from the previous
+	// (larger) frame visible in the corners.
+	needFullClear bool
 	// liveness is the result of the last remote "which job ids have
 	// an .exit marker" sweep: jobID -> alive. Missing entries mean
 	// "unknown" (e.g. profile unreachable) and are treated as alive
@@ -61,15 +66,27 @@ type uiState struct {
 	// Persists across runs via ui-state.json; press `p` to cycle.
 	selectedProfile string
 	statusSetAt     time.Time // wall-clock when statusMsg was last set
-	// Snapshot of disk-backed state so rapid cursor / pane switches
-	// don't re-read config.toml + jobs.json + mcp.log (~50ms total)
-	// on every keystroke. Refreshed on tick, on forceRedraw, or when
-	// older than snapTTL. snapMCP holds the full status so both the
-	// list and the detail panel can read ActivePIDs without re-tailing.
-	snapCfg  *Config
-	snapJobs []*JobRecord
-	snapMCP  mcpStatus
-	snapAt   time.Time
+	// Snapshot of disk-backed and daemon-backed state. Refreshed on
+	// tick or after a destructive action; every other iteration of
+	// the render loop reads from these fields instead of re-doing
+	// the I/O. Without this cache every poll ticks costs roughly:
+	//
+	//	~10ms  GetCwd / TouchSession (sessions.json read + write)
+	//	~5ms   resolveProjectFile (cwd walk + stat)
+	//	~5ms   panelDaemon daemonDial + status RPC
+	//	~5ms   panelTunnels loadTunnelStatuses
+	//	~5ms   panelTunnelDetail loadTunnelStatuses (again)
+	//
+	// On a 150ms poll that's ~20% CPU just to redraw "nothing
+	// changed". With the cache idle redraws cost ~1ms (string build).
+	snapCfg          *Config
+	snapJobs         []*JobRecord
+	snapMCP          mcpStatus
+	snapDaemonResp   *daemonResponse
+	snapTunnelActive map[string]tunnelInfo
+	snapTunnelErrs   map[string]string
+	snapProject      *ProjectFile
+	snapAt           time.Time
 }
 
 // currentRow returns the uiRow under the cursor, or a zero uiRow
@@ -196,26 +213,28 @@ func cmdUI(cfg *Config) error {
 	}
 	const refreshEvery = 2 * time.Second
 	// pollEvery is how often the loop wakes when no key is pressed.
-	// Short enough that a terminal resize lands within ~150ms (without
-	// it, the redraw waited up to refreshEvery for the next keystroke
-	// or tick, which felt laggy). Snapshot reads stay gated by
-	// snapTTL, so the extra polls are essentially free.
-	const pollEvery = 150 * time.Millisecond
+	// Short enough that a terminal resize lands within ~50ms (Windows
+	// has no SIGWINCH so we have to poll). Snapshot reads stay gated
+	// by snapTTL and all per-render daemon/disk work now comes from
+	// the cache, so the extra polls are essentially free (~1ms each).
+	const pollEvery = 50 * time.Millisecond
 	const livenessTTL = 10 * time.Second
 	// snapTTL bounds how long the on-disk snapshot may be reused
 	// between keystrokes. Matches refreshEvery so a 2s idle tick
 	// naturally re-reads, while a flurry of cursor moves reuses the
-	// snapshot and stays snappy (the three disk reads otherwise add
-	// ~50ms per keystroke).
+	// snapshot and stays snappy.
 	const snapTTL = refreshEvery
 
 	for {
-		// Track terminal width so a resize lands cleanly on the next
-		// tick. We don't try to repaint mid-frame -- the user can hit
-		// `r` if they want it sooner, but a 2s tick is usually fast
-		// enough that they won't notice the lag.
+		// Poll terminal size every iteration (pollEvery ~= 50ms) so a
+		// resize repaints the dashboard within a frame instead of
+		// waiting for the next key press. On resize we also schedule
+		// a full clearScreen for the next write to prevent stale
+		// chars left over from the previous (wider/taller) frame.
 		if updateDashboardWidth() {
 			st.forceRedraw = true
+			st.needFullClear = true
+			st.lastFrame = "" // force diff check to detect "new"
 		}
 
 		// Refresh the snapshot only when the cache is older than
@@ -244,6 +263,9 @@ func cmdUI(cfg *Config) error {
 				}
 				st.snapMCP.RecentTools = kept
 			}
+			st.snapDaemonResp = fetchDaemonStatusForUI()
+			st.snapTunnelActive, st.snapTunnelErrs = loadTunnelStatuses()
+			st.snapProject = resolveProjectFile()
 			st.snapAt = time.Now()
 		}
 		fresh := st.snapCfg
@@ -292,14 +314,26 @@ func cmdUI(cfg *Config) error {
 		// rendering always goes through renderDashboard.
 		out := renderDashboard(fresh, jobs, tunnelNames, st)
 		if st.forceRedraw || out != st.lastFrame {
-			// Alt-screen redraw: home the cursor, write the new
-			// frame, then clear from cursor to end-of-screen. The
-			// terminal cell buffer keeps the pixels of unchanged
-			// rows from the previous frame already in place, so
-			// only the actually-different bytes flicker. No
-			// scrollback pollution -- when the user quits we
-			// `?1049l` back to the original shell.
-			fmt.Fprint(os.Stderr, cursorHome+out+clearEnd)
+			// Alt-screen redraw with per-line "clear to end-of-line"
+			// (\x1b[K before each \n): each row self-wipes any chars
+			// the previous frame left past its new endpoint, which is
+			// what makes a shrunk frame after terminal resize look
+			// clean instead of having phantom ╮s and ─s trailing off
+			// the right side of every row. \x1b[J at the bottom
+			// catches the case where the new frame has fewer rows
+			// than the old one.
+			//
+			// On the first frame after resize we emit a full \x1b[2J
+			// up-front: the per-line EL only handles trailing chars
+			// on the new frame's rows, not the rows that don't exist
+			// in the new frame at all.
+			prefix := cursorHome
+			if st.needFullClear {
+				prefix = clearScreen + cursorHome
+				st.needFullClear = false
+			}
+			flushed := strings.ReplaceAll(out, "\n", "\x1b[K\n")
+			fmt.Fprint(os.Stderr, prefix+flushed+clearEnd)
 			st.lastFrame = out
 			st.forceRedraw = false
 		}
@@ -913,9 +947,9 @@ func redrawDashboard(content string, prevLines int) {
 // output of stacked boxes is more useful than ascii-art columns.
 func renderDashboard(cfg *Config, jobs []*JobRecord, tunnelNames []string, st *uiState) string {
 	var sb strings.Builder
-	btopHeader(&sb, st)
-	btopActive(&sb, cfg, st)
-	btopDaemon(&sb, st)
+	panelHeader(&sb, st)
+	panelActive(&sb, cfg, st)
+	panelDaemon(&sb, st)
 
 	// Reuse the snapshot the main loop already tailed -- one disk
 	// read per snapTTL, not per redraw. Snapshot mode (st == nil) and
@@ -929,26 +963,26 @@ func renderDashboard(cfg *Config, jobs []*JobRecord, tunnelNames []string, st *u
 	}
 
 	if st == nil {
-		btopTunnels(&sb, cfg, tunnelNames, st)
-		btopJobs(&sb, jobs, st)
-		btopMCP(&sb, mcpSnapshot, st)
+		panelTunnels(&sb, cfg, tunnelNames, st)
+		panelJobs(&sb, jobs, st)
+		panelMCP(&sb, mcpSnapshot, st)
 	} else {
 		leftW, rightW, gap := splitColumnsWidth(dashboardWidth)
 		var leftBuf strings.Builder
 		withDashboardWidth(leftW, func() {
-			btopTunnels(&leftBuf, cfg, tunnelNames, st)
-			btopJobs(&leftBuf, jobs, st)
-			btopMCP(&leftBuf, mcpSnapshot, st)
+			panelTunnels(&leftBuf, cfg, tunnelNames, st)
+			panelJobs(&leftBuf, jobs, st)
+			panelMCP(&leftBuf, mcpSnapshot, st)
 		})
 		var rightBuf strings.Builder
 		withDashboardWidth(rightW, func() {
-			btopDetail(&rightBuf, cfg, jobs, tunnelNames, mcpSnapshot, st)
+			panelDetail(&rightBuf, cfg, jobs, tunnelNames, mcpSnapshot, st)
 		})
 		writeSideBySide(&sb, leftBuf.String(), rightBuf.String(), leftW, gap)
 	}
 
-	btopGroups(&sb, cfg)
-	btopFooter(&sb, st)
+	panelGroups(&sb, cfg)
+	panelFooter(&sb, st)
 	if st != nil && st.confirm != nil {
 		renderConfirmPopup(&sb, st.confirm)
 	}
@@ -974,7 +1008,7 @@ func splitColumnsWidth(total int) (left, right, gap int) {
 
 // withDashboardWidth runs `fn` with the package-level
 // dashboardWidth / dashboardContentWidth temporarily clamped to
-// `w`, then restores. Lets the existing btop* renderers (which
+// `w`, then restores. Lets the existing panel* renderers (which
 // read those globals) draw a smaller box for one column without
 // having to thread `width` through every helper signature.
 func withDashboardWidth(w int, fn func()) {
@@ -1023,7 +1057,7 @@ func writeSideBySide(sb *strings.Builder, left, right string, leftWidth, gap int
 }
 
 // splitDashboardLines splits panel output and drops the trailing
-// empty line that each btop* writes for vertical separation
+// empty line that each panel* writes for vertical separation
 // (irrelevant when stitching columns together).
 func splitDashboardLines(s string) []string {
 	if s == "" {
@@ -1053,6 +1087,46 @@ func boxColor(focused bool) string {
 func boxTop(sb *strings.Builder, title string)    { boxTopFocused(sb, title, false) }
 func boxBottom(sb *strings.Builder)               { boxBottomFocused(sb, false) }
 func boxLine(sb *strings.Builder, content string) { boxLineFocused(sb, content, false) }
+
+// boxTopWithHint draws the same panel header as boxTop but also
+// embeds a dim right-aligned hint in the top border (typically
+// "(p switch)" / "(space toggle)" / similar shortcut advertisements
+// for the panel's primary action). Keeps key hints visually anchored
+// to the affected panel without taking a content row.
+func boxTopWithHint(sb *strings.Builder, title, hint string, focused bool) {
+	border := boxColor(focused)
+	label := ""
+	if title != "" {
+		t := strings.ToUpper(title)
+		if focused {
+			label = " " + ansiReset + ansiBold + ansiYellow + "▸ " + t + ansiReset + border + " "
+		} else {
+			label = " " + ansiReset + ansiBold + ansiCyan + t + ansiReset + border + " "
+		}
+	}
+	hintLabel := ""
+	if hint != "" {
+		hintLabel = " " + ansiReset + ansiDim + hint + ansiReset + border + " "
+	}
+	labelVis := visualWidth(label)
+	hintVis := visualWidth(hintLabel)
+	remain := dashboardWidth - 2 - labelVis - hintVis
+	if remain < 0 {
+		remain = 0
+	}
+	left := 2
+	if remain < left {
+		left = remain
+	}
+	right := remain - left
+	fmt.Fprintf(sb, "%s╭%s%s%s%s%s╮%s\n",
+		border,
+		strings.Repeat("─", left),
+		label,
+		strings.Repeat("─", right),
+		hintLabel,
+		border, ansiReset)
+}
 
 // boxTopFocused draws a rounded-corner panel header with the title
 // embedded near the top-left, rustnet / bottom -style. Focused panels
@@ -1116,13 +1190,13 @@ func fitPlain(s string, width int) string {
 	return s[:width-3] + "..."
 }
 
-func btopKV(key, value string) string {
+func kvLine(key, value string) string {
 	return ansiDim + fmt.Sprintf("%-9s", strings.ToUpper(key)+":") + ansiReset + " " + value
 }
 
-func btopPair(leftLabel, leftValue, rightLabel, rightValue string) string {
-	left := btopKV(leftLabel, leftValue)
-	right := btopKV(rightLabel, rightValue)
+func kvPair(leftLabel, leftValue, rightLabel, rightValue string) string {
+	left := kvLine(leftLabel, leftValue)
+	right := kvLine(rightLabel, rightValue)
 	spaces := dashboardContentWidth - visualWidth(left) - visualWidth(right)
 	if spaces < 2 {
 		spaces = 2
@@ -1130,7 +1204,7 @@ func btopPair(leftLabel, leftValue, rightLabel, rightValue string) string {
 	return left + strings.Repeat(" ", spaces) + right
 }
 
-func btopHeader(sb *strings.Builder, st *uiState) {
+func panelHeader(sb *strings.Builder, st *uiState) {
 	boxTop(sb, "srv")
 	boxLine(sb, ansiBold+ansiMagenta+"SRV UI"+ansiReset+"  "+ansiDim+"windowed control dashboard"+ansiReset)
 	if st == nil {
@@ -1150,13 +1224,15 @@ func btopHeader(sb *strings.Builder, st *uiState) {
 	fmt.Fprintln(sb)
 }
 
-// btopActive renders the "what am I looking at" header as a single
+// panelActive renders the "what am I looking at" header as a single
 // inline row: profile · target · cwd · pinned. Compact form so a
 // long hostname or project path doesn't push us onto a second line
 // that the terminal then visually wraps; each section truncates
 // inline when the running total approaches dashboardContentWidth.
-func btopActive(sb *strings.Builder, cfg *Config, st *uiState) {
-	boxTop(sb, "active")
+// The "p switch" key hint lives in the box title so the content row
+// stays free for the actual data.
+func panelActive(sb *strings.Builder, cfg *Config, st *uiState) {
+	boxTopWithHint(sb, "active", "p switch", false)
 	name, prof := lookupSelectedProfile(cfg, st)
 	if prof == nil {
 		boxLine(sb, ansiDim+"no profile selected"+ansiReset)
@@ -1171,21 +1247,45 @@ func btopActive(sb *strings.Builder, cfg *Config, st *uiState) {
 	if prof.GetPort() != 22 {
 		target += ":" + strconv.Itoa(prof.GetPort())
 	}
-	cwd := GetCwd(name, prof)
+	var pf *ProjectFile
+	if st != nil {
+		pf = st.snapProject
+	} else {
+		pf = resolveProjectFile()
+	}
+	cwd := uiCwd(prof, pf)
 	parts := []string{
 		ansiYellow + ansiBold + name + ansiReset,
 		ansiCyan + target + ansiReset,
-		dashPath(cwd),
 	}
-	if pf := resolveProjectFile(); pf != nil {
+	if cwd != "" {
+		parts = append(parts, dashPath(cwd))
+	}
+	if pf != nil {
 		parts = append(parts, ansiDim+"pinned "+ansiReset+dashPath(pf.Path))
 	}
-	// `p` cycles -- advertise it inline so the user doesn't have to
-	// read the help box to find the key.
-	hint := ansiDim + "(p switch)" + ansiReset
-	boxLine(sb, fitInlineParts(parts, hint, dashboardContentWidth))
+	boxLine(sb, fitInlineParts(parts, "", dashboardContentWidth))
 	boxBottom(sb)
 	fmt.Fprintln(sb)
+}
+
+// uiCwd is the dashboard's cwd resolver. Deliberately does NOT
+// consult sessions.json -- the UI is decoupled from the shell that
+// launched it (per "ui 不和 shell 绑定"). TouchSession's read+write
+// also dominated the per-render cost, so skipping it makes profile
+// switches feel instant. Order of precedence: $SRV_CWD env > pinned
+// project file > profile.default_cwd.
+func uiCwd(prof *Profile, pf *ProjectFile) string {
+	if env := os.Getenv("SRV_CWD"); env != "" {
+		return env
+	}
+	if pf != nil && pf.Cwd != "" {
+		return pf.Cwd
+	}
+	if prof != nil {
+		return prof.GetDefaultCwd()
+	}
+	return ""
 }
 
 // lookupSelectedProfile reads the dashboard's chosen profile from
@@ -1276,19 +1376,21 @@ func ellipsisAnsiRight(s string, w int) string {
 	return out.String()
 }
 
-func btopDaemon(sb *strings.Builder, st *uiState) {
+// panelDaemon renders daemon state from the cached snapshot -- never
+// dials inline. The main loop refreshes st.snapDaemonResp at most
+// once per snapTTL (2s); without that, each render fired a fresh
+// daemonDial+status RPC, which at the 150ms poll interval meant
+// 6-7 socket round-trips per second.
+func panelDaemon(sb *strings.Builder, st *uiState) {
 	boxTop(sb, "daemon")
-	conn := daemonDial(300 * time.Millisecond)
-	if conn == nil {
-		boxLine(sb, dashStatus("stopped", ansiDim))
-		boxBottom(sb)
-		fmt.Fprintln(sb)
-		return
+	var resp *daemonResponse
+	if st != nil {
+		resp = st.snapDaemonResp
+	} else {
+		resp = fetchDaemonStatusForUI()
 	}
-	defer conn.Close()
-	resp, err := daemonCall(conn, daemonRequest{Op: "status"}, time.Second)
-	if err != nil || resp == nil || !resp.OK {
-		boxLine(sb, dashStatus("unreachable", ansiRed))
+	if resp == nil {
+		boxLine(sb, dashStatus("stopped", ansiDim))
 		boxBottom(sb)
 		fmt.Fprintln(sb)
 		return
@@ -1306,7 +1408,23 @@ func btopDaemon(sb *strings.Builder, st *uiState) {
 	fmt.Fprintln(sb)
 }
 
-func btopGroups(sb *strings.Builder, cfg *Config) {
+// fetchDaemonStatusForUI does a single status RPC and returns the
+// response, or nil if the daemon isn't reachable. Used by the main
+// loop's snapshot refresh and by the snapshot-mode (st==nil) fallback.
+func fetchDaemonStatusForUI() *daemonResponse {
+	conn := daemonDial(300 * time.Millisecond)
+	if conn == nil {
+		return nil
+	}
+	defer conn.Close()
+	resp, err := daemonCall(conn, daemonRequest{Op: "status"}, time.Second)
+	if err != nil || resp == nil || !resp.OK {
+		return nil
+	}
+	return resp
+}
+
+func panelGroups(sb *strings.Builder, cfg *Config) {
 	if len(cfg.Groups) == 0 {
 		return
 	}
@@ -1327,12 +1445,19 @@ func btopGroups(sb *strings.Builder, cfg *Config) {
 	fmt.Fprintln(sb)
 }
 
-func btopTunnels(sb *strings.Builder, cfg *Config, names []string, st *uiState) {
+func panelTunnels(sb *strings.Builder, cfg *Config, names []string, st *uiState) {
 	if len(names) == 0 {
 		return
 	}
 	focused := st != nil && st.focusPane == "tunnel"
-	active, errs := loadTunnelStatuses()
+	var active map[string]tunnelInfo
+	var errs map[string]string
+	if st != nil {
+		active = st.snapTunnelActive
+		errs = st.snapTunnelErrs
+	} else {
+		active, errs = loadTunnelStatuses()
+	}
 	title := fmt.Sprintf("tunnels %d", len(names))
 	boxTopFocused(sb, title, focused)
 	boxLineFocused(sb, ansiDim+"  NAME          TYPE     SPEC / STATE"+ansiReset, focused)
@@ -1369,7 +1494,7 @@ func btopTunnels(sb *strings.Builder, cfg *Config, names []string, st *uiState) 
 	fmt.Fprintln(sb)
 }
 
-func btopJobs(sb *strings.Builder, jobs []*JobRecord, st *uiState) {
+func panelJobs(sb *strings.Builder, jobs []*JobRecord, st *uiState) {
 	hidden := 0
 	if st != nil {
 		hidden = st.hiddenJobs
@@ -1408,27 +1533,27 @@ func btopJobs(sb *strings.Builder, jobs []*JobRecord, st *uiState) {
 	fmt.Fprintln(sb)
 }
 
-// btopDetail is the right-column panel: a live view of whatever the
+// panelDetail is the right-column panel: a live view of whatever the
 // cursor currently highlights. Updates automatically on every
 // arrow / Tab event so the user doesn't have to press Enter to
 // "open" a row -- ranger / mutt / lazygit pattern. Falls back to a
 // hint when nothing is selected.
-func btopDetail(sb *strings.Builder, cfg *Config, jobs []*JobRecord, tunnelNames []string, mcp mcpStatus, st *uiState) {
+func panelDetail(sb *strings.Builder, cfg *Config, jobs []*JobRecord, tunnelNames []string, mcp mcpStatus, st *uiState) {
 	row := st.currentRow()
 	switch row.kind {
 	case "tunnel":
 		if row.idx >= 0 && row.idx < len(tunnelNames) {
-			btopTunnelDetailColumn(sb, tunnelNames[row.idx], cfg)
+			panelTunnelDetail(sb, tunnelNames[row.idx], cfg, st)
 			return
 		}
 	case "job":
 		if row.idx >= 0 && row.idx < len(jobs) {
-			btopJobDetailColumn(sb, jobs[row.idx])
+			panelJobDetail(sb, jobs[row.idx])
 			return
 		}
 	case "mcp":
 		if row.idx >= 0 && row.idx < len(mcp.RecentTools) {
-			btopMCPDetailColumn(sb, mcp.RecentTools[row.idx], mcp)
+			panelMCPDetail(sb, mcp.RecentTools[row.idx], mcp)
 			return
 		}
 	}
@@ -1438,22 +1563,22 @@ func btopDetail(sb *strings.Builder, cfg *Config, jobs []*JobRecord, tunnelNames
 	fmt.Fprintln(sb)
 }
 
-// btopMCPDetailColumn renders one MCP tool call in the right column:
+// panelMCPDetail renders one MCP tool call in the right column:
 // the parsed fields (name / dur / ok-or-err / when) plus the server
 // PID that handled it. We cross-reference against mcp.ActivePIDs so
 // the row reads "12345 (alive)" if that MCP server is still running,
 // or "12345 (previous session)" if it has since exited -- useful
 // when debugging "which Claude Code instance issued this call".
-func btopMCPDetailColumn(sb *strings.Builder, tc mcpToolCall, mcp mcpStatus) {
+func panelMCPDetail(sb *strings.Builder, tc mcpToolCall, mcp mcpStatus) {
 	boxTop(sb, "mcp call detail")
-	boxLine(sb, btopKV("tool", ansiYellow+ansiBold+tc.Name+ansiReset))
-	boxLine(sb, btopKV("duration", ansiMagenta+tc.Dur+ansiReset))
+	boxLine(sb, kvLine("tool", ansiYellow+ansiBold+tc.Name+ansiReset))
+	boxLine(sb, kvLine("duration", ansiMagenta+tc.Dur+ansiReset))
 	status := dashStatus("ok", ansiGreen)
 	if !tc.OK {
 		status = dashStatus("err", ansiRed)
 	}
-	boxLine(sb, btopKV("result", status))
-	boxLine(sb, btopKV("when", tc.When.Format("2006-01-02 15:04:05")+dashMeta(" ("+fmtDuration(time.Since(tc.When))+" ago)")))
+	boxLine(sb, kvLine("result", status))
+	boxLine(sb, kvLine("when", tc.When.Format("2006-01-02 15:04:05")+dashMeta(" ("+fmtDuration(time.Since(tc.When))+" ago)")))
 
 	pidLabel := strconv.Itoa(tc.PID)
 	if tc.PID == 0 {
@@ -1463,7 +1588,7 @@ func btopMCPDetailColumn(sb *strings.Builder, tc mcpToolCall, mcp mcpStatus) {
 	} else {
 		pidLabel = pidLabel + dashMeta(" (previous session)")
 	}
-	boxLine(sb, btopKV("server pid", pidLabel))
+	boxLine(sb, kvLine("server pid", pidLabel))
 
 	boxLine(sb, "")
 	boxLine(sb, ansiDim+"raw log: ~/.srv/mcp.log"+ansiReset)
@@ -1484,24 +1609,24 @@ func pidIsActive(pid int, active []int) bool {
 	return false
 }
 
-// btopJobDetailColumn renders job details fit for the right column.
+// panelJobDetail renders job details fit for the right column.
 // Same fields as the old full-screen renderJobDetail, just laid out
 // against the narrower width.
-func btopJobDetailColumn(sb *strings.Builder, j *JobRecord) {
+func panelJobDetail(sb *strings.Builder, j *JobRecord) {
 	boxTop(sb, "job detail")
-	boxLine(sb, btopKV("id", dashName(j.ID)))
-	boxLine(sb, btopKV("profile", ansiCyan+j.Profile+ansiReset))
-	boxLine(sb, btopKV("pid", strconv.Itoa(j.Pid)))
+	boxLine(sb, kvLine("id", dashName(j.ID)))
+	boxLine(sb, kvLine("profile", ansiCyan+j.Profile+ansiReset))
+	boxLine(sb, kvLine("pid", strconv.Itoa(j.Pid)))
 	started := j.Started
 	if t, ok := parseISOLike(j.Started); ok {
 		started = j.Started + dashMeta(" ("+fmtDuration(time.Since(t))+" ago)")
 	}
-	boxLine(sb, btopKV("started", started))
+	boxLine(sb, kvLine("started", started))
 	if j.Cwd != "" {
-		boxLine(sb, btopKV("cwd", dashPath(fitPlain(j.Cwd, dashboardContentWidth-10))))
+		boxLine(sb, kvLine("cwd", dashPath(fitPlain(j.Cwd, dashboardContentWidth-10))))
 	}
 	if j.Log != "" {
-		boxLine(sb, btopKV("log", dashPath(fitPlain(j.Log, dashboardContentWidth-10))))
+		boxLine(sb, kvLine("log", dashPath(fitPlain(j.Log, dashboardContentWidth-10))))
 	}
 	boxLine(sb, "")
 	boxLine(sb, ansiDim+"COMMAND:"+ansiReset)
@@ -1514,11 +1639,11 @@ func btopJobDetailColumn(sb *strings.Builder, j *JobRecord) {
 	fmt.Fprintln(sb)
 }
 
-// btopTunnelDetailColumn renders tunnel details for the right
+// panelTunnelDetail renders tunnel details for the right
 // column. Surfaces last-attempt errors prominently -- that's the
 // info the user most wants when something looks "stopped" but they
 // expected "running".
-func btopTunnelDetailColumn(sb *strings.Builder, name string, cfg *Config) {
+func panelTunnelDetail(sb *strings.Builder, name string, cfg *Config, st *uiState) {
 	def := cfg.Tunnels[name]
 	if def == nil {
 		boxTop(sb, "tunnel detail")
@@ -1528,24 +1653,31 @@ func btopTunnelDetailColumn(sb *strings.Builder, name string, cfg *Config) {
 		return
 	}
 	boxTop(sb, "tunnel detail")
-	boxLine(sb, btopKV("name", dashName(name)))
-	boxLine(sb, btopKV("type", ansiMagenta+def.Type+ansiReset))
-	boxLine(sb, btopKV("spec", dashPath(def.Spec)))
-	boxLine(sb, btopKV("profile", ansiCyan+tunnelProfileLabel(def)+ansiReset))
-	boxLine(sb, btopKV("autostart", boolLabel(def.Autostart)))
-	active, errs := loadTunnelStatuses()
+	boxLine(sb, kvLine("name", dashName(name)))
+	boxLine(sb, kvLine("type", ansiMagenta+def.Type+ansiReset))
+	boxLine(sb, kvLine("spec", dashPath(def.Spec)))
+	boxLine(sb, kvLine("profile", ansiCyan+tunnelProfileLabel(def)+ansiReset))
+	boxLine(sb, kvLine("autostart", boolLabel(def.Autostart)))
+	var active map[string]tunnelInfo
+	var errs map[string]string
+	if st != nil {
+		active = st.snapTunnelActive
+		errs = st.snapTunnelErrs
+	} else {
+		active, errs = loadTunnelStatuses()
+	}
 	if a, ok := active[name]; ok {
-		boxLine(sb, btopKV("state", dashStatus("running", ansiGreen)))
-		boxLine(sb, btopKV("listen", dashPath(a.Listen)))
+		boxLine(sb, kvLine("state", dashStatus("running", ansiGreen)))
+		boxLine(sb, kvLine("listen", dashPath(a.Listen)))
 	} else if msg, ok := errs[name]; ok {
-		boxLine(sb, btopKV("state", dashStatus("failed", ansiRed)))
+		boxLine(sb, kvLine("state", dashStatus("failed", ansiRed)))
 		boxLine(sb, "")
 		boxLine(sb, ansiRed+ansiBold+"ERROR:"+ansiReset)
 		for _, line := range wrapText(msg, dashboardContentWidth-2) {
 			boxLine(sb, "  "+ansiRed+line+ansiReset)
 		}
 	} else {
-		boxLine(sb, btopKV("state", dashStatus("stopped", ansiDim)))
+		boxLine(sb, kvLine("state", dashStatus("stopped", ansiDim)))
 	}
 	boxLine(sb, "")
 	boxLine(sb, ansiDim+"press "+ansiYellow+ansiBold+"Space"+ansiReset+ansiDim+" up/down, "+ansiYellow+ansiBold+"x"+ansiReset+ansiDim+" remove"+ansiReset)
@@ -1553,24 +1685,24 @@ func btopTunnelDetailColumn(sb *strings.Builder, name string, cfg *Config) {
 	fmt.Fprintln(sb)
 }
 
-// btopMCP renders the MCP panel: header row with daemon state +
+// panelMCP renders the MCP panel: header row with daemon state +
 // optional active PIDs, then the recent tool-call list (selectable
 // row by row -- focused-pane visuals + cursor matching same shape
 // as Tunnels / Jobs).
-func btopMCP(sb *strings.Builder, mcp mcpStatus, st *uiState) {
+func panelMCP(sb *strings.Builder, mcp mcpStatus, st *uiState) {
 	if !mcp.LogExists {
 		return
 	}
 	focused := st != nil && st.focusPane == "mcp"
 	boxTopFocused(sb, fmt.Sprintf("mcp %d", len(mcp.RecentTools)), focused)
 	if len(mcp.ActivePIDs) == 0 {
-		boxLineFocused(sb, btopPair("state", dashStatus("idle", ansiDim), "last", fmtDuration(time.Since(mcp.LastActive))+" ago"), focused)
+		boxLineFocused(sb, kvPair("state", dashStatus("idle", ansiDim), "last", fmtDuration(time.Since(mcp.LastActive))+" ago"), focused)
 	} else {
 		pids := make([]string, 0, len(mcp.ActivePIDs))
 		for _, p := range mcp.ActivePIDs {
 			pids = append(pids, strconv.Itoa(p))
 		}
-		boxLineFocused(sb, btopPair("state", dashStatus("running", ansiGreen), "pids", strings.Join(pids, ", ")), focused)
+		boxLineFocused(sb, kvPair("state", dashStatus("running", ansiGreen), "pids", strings.Join(pids, ", ")), focused)
 	}
 	if len(mcp.RecentTools) > 0 {
 		boxLineFocused(sb, ansiDim+"  TOOL                  DUR      STATE    AGE"+ansiReset, focused)
@@ -1593,7 +1725,7 @@ func btopMCP(sb *strings.Builder, mcp mcpStatus, st *uiState) {
 	fmt.Fprintln(sb)
 }
 
-func btopFooter(sb *strings.Builder, st *uiState) {
+func panelFooter(sb *strings.Builder, st *uiState) {
 	boxTop(sb, "help")
 	if st == nil {
 		boxLine(sb, ansiDim+"snapshot complete"+ansiReset)
@@ -1604,7 +1736,7 @@ func btopFooter(sb *strings.Builder, st *uiState) {
 		if focus == "" {
 			focus = "none"
 		}
-		boxLine(sb, btopPair("focus", ansiYellow+ansiBold+strings.ToUpper(focus)+ansiReset, "mode", "window navigation"))
+		boxLine(sb, kvPair("focus", ansiYellow+ansiBold+strings.ToUpper(focus)+ansiReset, "mode", "window navigation"))
 		switch focus {
 		case "tunnel":
 			boxLine(sb, "actions: "+ansiYellow+"↑/↓"+ansiReset+" move  "+ansiYellow+"space"+ansiReset+" up/down  "+ansiYellow+"x"+ansiReset+" remove  "+ansiYellow+"tab"+ansiReset+" next window  "+ansiYellow+"q"+ansiReset+" quit")
@@ -1838,6 +1970,7 @@ func wrapText(s string, width int) []string {
 // snapshot mode where no terminal size is reported.
 var dashboardWidth = 88
 var dashboardContentWidth = dashboardWidth - 4
+var dashboardHeight = 24
 
 // Alt-screen / cursor-control ANSI sequences. Same xterm extensions
 // every TUI app uses (top / htop / btop / vim / rustnet).
@@ -1859,10 +1992,13 @@ const (
 )
 
 // updateDashboardWidth re-reads terminalSize() and updates the
-// package-level width vars. Returns true if the width actually
-// changed (caller can use it to force a full redraw on resize).
+// package-level width / height vars. Returns true if either axis
+// changed -- the caller uses it to schedule a full clearScreen for
+// the next frame so a shrink doesn't leave stale chars behind, and
+// to bump forceRedraw so the new frame is flushed even when the
+// snapshot data itself is unchanged.
 func updateDashboardWidth() bool {
-	w, _ := terminalSize()
+	w, h := terminalSize()
 	if w <= 0 {
 		return false
 	}
@@ -1872,11 +2008,15 @@ func updateDashboardWidth() bool {
 	if w > dashboardMaxWidth {
 		w = dashboardMaxWidth
 	}
-	if w == dashboardWidth {
+	if h <= 0 {
+		h = dashboardHeight
+	}
+	if w == dashboardWidth && h == dashboardHeight {
 		return false
 	}
 	dashboardWidth = w
 	dashboardContentWidth = w - 4
+	dashboardHeight = h
 	return true
 }
 
