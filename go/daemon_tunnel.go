@@ -70,7 +70,6 @@ func (s *daemonState) handleTunnelDown(req daemonRequest) daemonResponse {
 
 func (s *daemonState) handleTunnelList(req daemonRequest) daemonResponse {
 	s.tunnelsMu.Lock()
-	defer s.tunnelsMu.Unlock()
 	out := make([]tunnelInfo, 0, len(s.tunnels))
 	for _, at := range s.tunnels {
 		out = append(out, tunnelInfo{
@@ -82,13 +81,50 @@ func (s *daemonState) handleTunnelList(req daemonRequest) daemonResponse {
 			Started: at.startedAt.Unix(),
 		})
 	}
-	return daemonResponse{OK: true, Tunnels: out}
+	s.tunnelsMu.Unlock()
+
+	s.tunnelErrMu.Lock()
+	errs := make(map[string]string, len(s.tunnelErr))
+	for name, msg := range s.tunnelErr {
+		errs[name] = msg
+	}
+	s.tunnelErrMu.Unlock()
+	return daemonResponse{OK: true, Tunnels: out, TunnelErrors: errs}
+}
+
+// recordTunnelErr / clearTunnelErr are the two operations on the
+// per-tunnel last-error cache. Both take the lock briefly so they
+// can be called from anywhere in the startTunnel flow.
+func (s *daemonState) recordTunnelErr(name string, err error) {
+	if err == nil {
+		return
+	}
+	s.tunnelErrMu.Lock()
+	s.tunnelErr[name] = err.Error()
+	s.tunnelErrMu.Unlock()
+}
+
+func (s *daemonState) clearTunnelErr(name string) {
+	s.tunnelErrMu.Lock()
+	delete(s.tunnelErr, name)
+	s.tunnelErrMu.Unlock()
 }
 
 // startTunnel resolves the profile, opens (or reuses) the SSH client,
 // boots the forwarder goroutine, and registers the tunnel as active.
 // Returns the *activeTunnel so the caller can read .listen for echo.
-func (s *daemonState) startTunnel(name string, def *TunnelDef) (*activeTunnel, error) {
+// On any failure path the error is also recorded in s.tunnelErr so
+// `tunnel_list` can surface "last try failed for X" to the user;
+// on success any prior recorded error is cleared.
+func (s *daemonState) startTunnel(name string, def *TunnelDef) (at *activeTunnel, err error) {
+	defer func() {
+		if err != nil {
+			s.recordTunnelErr(name, err)
+		} else {
+			s.clearTunnelErr(name)
+		}
+	}()
+
 	// Resolve profile NOW so up-time errors (missing profile / bad
 	// spec) surface to the user rather than getting buried in a
 	// background goroutine.
@@ -116,7 +152,7 @@ func (s *daemonState) startTunnel(name string, def *TunnelDef) (*activeTunnel, e
 		return nil, fmt.Errorf("dial profile %q: %w", profileName, err)
 	}
 
-	at := &activeTunnel{
+	at = &activeTunnel{
 		name:      name,
 		def:       def,
 		profile:   profileName,

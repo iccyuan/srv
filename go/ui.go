@@ -764,10 +764,20 @@ func renderTunnelDetail(name string, cfg *Config, st *uiState) string {
 	dashField(&sb, "spec", dashPath(def.Spec))
 	dashField(&sb, "profile", ansiCyan+tunnelProfileLabel(def)+ansiReset)
 	dashField(&sb, "autostart", boolLabel(def.Autostart))
-	active := loadActiveTunnels()
+	active, errs := loadTunnelStatuses()
 	if a, ok := active[name]; ok {
 		dashField(&sb, "state", dashStatus("running", ansiGreen))
 		dashField(&sb, "listen", dashPath(a.Listen))
+	} else if msg, ok := errs[name]; ok {
+		dashField(&sb, "state", dashStatus("failed", ansiRed))
+		// Errors can be wordy ("dial profile X: ssh: handshake
+		// failed: connect to ... timeout"). Show on its own block
+		// rather than squeezing into one field row.
+		fmt.Fprintln(&sb)
+		fmt.Fprintf(&sb, "  %sERROR:%s\n", ansiRed+ansiBold, ansiReset)
+		for _, line := range wrapText(msg, 72) {
+			fmt.Fprintf(&sb, "    %s%s%s\n", ansiRed, line, ansiReset)
+		}
 	} else {
 		dashField(&sb, "state", dashStatus("stopped", ansiDim))
 	}
@@ -967,20 +977,28 @@ func dashGroups(sb *strings.Builder, cfg *Config) {
 // status. Caller passes the already-sorted name slice (same slice
 // the orchestrator put into st.rows) so the cursor index matches
 // the rendered row index exactly.
+//
+// Status precedence: running > failed > stopped. A tunnel that's
+// currently up is shown green even if a prior attempt errored; the
+// error gets cleared on the next successful start anyway.
 func dashTunnels(sb *strings.Builder, cfg *Config, names []string, st *uiState) {
 	if len(names) == 0 {
 		return
 	}
-	active := loadActiveTunnels()
+	active, errs := loadTunnelStatuses()
 	dashSectionCount(sb, "Tunnels", len(names))
 	dashTableHeader(sb, "  NAME          TYPE     SPEC / STATE")
 	for i, n := range names {
 		def := cfg.Tunnels[n]
 		status := dashStatus("stopped", ansiDim)
 		extra := ""
+		var errMsg string
 		if a, ok := active[n]; ok {
 			status = dashStatus("running", ansiGreen)
 			extra = "  listen=" + a.Listen
+		} else if msg, ok := errs[n]; ok {
+			status = dashStatus("failed", ansiRed)
+			errMsg = msg
 		}
 		flag := ""
 		if def.Autostart {
@@ -1000,6 +1018,12 @@ func dashTunnels(sb *strings.Builder, cfg *Config, names []string, st *uiState) 
 			fmt.Fprintf(sb, "%s%s%s%s\n", marker, ansiReverse, row, ansiReset)
 		} else {
 			fmt.Fprintf(sb, "%s%s\n", marker, row)
+		}
+		if errMsg != "" {
+			// Indent under the row so it groups visually; truncate
+			// to keep the table tight.
+			line := truncOneLine(errMsg, 70)
+			fmt.Fprintf(sb, "      %s%s%s\n", ansiRed, line, ansiReset)
 		}
 	}
 	fmt.Fprintln(sb)

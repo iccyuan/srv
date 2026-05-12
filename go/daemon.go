@@ -85,6 +85,12 @@ type daemonResponse struct {
 	// Tunnels carries the active-tunnel snapshot returned by
 	// tunnel_list. Empty otherwise.
 	Tunnels []tunnelInfo `json:"tunnels,omitempty"`
+	// TunnelErrors maps tunnel name -> last-attempt error message for
+	// saved tunnels the daemon tried but failed to bring up
+	// (autostart-on-boot or explicit tunnel_up). Cleared on
+	// subsequent successful start. Names that appear here are NOT
+	// also in Tunnels (a tunnel can't be both running and errored).
+	TunnelErrors map[string]string `json:"tunnel_errors,omitempty"`
 	// Listen is the human-readable listen address reported by
 	// tunnel_up so the CLI can echo "listening on 127.0.0.1:5432".
 	Listen string `json:"listen,omitempty"`
@@ -137,6 +143,13 @@ type daemonState struct {
 	// doesn't contend with the per-request mu used by ls / cd / run.
 	tunnelsMu sync.Mutex
 	tunnels   map[string]*activeTunnel
+	// tunnelErr remembers the last failure reason per tunnel name so
+	// `srv tunnel list` / `srv ui` can surface "tried to autostart,
+	// failed for X" instead of the misleading "stopped" the user got
+	// before the daemon exposed this. Cleared on the next successful
+	// start of the same tunnel.
+	tunnelErrMu sync.Mutex
+	tunnelErr   map[string]string
 	// In-memory sudo password cache, keyed by profile name. Expires
 	// per entry via sudoCacheEntry.expires (compared on get).
 	sudoMu    sync.Mutex
@@ -253,6 +266,7 @@ func cmdDaemon(args []string) error {
 		lastReq:   time.Now(),
 		stopCh:    make(chan struct{}),
 		tunnels:   map[string]*activeTunnel{},
+		tunnelErr: map[string]string{},
 		sudoCache: map[string]sudoCacheEntry{},
 	}
 

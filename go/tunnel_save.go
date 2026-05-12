@@ -105,13 +105,16 @@ func tunnelRemove(args []string, cfg *Config) error {
 
 // tunnelList prints saved tunnels and overlays daemon status so the
 // user sees in one shot which are defined and which are actually
-// running. Sorted by name so output is reproducible.
+// running. Last-attempt errors (autostart-on-boot or explicit
+// up-failure) are surfaced as a `failed: <msg>` line under the
+// entry so a misconfigured tunnel doesn't quietly read "stopped".
+// Sorted by name so output is reproducible.
 func tunnelList(cfg *Config) error {
 	if len(cfg.Tunnels) == 0 {
 		fmt.Println("(no saved tunnels)")
 		return nil
 	}
-	active := loadActiveTunnels()
+	active, errs := loadTunnelStatuses()
 	names := make([]string, 0, len(cfg.Tunnels))
 	for n := range cfg.Tunnels {
 		names = append(names, n)
@@ -124,6 +127,8 @@ func tunnelList(cfg *Config) error {
 		if a, ok := active[n]; ok {
 			status = "running"
 			listen = a.Listen
+		} else if _, ok := errs[n]; ok {
+			status = "failed"
 		}
 		flags := ""
 		if def.Autostart {
@@ -139,6 +144,9 @@ func tunnelList(cfg *Config) error {
 			line += " listen=" + listen
 		}
 		fmt.Println(line)
+		if msg, ok := errs[n]; ok {
+			fmt.Printf("                 failed: %s\n", msg)
+		}
 	}
 	return nil
 }
@@ -161,10 +169,13 @@ func tunnelShow(args []string, cfg *Config) error {
 		fmt.Printf("profile:   (default at up-time)\n")
 	}
 	fmt.Printf("autostart: %v\n", def.Autostart)
-	active := loadActiveTunnels()
+	active, errs := loadTunnelStatuses()
 	if a, ok := active[name]; ok {
 		fmt.Printf("status:    running (listen=%s, started %s)\n",
 			a.Listen, time.Unix(a.Started, 0).Format(time.RFC3339))
+	} else if msg, ok := errs[name]; ok {
+		fmt.Printf("status:    failed\n")
+		fmt.Printf("error:     %s\n", msg)
 	} else {
 		fmt.Printf("status:    stopped\n")
 	}
@@ -234,22 +245,45 @@ func tunnelDown(args []string) error {
 
 // loadActiveTunnels asks the daemon what's currently running. Returns
 // an empty map when the daemon is down (so `srv tunnel list` still
-// shows definitions, just all "stopped").
+// shows definitions, just all "stopped"). Errors from prior attempts
+// (autostart failures, manual `up` failures) are surfaced via
+// loadTunnelErrors instead.
 func loadActiveTunnels() map[string]tunnelInfo {
-	out := map[string]tunnelInfo{}
+	active, _ := loadTunnelStatuses()
+	return active
+}
+
+// loadTunnelErrors returns the daemon's "last attempt failed" map
+// keyed by tunnel name. Empty when the daemon is down OR when every
+// saved tunnel either started cleanly or hasn't been tried yet.
+func loadTunnelErrors() map[string]string {
+	_, errs := loadTunnelStatuses()
+	return errs
+}
+
+// loadTunnelStatuses is the single-RPC version: one round-trip to
+// the daemon yields both the active set and the error set. Callers
+// that need both (CLI `tunnel list`, the UI dashboard) should prefer
+// this over calling the singletons separately.
+func loadTunnelStatuses() (active map[string]tunnelInfo, errs map[string]string) {
+	active = map[string]tunnelInfo{}
+	errs = map[string]string{}
 	conn := daemonDial(500 * time.Millisecond)
 	if conn == nil {
-		return out
+		return
 	}
 	defer conn.Close()
 	resp, err := daemonCall(conn, daemonRequest{Op: "tunnel_list"}, 2*time.Second)
 	if err != nil || resp == nil || !resp.OK {
-		return out
+		return
 	}
 	for _, t := range resp.Tunnels {
-		out[t.Name] = t
+		active[t.Name] = t
 	}
-	return out
+	for n, msg := range resp.TunnelErrors {
+		errs[n] = msg
+	}
+	return
 }
 
 // applyTunnelSpec is a tiny helper used by both the one-shot path and
