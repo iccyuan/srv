@@ -10,6 +10,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"sort"
+	"srv/internal/mcplog"
 	"srv/internal/srvtty"
 	"srv/internal/srvutil"
 	"strconv"
@@ -583,7 +584,7 @@ func tarUploadStream(profile *Profile, localRoot string, files []string, remoteR
 				case errCh <- fmt.Errorf("tar producer panic: %v", r):
 				default:
 				}
-				mcpLogf("tar producer panic: %v", r)
+				mcplog.Logf("tar producer panic: %v", r)
 			}
 		}()
 		defer pw.Close()

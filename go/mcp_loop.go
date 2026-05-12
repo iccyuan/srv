@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"srv/internal/mcplog"
 	"strings"
 	"time"
 
@@ -38,7 +39,7 @@ func currentProgressTokenFn() any { return currentProgressToken }
 func cmdMcp(cfg *Config) error {
 	mcpMode = true
 	i18n.SetMCPMode(true)
-	mcpLogf("start v=%s", Version)
+	mcplog.Logf("start v=%s", Version)
 	rd := bufio.NewReader(os.Stdin)
 	for {
 		line, err := rd.ReadString('\n')
@@ -48,7 +49,7 @@ func cmdMcp(cfg *Config) error {
 			// log line distinguishes this from panic / write-error exits
 			// so users debugging "why did mcp drop" can tell normal
 			// lifecycle apart from real crashes.
-			mcpLogf("exit reason=stdin-%s", classifyReadErr(err))
+			mcplog.Logf("exit reason=stdin-%s", classifyReadErr(err))
 			return nil
 		}
 		line = strings.TrimSpace(line)
@@ -112,7 +113,7 @@ func cmdMcp(cfg *Config) error {
 			if res.IsError {
 				ok = "err"
 			}
-			mcpLogf("tool=%s dur=%.2fs %s", p.Name, time.Since(start).Seconds(), ok)
+			mcplog.Logf("tool=%s dur=%.2fs %s", p.Name, time.Since(start).Seconds(), ok)
 			mcpSend(mcpResponse(req.ID, res, nil))
 		default:
 			if req.ID != nil {
@@ -135,7 +136,7 @@ func cmdMcp(cfg *Config) error {
 func safeMCPHandle(name string, args map[string]any, cfg *Config) (res toolResult) {
 	defer func() {
 		if r := recover(); r != nil {
-			mcpLogf("tool=%s panic=%v", name, r)
+			mcplog.Logf("tool=%s panic=%v", name, r)
 			res = toolResult{
 				IsError: true,
 				Content: []toolContent{{Type: "text", Text: fmt.Sprintf("panic: %v", r)}},

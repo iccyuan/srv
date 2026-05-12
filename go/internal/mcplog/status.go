@@ -1,4 +1,4 @@
-package main
+package mcplog
 
 import (
 	"os"
@@ -8,27 +8,21 @@ import (
 	"time"
 )
 
-// MCP log scraper used by `srv ui`'s MCP section.
-//
-// The mcp.log file (~/.srv/mcp.log) is human-readable and append-only:
-//
-//	2026-05-10T15:30:00+08:00 [1234] start v=2.6.6
-//	2026-05-10T15:30:01+08:00 [1234] tool=run dur=0.5s ok
-//	2026-05-10T15:32:15+08:00 [1234] exit reason=stdin-eof
-//
-// We tail the last 64 KiB (cheap, bounded), parse line-by-line, and
-// build a per-pid view: started? exited? last activity? plus the most
-// recent `tool=` line across the whole tail for "what did MCP do
-// last?". Anything older than mcpStaleAfter is considered dead even
-// without an exit line -- a hard crash never wrote `exit`.
+// Status reader for the dashboard. Tails the last 64 KiB of mcp.log
+// (cheap, bounded), parses line-by-line, and builds a per-pid view:
+// started? exited? last activity? plus the most recent `tool=` lines
+// across the whole tail for "what did MCP do last?". Anything older
+// than staleAfter is considered dead even without an exit line --
+// a hard crash never wrote `exit`.
 
 const (
-	mcpLogTailBytes = 64 << 10
-	mcpStaleAfter   = 5 * time.Minute
+	tailBytes  = 64 << 10
+	staleAfter = 5 * time.Minute
+	recentMax  = 5
 )
 
-// mcpStatus is the snapshot rendered into the dashboard.
-type mcpStatus struct {
+// Status is the snapshot the dashboard renders. Returned by Read.
+type Status struct {
 	LogPath   string
 	LogExists bool
 	// ActivePIDs are pids whose last event was a recent activity and
@@ -38,17 +32,17 @@ type mcpStatus struct {
 	// (any pid). Zero if log empty / unreadable.
 	LastActive time.Time
 	// RecentTools is the trailing slice of tool calls (most-recent
-	// last) parsed from the tail window. Bounded by mcpRecentToolsMax
-	// so the dashboard never grows unbounded. Empty when no
-	// `tool=...` line is present.
-	RecentTools []mcpToolCall
+	// last) parsed from the tail window. Bounded by recentMax so the
+	// dashboard never grows unbounded. Empty when no `tool=...` line
+	// is present.
+	RecentTools []ToolCall
 }
 
-// mcpToolCall summarises one `tool=NAME dur=Ds <ok|err>` log line.
+// ToolCall summarises one `tool=NAME dur=Ds <ok|err>` log line.
 // All fields are derived from a single line. PID is the bracketed
 // process id from the log prefix -- lets the UI cross-reference
 // against ActivePIDs to flag "still alive" vs "previous session".
-type mcpToolCall struct {
+type ToolCall struct {
 	When time.Time
 	Name string
 	Dur  string
@@ -56,17 +50,12 @@ type mcpToolCall struct {
 	PID  int
 }
 
-// mcpRecentToolsMax bounds the rolling history the dashboard keeps.
-// Five is enough to see "what the model has been doing lately"
-// without making the section dominate the screen.
-const mcpRecentToolsMax = 5
-
-// readMCPStatus reads the tail of mcp.log and condenses it into the
-// dashboard view. Robust to a missing / truncated / empty log -- in
-// every failure case we return an mcpStatus with LogExists=false
-// rather than an error; the caller renders a one-line "stopped".
-func readMCPStatus() mcpStatus {
-	st := mcpStatus{LogPath: mcpLogPath()}
+// Read tails mcp.log and condenses it into the dashboard view.
+// Robust to a missing / truncated / empty log -- in every failure
+// case we return a Status with LogExists=false rather than an error;
+// the caller renders a one-line "stopped".
+func Read() Status {
+	st := Status{LogPath: Path()}
 	info, err := os.Stat(st.LogPath)
 	if err != nil {
 		return st
@@ -82,8 +71,8 @@ func readMCPStatus() mcpStatus {
 	// Read just the tail. Anything beyond 64 KiB is older than we
 	// care about for a "current state" view.
 	var startAt int64
-	if info.Size() > mcpLogTailBytes {
-		startAt = info.Size() - mcpLogTailBytes
+	if info.Size() > tailBytes {
+		startAt = info.Size() - tailBytes
 	}
 	if _, err := f.Seek(startAt, 0); err != nil {
 		return st
@@ -113,7 +102,7 @@ func readMCPStatus() mcpStatus {
 		if line == "" {
 			continue
 		}
-		ts, pid, payload, ok := parseMCPLogLine(line)
+		ts, pid, payload, ok := ParseLine(line)
 		if !ok {
 			continue
 		}
@@ -135,8 +124,8 @@ func readMCPStatus() mcpStatus {
 		case strings.HasPrefix(payload, "exit"):
 			ps.exited = true
 		case strings.HasPrefix(payload, "tool="):
-			name, dur, ok2 := parseToolLine(payload)
-			st.RecentTools = append(st.RecentTools, mcpToolCall{
+			name, dur, ok2 := ParseToolLine(payload)
+			st.RecentTools = append(st.RecentTools, ToolCall{
 				When: ts, Name: name, Dur: dur, OK: ok2, PID: pid,
 			})
 		}
@@ -144,8 +133,8 @@ func readMCPStatus() mcpStatus {
 
 	// Keep only the trailing window. Log is read forward so the slice
 	// is already chronological -- last element is most recent.
-	if n := len(st.RecentTools); n > mcpRecentToolsMax {
-		st.RecentTools = st.RecentTools[n-mcpRecentToolsMax:]
+	if n := len(st.RecentTools); n > recentMax {
+		st.RecentTools = st.RecentTools[n-recentMax:]
 	}
 
 	now := time.Now()
@@ -153,7 +142,7 @@ func readMCPStatus() mcpStatus {
 		if ps.exited {
 			continue
 		}
-		if now.Sub(ps.lastSeen) > mcpStaleAfter {
+		if now.Sub(ps.lastSeen) > staleAfter {
 			continue
 		}
 		st.ActivePIDs = append(st.ActivePIDs, pid)
@@ -162,13 +151,13 @@ func readMCPStatus() mcpStatus {
 	return st
 }
 
-// parseMCPLogLine splits one log line into its three pieces. Format:
+// ParseLine splits one log line into its three pieces. Format:
 //
 //	<RFC3339> [<pid>] <payload>
 //
 // Returns ok=false on any malformation so a truncated / future-format
 // line doesn't poison the rest of the tail.
-func parseMCPLogLine(line string) (time.Time, int, string, bool) {
+func ParseLine(line string) (time.Time, int, string, bool) {
 	// Find the first space (between timestamp and `[pid]`).
 	sp := strings.IndexByte(line, ' ')
 	if sp <= 0 {
@@ -195,10 +184,10 @@ func parseMCPLogLine(line string) (time.Time, int, string, bool) {
 	return ts, pid, payload, true
 }
 
-// parseToolLine pulls (name, dur, ok) out of a `tool=NAME dur=Ds ok`
+// ParseToolLine pulls (name, dur, ok) out of a `tool=NAME dur=Ds ok`
 // or `tool=NAME dur=Ds err` payload. Returns (name, dur, true-on-ok).
 // Best-effort on malformed entries (returns zero values).
-func parseToolLine(payload string) (string, string, bool) {
+func ParseToolLine(payload string) (string, string, bool) {
 	// payload starts with "tool=..." -- split on spaces.
 	parts := strings.Fields(payload)
 	name, dur := "", ""
@@ -214,4 +203,17 @@ func parseToolLine(payload string) (string, string, bool) {
 		}
 	}
 	return name, dur, ok
+}
+
+// PidActive reports whether pid appears in active. Returns false when
+// active is nil or empty. The dashboard's detail panel calls this on
+// each rendered ToolCall to flag "still alive" vs "from a previous
+// session".
+func PidActive(pid int, active []int) bool {
+	for _, p := range active {
+		if p == pid {
+			return true
+		}
+	}
+	return false
 }

@@ -5,6 +5,7 @@ import (
 	"os"
 	"sort"
 	"srv/internal/ansi"
+	"srv/internal/mcplog"
 	"srv/internal/srvtty"
 	"strconv"
 	"strings"
@@ -83,7 +84,7 @@ type uiState struct {
 	// changed". With the cache idle redraws cost ~1ms (string build).
 	snapCfg          *Config
 	snapJobs         []*JobRecord
-	snapMCP          mcpStatus
+	snapMCP          mcplog.Status
 	snapDaemonResp   *daemonResponse
 	snapTunnelActive map[string]tunnelInfo
 	snapTunnelErrs   map[string]string
@@ -251,7 +252,7 @@ func cmdUI(cfg *Config) error {
 				st.snapCfg = fresh
 			}
 			st.snapJobs = currentJobs()
-			st.snapMCP = readMCPStatus()
+			st.snapMCP = mcplog.Read()
 			// Drop tool calls whose origin PID isn't in ActivePIDs --
 			// "history from a dead session" is noise; the user only
 			// wants to see what currently-running MCP servers are
@@ -259,7 +260,7 @@ func cmdUI(cfg *Config) error {
 			if len(st.snapMCP.RecentTools) > 0 {
 				kept := st.snapMCP.RecentTools[:0]
 				for _, tc := range st.snapMCP.RecentTools {
-					if pidIsActive(tc.PID, st.snapMCP.ActivePIDs) {
+					if mcplog.PidActive(tc.PID, st.snapMCP.ActivePIDs) {
 						kept = append(kept, tc)
 					}
 				}
@@ -379,7 +380,7 @@ func sortedTunnelNames(cfg *Config) []string {
 // shared cursor. Order matches the visual stack of the left column
 // (tunnels -> jobs -> mcp recent), so a press of `j` walks the
 // cursor visually downward without jumping between sections.
-func buildSelectableRows(tunnels []string, jobs []*JobRecord, mcpRecent []mcpToolCall) []uiRow {
+func buildSelectableRows(tunnels []string, jobs []*JobRecord, mcpRecent []mcplog.ToolCall) []uiRow {
 	rows := make([]uiRow, 0, len(tunnels)+len(jobs)+len(mcpRecent))
 	for i, n := range tunnels {
 		rows = append(rows, uiRow{kind: "tunnel", id: n, idx: i})
@@ -957,11 +958,11 @@ func renderDashboard(cfg *Config, jobs []*JobRecord, tunnelNames []string, st *u
 	// read per snapTTL, not per redraw. Snapshot mode (st == nil) and
 	// the legacy paths still hit disk because there's no cache to
 	// inherit from.
-	var mcpSnapshot mcpStatus
+	var mcpSnapshot mcplog.Status
 	if st != nil {
 		mcpSnapshot = st.snapMCP
 	} else {
-		mcpSnapshot = readMCPStatus()
+		mcpSnapshot = mcplog.Read()
 	}
 
 	if st == nil {
@@ -1540,7 +1541,7 @@ func panelJobs(sb *strings.Builder, jobs []*JobRecord, st *uiState) {
 // arrow / Tab event so the user doesn't have to press Enter to
 // "open" a row -- ranger / mutt / lazygit pattern. Falls back to a
 // hint when nothing is selected.
-func panelDetail(sb *strings.Builder, cfg *Config, jobs []*JobRecord, tunnelNames []string, mcp mcpStatus, st *uiState) {
+func panelDetail(sb *strings.Builder, cfg *Config, jobs []*JobRecord, tunnelNames []string, mcp mcplog.Status, st *uiState) {
 	row := st.currentRow()
 	switch row.kind {
 	case "tunnel":
@@ -1571,7 +1572,7 @@ func panelDetail(sb *strings.Builder, cfg *Config, jobs []*JobRecord, tunnelName
 // the row reads "12345 (alive)" if that MCP server is still running,
 // or "12345 (previous session)" if it has since exited -- useful
 // when debugging "which Claude Code instance issued this call".
-func panelMCPDetail(sb *strings.Builder, tc mcpToolCall, mcp mcpStatus) {
+func panelMCPDetail(sb *strings.Builder, tc mcplog.ToolCall, mcp mcplog.Status) {
 	boxTop(sb, "mcp call detail")
 	boxLine(sb, kvLine("tool", ansi.Yellow+ansi.Bold+tc.Name+ansi.Reset))
 	boxLine(sb, kvLine("duration", ansi.Magenta+tc.Dur+ansi.Reset))
@@ -1585,7 +1586,7 @@ func panelMCPDetail(sb *strings.Builder, tc mcpToolCall, mcp mcpStatus) {
 	pidLabel := strconv.Itoa(tc.PID)
 	if tc.PID == 0 {
 		pidLabel = dashMeta("(unknown)")
-	} else if pidIsActive(tc.PID, mcp.ActivePIDs) {
+	} else if mcplog.PidActive(tc.PID, mcp.ActivePIDs) {
 		pidLabel = ansi.Green + ansi.Bold + pidLabel + ansi.Reset + dashMeta(" (alive)")
 	} else {
 		pidLabel = pidLabel + dashMeta(" (previous session)")
@@ -1599,17 +1600,9 @@ func panelMCPDetail(sb *strings.Builder, tc mcpToolCall, mcp mcpStatus) {
 	fmt.Fprintln(sb)
 }
 
-// pidIsActive reports whether `pid` is in the active-PID set the
-// daemon snapshot reported. Cheap linear scan -- the active set is
-// always tiny (concurrent MCP servers per machine).
-func pidIsActive(pid int, active []int) bool {
-	for _, p := range active {
-		if p == pid {
-			return true
-		}
-	}
-	return false
-}
+// pidIsActive moved to srv/internal/mcplog as mcplog.PidActive --
+// reproducing the helper here is no longer necessary now that the
+// caller already imports the same package.
 
 // panelJobDetail renders job details fit for the right column.
 // Same fields as the old full-screen renderJobDetail, just laid out
@@ -1691,7 +1684,7 @@ func panelTunnelDetail(sb *strings.Builder, name string, cfg *Config, st *uiStat
 // optional active PIDs, then the recent tool-call list (selectable
 // row by row -- focused-pane visuals + cursor matching same shape
 // as Tunnels / Jobs).
-func panelMCP(sb *strings.Builder, mcp mcpStatus, st *uiState) {
+func panelMCP(sb *strings.Builder, mcp mcplog.Status, st *uiState) {
 	if !mcp.LogExists {
 		return
 	}
@@ -2282,7 +2275,7 @@ func dashJobs(sb *strings.Builder, jobs []*JobRecord, st *uiState) {
 // the "what's been happening" context that a single last-line view
 // missed.
 func dashMCP(sb *strings.Builder) {
-	st := readMCPStatus()
+	st := mcplog.Read()
 	if !st.LogExists {
 		// Never started an MCP server on this machine; no signal to
 		// show. Don't print an empty section.
