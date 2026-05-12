@@ -11,16 +11,37 @@ import (
 	"golang.org/x/term"
 )
 
-// uiState tracks dashboard interactivity: which job row is currently
-// highlighted, whether we're in a full-screen detail view, and
-// whether a "press Y to kill" prompt is up. Kept in one struct so
-// the renderers can read it without each one growing a parameter.
+// uiRow names a selectable row in the dashboard. The cursor is a
+// single index into a flat list of uiRows assembled in display order
+// (Tunnels first, then Jobs) so j/k walks visually top-down across
+// the two interactive sections without the user having to switch
+// "focused pane" themselves.
+type uiRow struct {
+	kind string // "tunnel" or "job"
+	id   string // tunnel name or job ID -- stable across re-renders
+	idx  int    // index within the section's slice
+}
+
+// uiConfirm is a popup confirmation request. Set when a destructive
+// action (kill, tunnel down, tunnel remove) needs Y to proceed.
+// title is the heading; body is the explanatory lines.
+type uiConfirm struct {
+	title  string
+	body   []string
+	action func() (msg string, err error) // called on Y press
+}
+
+// uiState tracks dashboard interactivity: which row is highlighted,
+// whether we're in a full-screen detail view, and whether a
+// confirmation popup is up. Kept in one struct so the renderers can
+// read it without each one growing a parameter.
 type uiState struct {
-	selectedJob int    // index into the rendered jobs list (post-filter); -1 = empty
-	detailMode  bool   // showing the per-job detail panel
-	killPrompt  bool   // armed for confirmation; next 'y' actually kills
-	showAll     bool   // include completed (`.exit` marker present) jobs in the table
-	statusMsg   string // transient line in the footer (kill result, etc.)
+	cursor      int        // index into rows; -1 when rows is empty
+	rows        []uiRow    // selectable rows in display order
+	detailMode  bool       // showing the per-row detail panel
+	confirm     *uiConfirm // non-nil = popup is up, awaiting Y/N
+	showAll     bool       // include completed (`.exit` marker present) jobs
+	statusMsg   string     // transient line in the footer (kill result, etc.)
 	lastFrame   string
 	prevLines   int
 	forceRedraw bool
@@ -31,6 +52,24 @@ type uiState struct {
 	liveness      map[string]bool
 	livenessFresh time.Time
 	hiddenJobs    int // filtered-out count for the footer hint
+}
+
+// currentRow returns the uiRow under the cursor, or a zero uiRow
+// when there's no selection. Centralised so renderers / handlers
+// don't each duplicate the bounds check.
+func (s *uiState) currentRow() uiRow {
+	if s == nil || s.cursor < 0 || s.cursor >= len(s.rows) {
+		return uiRow{}
+	}
+	return s.rows[s.cursor]
+}
+
+// isSelected returns true when the given (kind, idx) matches the
+// currently-focused row. Used by table renderers to decide whether
+// to draw a `>` marker and reverse video on a row.
+func (s *uiState) isSelected(kind string, idx int) bool {
+	r := s.currentRow()
+	return r.kind == kind && r.idx == idx
 }
 
 // cmdUI is `srv ui` -- a one-screen dashboard showing the bits of srv
@@ -75,7 +114,7 @@ func cmdUI(cfg *Config) error {
 		// one-shot print of the snapshot so `srv ui | less` still
 		// works (or piped into a script). Jobs are still listed --
 		// just without the selection markers and key hints.
-		fmt.Print(renderDashboard(cfg, currentJobs(), nil))
+		fmt.Print(renderDashboard(cfg, currentJobs(), sortedTunnelNames(cfg), nil))
 		return nil
 	}
 	fd := int(os.Stdin.Fd())
@@ -88,7 +127,7 @@ func cmdUI(cfg *Config) error {
 	defer fmt.Fprint(os.Stderr, ansiShow)
 
 	kr := newKeyReader()
-	st := &uiState{forceRedraw: true, selectedJob: 0, liveness: map[string]bool{}}
+	st := &uiState{forceRedraw: true, cursor: 0, liveness: map[string]bool{}}
 	const refreshEvery = 2 * time.Second
 	const livenessTTL = 10 * time.Second
 
@@ -127,14 +166,27 @@ func cmdUI(cfg *Config) error {
 			}
 			jobs = kept
 		}
-		clampJobSelection(st, len(jobs))
+		tunnelNames := sortedTunnelNames(fresh)
+		st.hiddenJobs = hidden
+		st.rows = buildSelectableRows(tunnelNames, jobs)
+		clampCursor(st)
 
 		var out string
-		if st.detailMode && st.selectedJob >= 0 && st.selectedJob < len(jobs) {
-			out = renderJobDetail(jobs[st.selectedJob], st)
-		} else {
-			st.hiddenJobs = hidden
-			out = renderDashboard(fresh, jobs, st)
+		row := st.currentRow()
+		if st.detailMode {
+			switch row.kind {
+			case "job":
+				if row.idx >= 0 && row.idx < len(jobs) {
+					out = renderJobDetail(jobs[row.idx], st)
+				}
+			case "tunnel":
+				if row.idx >= 0 && row.idx < len(tunnelNames) {
+					out = renderTunnelDetail(tunnelNames[row.idx], fresh, st)
+				}
+			}
+		}
+		if out == "" {
+			out = renderDashboard(fresh, jobs, tunnelNames, st)
 		}
 		if st.forceRedraw || out != st.lastFrame {
 			redrawDashboard(out, st.prevLines)
@@ -153,10 +205,59 @@ func cmdUI(cfg *Config) error {
 			}
 			continue
 		}
-		if !handleUIKey(b, st, jobs, fresh, kr) {
+		if !handleUIKey(b, st, jobs, tunnelNames, fresh, kr) {
 			clearPicker(st.prevLines)
 			return nil
 		}
+	}
+}
+
+// sortedTunnelNames returns the names of all defined tunnels in
+// stable alphabetical order so the cursor sees a deterministic row
+// layout across re-renders.
+func sortedTunnelNames(cfg *Config) []string {
+	if cfg == nil || len(cfg.Tunnels) == 0 {
+		return nil
+	}
+	out := make([]string, 0, len(cfg.Tunnels))
+	for n := range cfg.Tunnels {
+		out = append(out, n)
+	}
+	sort.Strings(out)
+	return out
+}
+
+// buildSelectableRows assembles the flat row list used by the
+// shared cursor. Tunnels come first because they appear first in
+// the dashboard; jobs follow. Keeping the order display-aligned
+// means a press of `j` moves the cursor visually downward without
+// jumping between sections.
+func buildSelectableRows(tunnels []string, jobs []*JobRecord) []uiRow {
+	rows := make([]uiRow, 0, len(tunnels)+len(jobs))
+	for i, n := range tunnels {
+		rows = append(rows, uiRow{kind: "tunnel", id: n, idx: i})
+	}
+	for i, j := range jobs {
+		rows = append(rows, uiRow{kind: "job", id: j.ID, idx: i})
+	}
+	return rows
+}
+
+// clampCursor keeps st.cursor in [0, len(rows)) when rows is non-
+// empty, -1 otherwise. Called every tick because rows can shrink
+// out from under the cursor (we killed a job; another shell did
+// `srv tunnel remove`).
+func clampCursor(st *uiState) {
+	n := len(st.rows)
+	if n == 0 {
+		st.cursor = -1
+		return
+	}
+	if st.cursor < 0 {
+		st.cursor = 0
+	}
+	if st.cursor >= n {
+		st.cursor = n - 1
 	}
 }
 
@@ -170,54 +271,45 @@ func currentJobs() []*JobRecord {
 	return jf.Jobs
 }
 
-// clampJobSelection keeps st.selectedJob in [0, n) when n>0, or -1
-// when there are no jobs. Called every tick because jobs can vanish
-// out from under us (we killed one; another shell killed one).
-func clampJobSelection(st *uiState, n int) {
-	if n == 0 {
-		st.selectedJob = -1
-		return
-	}
-	if st.selectedJob < 0 {
-		st.selectedJob = 0
-	}
-	if st.selectedJob >= n {
-		st.selectedJob = n - 1
-	}
-}
-
 // handleUIKey is the input dispatcher. Returns false when the user
 // asked to exit (q / Ctrl-C in dashboard mode); true to keep the
 // loop running. State mutations flow through st; side effects (the
-// remote kill, status messages) are confined here.
-func handleUIKey(b byte, st *uiState, jobs []*JobRecord, cfg *Config, kr *keyReader) bool {
-	// Kill confirmation is the highest-precedence mode: any key
-	// resolves it (Y/y = do it, anything else = cancel) before normal
-	// dashboard / detail keys run.
-	if st.killPrompt {
-		st.killPrompt = false
+// remote kill, tunnel up/down, status messages) are confined here.
+//
+// Precedence: an active confirmation popup eats every key until it
+// resolves (Y = run, anything else = cancel), so a stray j/k can't
+// accidentally trigger a different action while a "kill?" is up.
+func handleUIKey(b byte, st *uiState, jobs []*JobRecord, tunnelNames []string, cfg *Config, kr *keyReader) bool {
+	if st.confirm != nil {
+		yes := b == 'y' || b == 'Y'
+		action := st.confirm.action
+		title := st.confirm.title
+		st.confirm = nil
 		st.forceRedraw = true
-		if (b == 'y' || b == 'Y') && st.selectedJob >= 0 && st.selectedJob < len(jobs) {
-			j := jobs[st.selectedJob]
-			if msg, err := uiKillJob(j, cfg); err != nil {
-				st.statusMsg = ansiRed + "kill " + j.ID + " failed: " + err.Error() + ansiReset
+		if yes && action != nil {
+			msg, err := action()
+			if err != nil {
+				st.statusMsg = ansiRed + title + " failed: " + err.Error() + ansiReset
 			} else {
-				st.statusMsg = ansiGreen + "kill " + j.ID + ": " + msg + ansiReset
+				st.statusMsg = ansiGreen + title + ": " + msg + ansiReset
 			}
 			st.detailMode = false
 		} else {
-			st.statusMsg = ansiDim + "kill cancelled" + ansiReset
+			st.statusMsg = ansiDim + title + " cancelled" + ansiReset
 		}
 		return true
 	}
 
+	row := st.currentRow()
+
 	if st.detailMode {
 		switch b {
 		case 'K':
-			if st.selectedJob >= 0 && st.selectedJob < len(jobs) {
-				st.killPrompt = true
-				st.forceRedraw = true
-			}
+			armConfirmFor(st, row, jobs, tunnelNames, cfg, 'K')
+		case ' ':
+			armConfirmFor(st, row, jobs, tunnelNames, cfg, ' ')
+		case 'x':
+			armConfirmFor(st, row, jobs, tunnelNames, cfg, 'x')
 		case 'q', '\x03', '\r', '\n', 0x1b:
 			st.detailMode = false
 			st.forceRedraw = true
@@ -235,33 +327,29 @@ func handleUIKey(b byte, st *uiState, jobs []*JobRecord, cfg *Config, kr *keyRea
 		st.forceRedraw = true
 	case 'a':
 		st.showAll = !st.showAll
-		st.selectedJob = 0
+		st.cursor = 0
 		st.forceRedraw = true
 	case 'j':
-		if st.selectedJob >= 0 && st.selectedJob+1 < len(jobs) {
-			st.selectedJob++
+		if st.cursor >= 0 && st.cursor+1 < len(st.rows) {
+			st.cursor++
 			st.forceRedraw = true
 		}
 	case 'k':
-		if st.selectedJob > 0 {
-			st.selectedJob--
+		if st.cursor > 0 {
+			st.cursor--
 			st.forceRedraw = true
 		}
 	case '\r', '\n':
-		if st.selectedJob >= 0 && st.selectedJob < len(jobs) {
+		if row.kind != "" {
 			st.detailMode = true
 			st.forceRedraw = true
 		}
-	case 'K':
-		if st.selectedJob >= 0 && st.selectedJob < len(jobs) {
-			st.killPrompt = true
-			st.forceRedraw = true
-		}
+	case 'K', ' ', 'x':
+		armConfirmFor(st, row, jobs, tunnelNames, cfg, b)
 	case 0x1b: // ESC -- possibly an arrow-key sequence
 		b2, ok := kr.readWithTimeout(80 * time.Millisecond)
 		if !ok {
-			// bare ESC -- treat as quit so it's consistent with the picker
-			return false
+			return false // bare ESC = quit
 		}
 		if b2 != '[' {
 			return true
@@ -272,18 +360,193 @@ func handleUIKey(b byte, st *uiState, jobs []*JobRecord, cfg *Config, kr *keyRea
 		}
 		switch b3 {
 		case 'A':
-			if st.selectedJob > 0 {
-				st.selectedJob--
+			if st.cursor > 0 {
+				st.cursor--
 				st.forceRedraw = true
 			}
 		case 'B':
-			if st.selectedJob >= 0 && st.selectedJob+1 < len(jobs) {
-				st.selectedJob++
+			if st.cursor >= 0 && st.cursor+1 < len(st.rows) {
+				st.cursor++
 				st.forceRedraw = true
 			}
 		}
 	}
 	return true
+}
+
+// armConfirmFor sets up a popup confirmation tailored to the current
+// row + the pressed key. Mapping:
+//
+//	on a job row:    K = kill (TERM)
+//	on a tunnel row: Space = toggle up/down,  x = remove
+//
+// Non-applicable combinations (Space on a job, K on a tunnel) are
+// silently ignored -- the key hint in the footer already advertises
+// which keys apply to which kind of row.
+func armConfirmFor(st *uiState, row uiRow, jobs []*JobRecord, tunnelNames []string, cfg *Config, key byte) {
+	switch row.kind {
+	case "job":
+		if key != 'K' || row.idx < 0 || row.idx >= len(jobs) {
+			return
+		}
+		j := jobs[row.idx]
+		st.confirm = &uiConfirm{
+			title: "kill " + j.ID,
+			body: []string{
+				j.ID + "  (" + j.Profile + ", pid " + strconv.Itoa(j.Pid) + ")",
+				truncOneLine(j.Cmd, 60),
+				"",
+				"Send SIGTERM to the remote pid and drop the local jobs.json entry.",
+			},
+			action: func() (string, error) { return uiKillJob(j, cfg) },
+		}
+		st.forceRedraw = true
+	case "tunnel":
+		if row.idx < 0 || row.idx >= len(tunnelNames) {
+			return
+		}
+		name := tunnelNames[row.idx]
+		def := cfg.Tunnels[name]
+		if def == nil {
+			return
+		}
+		active := loadActiveTunnels()
+		_, isUp := active[name]
+		switch key {
+		case ' ':
+			if isUp {
+				st.confirm = &uiConfirm{
+					title: "tunnel down " + name,
+					body: []string{
+						name + "  (" + def.Type + " " + def.Spec + ")",
+						"",
+						"Stop the daemon-hosted listener. Existing connections drop.",
+					},
+					action: func() (string, error) { return uiTunnelDown(name) },
+				}
+			} else {
+				st.confirm = &uiConfirm{
+					title: "tunnel up " + name,
+					body: []string{
+						name + "  (" + def.Type + " " + def.Spec + ", profile " + tunnelProfileLabel(def) + ")",
+						"",
+						"Bring the tunnel up via the daemon.",
+					},
+					action: func() (string, error) { return uiTunnelUp(name) },
+				}
+			}
+			st.forceRedraw = true
+		case 'x':
+			extra := ""
+			if isUp {
+				extra = " The currently-running tunnel will be stopped first."
+			}
+			st.confirm = &uiConfirm{
+				title: "remove tunnel " + name,
+				body: []string{
+					name + "  (" + def.Type + " " + def.Spec + ")",
+					"",
+					"Delete the saved definition from config." + extra,
+				},
+				action: func() (string, error) { return uiTunnelRemove(name, cfg) },
+			}
+			st.forceRedraw = true
+		}
+	}
+}
+
+// truncOneLine clips a string to width chars, appending an ellipsis
+// when shortened. Used for popup body lines where we want exactly
+// one row of context.
+func truncOneLine(s string, width int) string {
+	if len(s) <= width {
+		return s
+	}
+	if width <= 3 {
+		return s[:width]
+	}
+	return s[:width-3] + "..."
+}
+
+// tunnelProfileLabel renders the profile chosen for a tunnel, falling
+// back to "(default at up-time)" when the def left it empty.
+func tunnelProfileLabel(def *TunnelDef) string {
+	if def.Profile == "" {
+		return "(default)"
+	}
+	return def.Profile
+}
+
+// uiTunnelUp / uiTunnelDown / uiTunnelRemove are the dashboard-side
+// equivalents of `srv tunnel up <name>` etc. They go through the
+// same daemon protocol as the CLI subcommands so behaviour stays
+// identical; result strings flow back to the footer.
+func uiTunnelUp(name string) (string, error) {
+	if !ensureDaemon() {
+		return "", fmt.Errorf("daemon unavailable")
+	}
+	conn := daemonDial(2 * time.Second)
+	if conn == nil {
+		return "", fmt.Errorf("daemon unreachable")
+	}
+	defer conn.Close()
+	resp, err := daemonCall(conn, daemonRequest{Op: "tunnel_up", Name: name}, 10*time.Second)
+	if err != nil {
+		return "", err
+	}
+	if resp == nil || !resp.OK {
+		msg := "daemon refused"
+		if resp != nil && resp.Err != "" {
+			msg = resp.Err
+		}
+		return "", fmt.Errorf("%s", msg)
+	}
+	if resp.Listen != "" {
+		return "listening on " + resp.Listen, nil
+	}
+	return "up", nil
+}
+
+func uiTunnelDown(name string) (string, error) {
+	conn := daemonDial(2 * time.Second)
+	if conn == nil {
+		return "", fmt.Errorf("daemon not running")
+	}
+	defer conn.Close()
+	resp, err := daemonCall(conn, daemonRequest{Op: "tunnel_down", Name: name}, 5*time.Second)
+	if err != nil {
+		return "", err
+	}
+	if resp == nil || !resp.OK {
+		msg := "daemon refused"
+		if resp != nil && resp.Err != "" {
+			msg = resp.Err
+		}
+		return "", fmt.Errorf("%s", msg)
+	}
+	return "stopped", nil
+}
+
+// uiTunnelRemove stops any running instance first (best-effort), then
+// deletes the saved definition from config. Saving the config goes
+// through the regular write-back path so other shells see the
+// removal on their next LoadConfig.
+func uiTunnelRemove(name string, cfg *Config) (string, error) {
+	// Best-effort stop. Ignoring errors here is intentional: the
+	// user said "remove", not "remove iff running"; if the down
+	// fails we still drop the saved entry.
+	_, _ = uiTunnelDown(name)
+	if cfg == nil || cfg.Tunnels == nil {
+		return "", fmt.Errorf("no tunnels configured")
+	}
+	if _, ok := cfg.Tunnels[name]; !ok {
+		return "", fmt.Errorf("tunnel %q not found", name)
+	}
+	delete(cfg.Tunnels, name)
+	if err := SaveConfig(cfg); err != nil {
+		return "", err
+	}
+	return "removed", nil
 }
 
 // uiKillJob is the dashboard-side kill: same wire shape as `srv kill
@@ -340,17 +603,101 @@ func redrawDashboard(content string, prevLines int) {
 // `jobs` and `st` are nil for the non-TTY one-shot path; in that
 // mode the Jobs section renders without selection markers and the
 // footer drops the interactive-key hints.
-func renderDashboard(cfg *Config, jobs []*JobRecord, st *uiState) string {
+func renderDashboard(cfg *Config, jobs []*JobRecord, tunnelNames []string, st *uiState) string {
 	var sb strings.Builder
 	dashHeader(&sb, st)
 	dashActive(&sb, cfg)
 	dashDaemon(&sb)
 	dashMCP(&sb)
 	dashGroups(&sb, cfg)
-	dashTunnels(&sb, cfg)
+	dashTunnels(&sb, cfg, tunnelNames, st)
 	dashJobs(&sb, jobs, st)
 	dashFooter(&sb, st)
+	if st != nil && st.confirm != nil {
+		renderConfirmPopup(&sb, st.confirm)
+	}
 	return sb.String()
+}
+
+// renderConfirmPopup draws a centered box at the bottom of the
+// dashboard with the action title and explanatory body lines. The
+// Y/N choice is anchored at the box's last row so the user's eye
+// lands on it after reading the body.
+func renderConfirmPopup(sb *strings.Builder, c *uiConfirm) {
+	width := 64
+	for _, line := range c.body {
+		if w := visualWidth(line) + 4; w > width {
+			width = w
+		}
+	}
+	if w := visualWidth(c.title) + 6; w > width {
+		width = w
+	}
+	if width > 78 {
+		width = 78
+	}
+	indent := "  "
+	top := indent + "┌" + strings.Repeat("─", width-2) + "┐"
+	bot := indent + "└" + strings.Repeat("─", width-2) + "┘"
+	fmt.Fprintln(sb)
+	fmt.Fprintf(sb, "%s%s%s\n", ansiBold+ansiRed, top, ansiReset)
+	fmt.Fprintf(sb, "%s│%s %s%s%s%s%s│%s\n",
+		ansiBold+ansiRed, ansiReset,
+		ansiBold+ansiRed, c.title, ansiReset,
+		strings.Repeat(" ", max(0, width-3-visualWidth(c.title))),
+		ansiBold+ansiRed, ansiReset)
+	fmt.Fprintf(sb, "%s│%s%s%s│%s\n",
+		ansiBold+ansiRed, ansiReset,
+		strings.Repeat(" ", width-2),
+		ansiBold+ansiRed, ansiReset)
+	for _, line := range c.body {
+		pad := max(0, width-3-visualWidth(line))
+		fmt.Fprintf(sb, "%s│%s %s%s%s│%s\n",
+			ansiBold+ansiRed, ansiReset,
+			line, strings.Repeat(" ", pad),
+			ansiBold+ansiRed, ansiReset)
+	}
+	fmt.Fprintf(sb, "%s│%s%s%s│%s\n",
+		ansiBold+ansiRed, ansiReset,
+		strings.Repeat(" ", width-2),
+		ansiBold+ansiRed, ansiReset)
+	choice := ansiYellow + ansiBold + "[Y]" + ansiReset + " confirm    " +
+		ansiYellow + ansiBold + "[N/Esc]" + ansiReset + " cancel"
+	pad := max(0, width-3-visualWidth("[Y] confirm    [N/Esc] cancel"))
+	fmt.Fprintf(sb, "%s│%s %s%s%s│%s\n",
+		ansiBold+ansiRed, ansiReset,
+		choice, strings.Repeat(" ", pad),
+		ansiBold+ansiRed, ansiReset)
+	fmt.Fprintf(sb, "%s%s%s\n", ansiBold+ansiRed, bot, ansiReset)
+}
+
+// visualWidth returns the *visible* column count of s with ANSI
+// escape sequences stripped. CJK width is not handled (each rune
+// counts as one column) -- good enough for our short popup labels.
+func visualWidth(s string) int {
+	w := 0
+	inEsc := false
+	for _, r := range s {
+		if r == 0x1b {
+			inEsc = true
+			continue
+		}
+		if inEsc {
+			if r == 'm' {
+				inEsc = false
+			}
+			continue
+		}
+		w++
+	}
+	return w
+}
+
+func max(a, b int) int {
+	if a > b {
+		return a
+	}
+	return b
 }
 
 // renderJobDetail is the full-screen view that replaces the
@@ -387,9 +734,8 @@ func renderJobDetail(j *JobRecord, st *uiState) string {
 	fmt.Fprintln(&sb)
 
 	fmt.Fprintf(&sb, "%s%s%s\n", ansiDim, dashboardRule, ansiReset)
-	if st != nil && st.killPrompt {
-		fmt.Fprintf(&sb, "%skill %s? press %sY%s to confirm, any other key cancels%s\n",
-			ansiRed+ansiBold, j.ID, ansiYellow+ansiBold, ansiRed+ansiBold, ansiReset)
+	if st != nil && st.confirm != nil {
+		renderConfirmPopup(&sb, st.confirm)
 		return sb.String()
 	}
 	fmt.Fprintf(&sb, "Keys: %sq%s back   %sK%s kill   %ssrv logs %s -f%s tails remotely\n",
@@ -400,6 +746,52 @@ func renderJobDetail(j *JobRecord, st *uiState) string {
 		fmt.Fprintf(&sb, "%s\n", st.statusMsg)
 	}
 	return sb.String()
+}
+
+// renderTunnelDetail is the per-tunnel detail panel triggered by
+// Enter on a tunnel row. Mirrors renderJobDetail's shape.
+func renderTunnelDetail(name string, cfg *Config, st *uiState) string {
+	def := cfg.Tunnels[name]
+	if def == nil {
+		return "tunnel " + name + " not found\n"
+	}
+	var sb strings.Builder
+	fmt.Fprintf(&sb, "%sTUNNEL DETAIL%s  %s%s%s\n",
+		ansiBold+ansiMagenta, ansiReset, ansiDim, name, ansiReset)
+	fmt.Fprintf(&sb, "%s%s%s\n\n", ansiDim, dashboardRule, ansiReset)
+	dashField(&sb, "name", dashName(name))
+	dashField(&sb, "type", ansiMagenta+def.Type+ansiReset)
+	dashField(&sb, "spec", dashPath(def.Spec))
+	dashField(&sb, "profile", ansiCyan+tunnelProfileLabel(def)+ansiReset)
+	dashField(&sb, "autostart", boolLabel(def.Autostart))
+	active := loadActiveTunnels()
+	if a, ok := active[name]; ok {
+		dashField(&sb, "state", dashStatus("running", ansiGreen))
+		dashField(&sb, "listen", dashPath(a.Listen))
+	} else {
+		dashField(&sb, "state", dashStatus("stopped", ansiDim))
+	}
+	fmt.Fprintln(&sb)
+	fmt.Fprintf(&sb, "%s%s%s\n", ansiDim, dashboardRule, ansiReset)
+	if st != nil && st.confirm != nil {
+		renderConfirmPopup(&sb, st.confirm)
+		return sb.String()
+	}
+	fmt.Fprintf(&sb, "Keys: %sq%s back   %sSpace%s toggle up/down   %sx%s remove\n",
+		ansiYellow+ansiBold, ansiReset,
+		ansiYellow+ansiBold, ansiReset,
+		ansiYellow+ansiBold, ansiReset)
+	if st != nil && st.statusMsg != "" {
+		fmt.Fprintf(&sb, "%s\n", st.statusMsg)
+	}
+	return sb.String()
+}
+
+func boolLabel(b bool) string {
+	if b {
+		return ansiGreen + ansiBold + "yes" + ansiReset
+	}
+	return ansiDim + "no" + ansiReset
 }
 
 // wrapText breaks `s` into lines of at most `width` bytes, splitting
@@ -571,19 +963,18 @@ func dashGroups(sb *strings.Builder, cfg *Config) {
 	fmt.Fprintln(sb)
 }
 
-func dashTunnels(sb *strings.Builder, cfg *Config) {
-	if len(cfg.Tunnels) == 0 {
+// dashTunnels renders the saved tunnels and overlays their daemon
+// status. Caller passes the already-sorted name slice (same slice
+// the orchestrator put into st.rows) so the cursor index matches
+// the rendered row index exactly.
+func dashTunnels(sb *strings.Builder, cfg *Config, names []string, st *uiState) {
+	if len(names) == 0 {
 		return
 	}
 	active := loadActiveTunnels()
-	dashSectionCount(sb, "Tunnels", len(cfg.Tunnels))
-	names := make([]string, 0, len(cfg.Tunnels))
-	for n := range cfg.Tunnels {
-		names = append(names, n)
-	}
-	sort.Strings(names)
-	dashTableHeader(sb, "NAME          TYPE     SPEC / STATE")
-	for _, n := range names {
+	dashSectionCount(sb, "Tunnels", len(names))
+	dashTableHeader(sb, "  NAME          TYPE     SPEC / STATE")
+	for i, n := range names {
 		def := cfg.Tunnels[n]
 		status := dashStatus("stopped", ansiDim)
 		extra := ""
@@ -598,8 +989,18 @@ func dashTunnels(sb *strings.Builder, cfg *Config) {
 		if extra != "" {
 			extra = ansiDim + extra + ansiReset
 		}
-		fmt.Fprintf(sb, "  %-12s  %-7s  %s  %s%s%s\n",
+		marker := "   "
+		selected := st != nil && st.isSelected("tunnel", i)
+		if selected {
+			marker = ansiBold + ansiYellow + " > " + ansiReset
+		}
+		row := fmt.Sprintf("%-12s  %-7s  %s  %s%s%s",
 			dashName(n), ansiMagenta+def.Type+ansiReset, dashPath(def.Spec), status, extra, flag)
+		if selected {
+			fmt.Fprintf(sb, "%s%s%s%s\n", marker, ansiReverse, row, ansiReset)
+		} else {
+			fmt.Fprintf(sb, "%s%s\n", marker, row)
+		}
 	}
 	fmt.Fprintln(sb)
 }
@@ -643,7 +1044,7 @@ func dashJobs(sb *strings.Builder, jobs []*JobRecord, st *uiState) {
 			started = fmtDuration(time.Since(t)) + " ago"
 		}
 		marker := "   "
-		selected := st != nil && st.selectedJob == i
+		selected := st != nil && st.isSelected("job", i)
 		if selected {
 			marker = ansiBold + ansiYellow + " > " + ansiReset
 		}
@@ -719,13 +1120,8 @@ func dashFooter(sb *strings.Builder, st *uiState) {
 		fmt.Fprintf(sb, "%ssnapshot complete%s\n", ansiDim, ansiReset)
 		return
 	}
-	// Kill prompt takes over the bottom line so the model / user
-	// can see exactly what's about to happen.
-	if st.killPrompt {
-		fmt.Fprintf(sb, "%skill selected job? press %sY%s to confirm, any other key cancels%s\n",
-			ansiRed+ansiBold, ansiYellow+ansiBold, ansiRed+ansiBold, ansiReset)
-		return
-	}
+	// Confirm popup renders elsewhere (centered box appended to the
+	// dashboard); the footer only needs the regular key hints.
 	mode := "active only"
 	if st.showAll {
 		mode = "all jobs"

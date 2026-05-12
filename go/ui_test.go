@@ -60,26 +60,73 @@ func TestParseISOLike(t *testing.T) {
 	}
 }
 
-func TestClampJobSelection(t *testing.T) {
+func TestClampCursor(t *testing.T) {
+	mkRows := func(n int) []uiRow {
+		rs := make([]uiRow, n)
+		for i := range rs {
+			rs[i] = uiRow{kind: "job", id: "x", idx: i}
+		}
+		return rs
+	}
 	cases := []struct {
 		name    string
 		initial int
 		n       int
 		want    int
 	}{
-		{"no jobs forces -1", 0, 0, -1},
-		{"no jobs forces -1 from positive", 5, 0, -1},
+		{"no rows forces -1", 0, 0, -1},
+		{"no rows forces -1 from positive", 5, 0, -1},
 		{"negative becomes 0", -1, 3, 0},
 		{"in range untouched", 2, 5, 2},
 		{"past end clamps to n-1", 9, 3, 2},
-		{"single job: 0 stays 0", 0, 1, 0},
-		{"single job: high clamps to 0", 5, 1, 0},
+		{"single row: 0 stays 0", 0, 1, 0},
+		{"single row: high clamps to 0", 5, 1, 0},
 	}
 	for _, c := range cases {
-		st := &uiState{selectedJob: c.initial}
-		clampJobSelection(st, c.n)
-		if st.selectedJob != c.want {
-			t.Errorf("%s: got %d, want %d", c.name, st.selectedJob, c.want)
+		st := &uiState{cursor: c.initial, rows: mkRows(c.n)}
+		clampCursor(st)
+		if st.cursor != c.want {
+			t.Errorf("%s: got %d, want %d", c.name, st.cursor, c.want)
+		}
+	}
+}
+
+func TestBuildSelectableRows_OrderTunnelsBeforeJobs(t *testing.T) {
+	tunnels := []string{"db", "web"}
+	jobs := []*JobRecord{
+		{ID: "j1", Profile: "p"},
+		{ID: "j2", Profile: "p"},
+	}
+	rows := buildSelectableRows(tunnels, jobs)
+	if len(rows) != 4 {
+		t.Fatalf("expected 4 rows, got %d", len(rows))
+	}
+	want := []uiRow{
+		{kind: "tunnel", id: "db", idx: 0},
+		{kind: "tunnel", id: "web", idx: 1},
+		{kind: "job", id: "j1", idx: 0},
+		{kind: "job", id: "j2", idx: 1},
+	}
+	for i, w := range want {
+		if rows[i] != w {
+			t.Errorf("row %d: got %+v, want %+v", i, rows[i], w)
+		}
+	}
+}
+
+func TestVisualWidth_StripsAnsi(t *testing.T) {
+	cases := []struct {
+		in   string
+		want int
+	}{
+		{"", 0},
+		{"hello", 5},
+		{"\x1b[31mhello\x1b[0m", 5},
+		{"\x1b[1;33mYES\x1b[0m   no", 8}, // YES + 3 spaces + no = 8 visible cols
+	}
+	for _, c := range cases {
+		if got := visualWidth(c.in); got != c.want {
+			t.Errorf("visualWidth(%q) = %d, want %d", c.in, got, c.want)
 		}
 	}
 }
