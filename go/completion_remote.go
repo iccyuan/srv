@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"srv/internal/srvio"
 	"srv/internal/srvpath"
 	"srv/internal/srvtty"
 	"strings"
@@ -196,5 +197,5 @@ func readLsCache(key string, ttl time.Duration) ([]string, bool) {
 
 func writeLsCache(key string, lines []string) error {
 	p := filepath.Join(cacheDir(), "ls-"+key+".txt")
-	return writeFileAtomic(p, []byte(strings.Join(lines, "\n")+"\n"), 0o600)
+	return srvio.WriteFileAtomic(p, []byte(strings.Join(lines, "\n")+"\n"), 0o600)
 }

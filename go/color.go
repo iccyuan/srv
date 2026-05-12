@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"sort"
+	"srv/internal/session"
 	"srv/internal/srvpath"
 	"srv/internal/srvtty"
 	"strings"
@@ -141,7 +142,7 @@ func colorBuiltinPrologue() string {
 //
 // MCP never goes through this path; it stays plain text.
 func colorPrologue() string {
-	mode := GetColorPreset()
+	mode := session.GetColorPreset()
 	switch mode {
 	case "off":
 		return ""
@@ -221,7 +222,7 @@ func applyColorPreset(name string) error {
 			"color use: %q not found in %s (looked for *.sh / *.itermcolors / *.toml) and no built-in theme matches.\nlist available with `srv color list`.",
 			name, srvpath.ColorPresetsDir())
 	}
-	sid, err := SetColorPreset(name)
+	sid, err := session.SetColorPreset(name)
 	if err != nil {
 		return exitErr(1, "color use: %v", err)
 	}
@@ -240,7 +241,7 @@ func applyColorPreset(name string) error {
 // marks the currently active preset (if any). isDefault marks the
 // shipped default theme (dracula).
 func buildColorPickerItems() []*pickerItem {
-	active := GetColorPreset()
+	active := session.GetColorPreset()
 	userPresets, _ := ListColorPresets()
 	out := make([]*pickerItem, 0, len(userPresets)+8)
 	overridden := map[string]bool{}
@@ -288,7 +289,7 @@ func cmdColor(args []string) error {
 	}
 	switch action {
 	case "on":
-		sid, err := SetColorPreset("on")
+		sid, err := session.SetColorPreset("on")
 		if err != nil {
 			fmt.Fprintln(os.Stderr, "color on:", err)
 			return exitCode(1)
@@ -296,7 +297,7 @@ func cmdColor(args []string) error {
 		fmt.Printf("color: on (session=%s)\n", sid)
 		return nil
 	case "off", "disable":
-		sid, err := SetColorPreset("off")
+		sid, err := session.SetColorPreset("off")
 		if err != nil {
 			fmt.Fprintln(os.Stderr, "color off:", err)
 			return exitCode(1)
@@ -304,7 +305,7 @@ func cmdColor(args []string) error {
 		fmt.Printf("color: off (session=%s)\n", sid)
 		return nil
 	case "auto", "clear", "default":
-		sid, err := SetColorPreset("")
+		sid, err := session.SetColorPreset("")
 		if err != nil {
 			fmt.Fprintln(os.Stderr, "color auto:", err)
 			return exitCode(1)
@@ -321,7 +322,7 @@ func cmdColor(args []string) error {
 		for _, p := range userPresets {
 			userSet[p] = true
 		}
-		active := GetColorPreset()
+		active := session.GetColorPreset()
 		mark := func(name string) string {
 			if name == active {
 				return "* "
@@ -373,8 +374,8 @@ func cmdColor(args []string) error {
 		}
 		return applyColorPreset(args[1])
 	case "status", "":
-		sid := SessionID()
-		mode := GetColorPreset()
+		sid := session.ID()
+		mode := session.GetColorPreset()
 		switch mode {
 		case "on":
 			fmt.Printf("color: on (session=%s)\n", sid)

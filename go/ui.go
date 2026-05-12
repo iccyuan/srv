@@ -74,7 +74,7 @@ type uiState struct {
 	// the render loop reads from these fields instead of re-doing
 	// the I/O. Without this cache every poll ticks costs roughly:
 	//
-	//	~10ms  GetCwd / TouchSession (sessions.json read + write)
+	//	~10ms  GetCwd / session.Touch (sessions.json read + write)
 	//	~5ms   resolveProjectFile (cwd walk + stat)
 	//	~5ms   panelDaemon daemonDial + status RPC
 	//	~5ms   panelTunnels loadTunnelStatuses
@@ -1274,7 +1274,7 @@ func panelActive(sb *strings.Builder, cfg *Config, st *uiState) {
 
 // uiCwd is the dashboard's cwd resolver. Deliberately does NOT
 // consult sessions.json -- the UI is decoupled from the shell that
-// launched it (per "ui 不和 shell 绑定"). TouchSession's read+write
+// launched it (per "ui 不和 shell 绑定"). session.Touch's read+write
 // also dominated the per-render cost, so skipping it makes profile
 // switches feel instant. Order of precedence: $SRV_CWD env > pinned
 // project file > profile.default_cwd.
@@ -2333,7 +2333,7 @@ func dashFooter(sb *strings.Builder, st *uiState) {
 	}
 }
 
-// parseISOLike accepts the timestamp formats srv writes -- nowISO()
+// parseISOLike accepts the timestamp formats srv writes -- srvutil.NowISO()
 // emits "2006-01-02T15:04:05" in local time (no timezone), while the
 // mcp log uses time.RFC3339. We try both rather than RFC3339-only so
 // stale job records / sessions from before the dashboard existed
@@ -2345,7 +2345,7 @@ func parseISOLike(s string) (time.Time, bool) {
 	if t, err := time.Parse(time.RFC3339, s); err == nil {
 		return t, true
 	}
-	// nowISO() writes local wall-clock without a tz suffix. Parse in
+	// srvutil.NowISO() writes local wall-clock without a tz suffix. Parse in
 	// time.Local so time.Since(t) compares apples to apples.
 	if t, err := time.ParseInLocation("2006-01-02T15:04:05", s, time.Local); err == nil {
 		return t, true

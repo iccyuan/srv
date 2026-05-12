@@ -6,6 +6,7 @@ import (
 	"os"
 	"sort"
 	"srv/internal/ansi"
+	"srv/internal/session"
 	"strings"
 	"time"
 
@@ -48,7 +49,7 @@ var profilePickerLabels = pickerLabels{pin: "this shell", def: "default"}
 
 // buildPickerItems translates the config + current session into picker rows.
 func buildPickerItems(cfg *Config) []*pickerItem {
-	_, rec := TouchSession()
+	_, rec := session.Touch()
 	pinned := ""
 	if rec.Profile != nil {
 		pinned = *rec.Profile

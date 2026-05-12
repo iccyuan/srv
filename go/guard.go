@@ -3,6 +3,7 @@ package main
 import (
 	"fmt"
 	"os"
+	"srv/internal/session"
 	"strings"
 )
 
@@ -24,7 +25,7 @@ func cmdGuard(args []string) error {
 	}
 	switch action {
 	case "on", "enable":
-		sid, err := SetGuard(true)
+		sid, err := session.SetGuard(true)
 		if err != nil {
 			fmt.Fprintln(os.Stderr, "guard on:", err)
 			return exitCode(1)
@@ -32,7 +33,7 @@ func cmdGuard(args []string) error {
 		fmt.Printf("guard: on  (session=%s)%s\n", sid, envHint())
 		return nil
 	case "off", "disable":
-		sid, err := SetGuard(false)
+		sid, err := session.SetGuard(false)
 		if err != nil {
 			fmt.Fprintln(os.Stderr, "guard off:", err)
 			return exitCode(1)
@@ -40,9 +41,9 @@ func cmdGuard(args []string) error {
 		fmt.Printf("guard: off (session=%s)%s\n", sid, envHint())
 		return nil
 	case "status", "":
-		sid := SessionID()
+		sid := session.ID()
 		state := "off"
-		if GuardOn() {
+		if session.GuardOn() {
 			state = "on"
 		}
 		fmt.Printf("guard: %s (session=%s)%s\n", state, sid, envHint())

@@ -7,6 +7,7 @@ import (
 	"os"
 	"sort"
 	"srv/internal/i18n"
+	"srv/internal/session"
 	"srv/internal/srvpath"
 	"srv/internal/srvtty"
 	"srv/internal/srvutil"
@@ -93,7 +94,7 @@ func cmdConfig(args []string, cfg *Config) error {
 			fmt.Println(i18n.T("misc.no_profiles_run_init"))
 			return nil
 		}
-		_, rec := TouchSession()
+		_, rec := session.Touch()
 		var pinned string
 		if rec.Profile != nil {
 			pinned = *rec.Profile
@@ -120,7 +121,7 @@ func cmdConfig(args []string, cfg *Config) error {
 			fmt.Printf("%s%-16s %s:%d\n", mark, n, target, p.GetPort())
 		}
 		if pinned != "" {
-			sid, _ := TouchSession()
+			sid, _ := session.Touch()
 			fmt.Printf("\n@ = pinned to this session (%s)\n", sid)
 		}
 		return nil
@@ -446,7 +447,7 @@ func cmdUse(args []string, cfg *Config) error {
 			return nil
 		}
 
-		sid, rec := TouchSession()
+		sid, rec := session.Touch()
 		var pinned string
 		if rec.Profile != nil {
 			pinned = *rec.Profile
@@ -530,7 +531,7 @@ func cmdStatus(cfg *Config, profileOverride string) error {
 	if err != nil {
 		return exitErr(1, "%v", err)
 	}
-	sid, rec := TouchSession()
+	sid, rec := session.Touch()
 	target := profile.Host
 	if profile.User != "" {
 		target = profile.User + "@" + profile.Host
@@ -677,27 +678,27 @@ func cmdSessions(args []string) error {
 	if len(args) > 0 {
 		action = args[0]
 	}
-	current := SessionID()
-	s := loadSessionsFile()
+	current := session.ID()
+	all := session.All()
 	switch action {
 	case "list":
-		if len(s.Sessions) == 0 {
+		if len(all) == 0 {
 			fmt.Println("(no sessions)")
 			return nil
 		}
-		ids := make([]string, 0, len(s.Sessions))
-		for id := range s.Sessions {
+		ids := make([]string, 0, len(all))
+		for id := range all {
 			ids = append(ids, id)
 		}
 		sort.Strings(ids)
 		for _, id := range ids {
-			rec := s.Sessions[id]
+			rec := all[id]
 			mark := "  "
 			if id == current {
 				mark = "> "
 			}
 			alive := "dead"
-			if PidAlive(id) {
+			if srvutil.PidAlive(id) {
 				alive = "alive"
 			}
 			pinned := "-"
@@ -719,33 +720,22 @@ func cmdSessions(args []string) error {
 		fmt.Printf("\n> = current session (%s)\n", current)
 		return nil
 	case "show":
-		_, _ = TouchSession()
-		s = loadSessionsFile()
-		rec := s.Sessions[current]
-		out := map[string]*SessionRecord{current: rec}
+		_, _ = session.Touch()
+		rec := session.All()[current]
+		out := map[string]*session.Record{current: rec}
 		b, _ := json.MarshalIndent(out, "", "  ")
 		fmt.Println(string(b))
 		return nil
 	case "clear":
-		if _, ok := s.Sessions[current]; ok {
-			delete(s.Sessions, current)
-			_ = writeSessionsFile(s)
+		if session.Clear(current) {
 			fmt.Printf("cleared session %s\n", current)
 		} else {
 			fmt.Printf("session %s has no record\n", current)
 		}
 		return nil
 	case "prune":
-		before := len(s.Sessions)
-		dead := 0
-		for id := range s.Sessions {
-			if !PidAlive(id) {
-				delete(s.Sessions, id)
-				dead++
-			}
-		}
-		_ = writeSessionsFile(s)
-		fmt.Printf("pruned %d/%d sessions (%d remaining)\n", dead, before, len(s.Sessions))
+		removed, before := session.PruneDead(srvutil.PidAlive)
+		fmt.Printf("pruned %d/%d sessions (%d remaining)\n", removed, before, before-removed)
 		return nil
 	}
 	return exitErr(1, "error: unknown sessions action %q", action)

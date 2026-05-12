@@ -4,11 +4,12 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
-	"path/filepath"
-	"srv/internal/i18n"
-	"srv/internal/srvpath"
-	"srv/internal/srvutil"
+	"srv/internal/session"
 	"time"
+
+	"srv/internal/i18n"
+	"srv/internal/srvio"
+	"srv/internal/srvpath"
 )
 
 // Path helpers (Dir / Config / Sessions / Jobs) live in
@@ -130,12 +131,9 @@ func (p *Profile) GetDialBackoff() time.Duration {
 	return d
 }
 
-// SchemaVersion identifies the current on-disk JSON shape. Bumped when a
-// breaking field rename / semantic change requires migration. Older srv
-// reading a newer file logs a warning and proceeds best-effort; newer srv
-// reading an older file (or one without _version) treats it as version 0
-// and silently upgrades on next save.
-const SchemaVersion = 1
+// SchemaVersion moved to srv/internal/srvio.SchemaVersion. Existing
+// references in this file (and config.json `_version` handling) read
+// srvio.SchemaVersion directly.
 
 // Config maps to ~/.srv/config.json.
 //
@@ -217,54 +215,17 @@ func LoadConfig() (*Config, error) {
 	if cfg.Profiles == nil {
 		cfg.Profiles = map[string]*Profile{}
 	}
-	warnIfNewerSchema(srvpath.Config(), cfg.Version)
+	srvio.WarnIfNewerSchema(srvpath.Config(), cfg.Version)
 	return cfg, nil
 }
 
 func SaveConfig(cfg *Config) error {
-	cfg.Version = SchemaVersion
-	return writeJSONFile(srvpath.Config(), cfg)
+	cfg.Version = srvio.SchemaVersion
+	return srvio.WriteJSONFile(srvpath.Config(), cfg)
 }
 
-// warnIfNewerSchema emits one stderr line when an on-disk file declares a
-// schema we don't know about yet. We still try to use it (forward compat),
-// but the user should know they may need a srv upgrade.
-func warnIfNewerSchema(path string, version int) {
-	if version > SchemaVersion {
-		fmt.Fprintf(os.Stderr,
-			"srv: %s is schema version %d; this srv knows %d. Upgrade srv to be safe.\n",
-			path, version, SchemaVersion)
-	}
-}
-
-func writeJSONFile(path string, v any) error {
-	b, err := json.MarshalIndent(v, "", "  ")
-	if err != nil {
-		return err
-	}
-	return writeFileAtomic(path, b, 0o600)
-}
-
-func writeFileAtomic(path string, data []byte, perm os.FileMode) error {
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
-		return err
-	}
-	tmp := filepath.Join(
-		filepath.Dir(path),
-		fmt.Sprintf(".%s.%d.%s.tmp", filepath.Base(path), os.Getpid(), srvutil.RandHex4()),
-	)
-	if err := os.WriteFile(tmp, data, perm); err != nil {
-		return err
-	}
-	if err := os.Rename(tmp, path); err != nil {
-		_ = os.Remove(path)
-		if err2 := os.Rename(tmp, path); err2 != nil {
-			_ = os.Remove(tmp)
-			return err2
-		}
-	}
-	return nil
-}
+// srvio.WriteJSONFile / srvio.WriteFileAtomic / srvio.WarnIfNewerSchema / srvio.SchemaVersion
+// live in srv/internal/srvio now. Use srvio.WriteJSONFile etc.
 
 // ResolveProfile picks the active profile by precedence:
 // override > session pin > $SRV_PROFILE > .srv-project pin > config default.
@@ -276,7 +237,7 @@ func writeFileAtomic(path string, data []byte, perm os.FileMode) error {
 func ResolveProfile(cfg *Config, override string) (string, *Profile, error) {
 	name := override
 	if name == "" {
-		_, rec := TouchSession()
+		_, rec := session.Touch()
 		if rec.Profile != nil {
 			name = *rec.Profile
 		}
@@ -314,7 +275,7 @@ func ResolveProfile(cfg *Config, override string) (string, *Profile, error) {
 // file is a one-time setup that travels with the repo; the env override
 // is what you reach for when one launch needs something different.
 func GetCwd(profileName string, profile *Profile) string {
-	_, rec := TouchSession()
+	_, rec := session.Touch()
 	if cwd, ok := rec.Cwds[profileName]; ok && cwd != "" {
 		return cwd
 	}
@@ -329,18 +290,18 @@ func GetCwd(profileName string, profile *Profile) string {
 
 // SetCwd persists a new cwd for (current session, profile).
 func SetCwd(profileName, cwd string) error {
-	sid, rec := TouchSession()
+	sid, rec := session.Touch()
 	rec.Cwds[profileName] = cwd
-	return saveSessionsWith(sid, rec)
+	return session.SaveWith(sid, rec)
 }
 
 // SetSessionProfile pins (or clears with empty string) the session profile.
 func SetSessionProfile(name string) (string, error) {
-	sid, rec := TouchSession()
+	sid, rec := session.Touch()
 	if name == "" {
 		rec.Profile = nil
 	} else {
 		rec.Profile = &name
 	}
-	return sid, saveSessionsWith(sid, rec)
+	return sid, session.SaveWith(sid, rec)
 }

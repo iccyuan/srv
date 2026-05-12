@@ -37,7 +37,7 @@ func TestParseISOLike(t *testing.T) {
 	}{
 		{"", false},
 		{"not a time", false},
-		// nowISO() output -- no timezone.
+		// srvutil.NowISO() output -- no timezone.
 		{"2026-05-10T23:25:16", true},
 		// RFC3339 with Z.
 		{"2026-05-10T23:25:16Z", true},
@@ -50,7 +50,7 @@ func TestParseISOLike(t *testing.T) {
 			t.Errorf("parseISOLike(%q) ok=%v, want %v", c.in, ok, c.want)
 		}
 	}
-	// Sanity: parsing nowISO() and computing time.Since should give a
+	// Sanity: parsing srvutil.NowISO() and computing time.Since should give a
 	// near-zero duration, not "57 years ago" (would happen if we
 	// parsed local time as UTC).
 	if t1, ok := parseISOLike("2026-05-11T00:00:00"); ok {

@@ -10,6 +10,7 @@ import (
 	"regexp"
 	"strconv"
 	"sync"
+	"time"
 )
 
 // IntToStr / UintToStr are pure conveniences -- srv builds enough
@@ -55,6 +56,32 @@ var (
 	regexCacheMu sync.Mutex
 	regexCache   = map[string]*regexp.Regexp{}
 )
+
+// NowISO returns an ISO-8601 truncated-to-seconds timestamp in the
+// local zone. Used as the human-readable Started / LastSeen field
+// across srv's JSON state files.
+func NowISO() string {
+	return time.Now().Format("2006-01-02T15:04:05")
+}
+
+// GenJobID returns a YYYYMMDD-HHMMSS-xxxx id (xxxx = RandHex4) that's
+// unique-enough for the per-shell job ledger and naturally sorts
+// chronologically.
+func GenJobID() string {
+	return time.Now().Format("20060102-150405") + "-" + RandHex4()
+}
+
+// PidAlive reports whether the OS still has a process with the given
+// pid. Takes the pid as a string so callers reading it from JSON /
+// stdout don't have to ParseInt at every call site; returns false
+// when the string can't be parsed.
+func PidAlive(pidStr string) bool {
+	pid, err := strconv.Atoi(pidStr)
+	if err != nil || pid <= 0 {
+		return false
+	}
+	return platformPidAlive(pid)
+}
 
 // RegexMatch compiles `pattern` (caching the compiled form) and tests
 // s. Used by the glob -> regex translator for sync includes/excludes;

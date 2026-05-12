@@ -5,7 +5,9 @@ import (
 	"fmt"
 	"os"
 	"sort"
+	"srv/internal/srvio"
 	"srv/internal/srvpath"
+	"srv/internal/srvutil"
 	"strings"
 )
 
@@ -40,13 +42,13 @@ func loadJobsFile() *jobsFile {
 	if j.Jobs == nil {
 		j.Jobs = []*JobRecord{}
 	}
-	warnIfNewerSchema(srvpath.Jobs(), j.Version)
+	srvio.WarnIfNewerSchema(srvpath.Jobs(), j.Version)
 	return j
 }
 
 func saveJobsFile(j *jobsFile) error {
-	j.Version = SchemaVersion
-	return writeJSONFile(srvpath.Jobs(), j)
+	j.Version = srvio.SchemaVersion
+	return srvio.WriteJSONFile(srvpath.Jobs(), j)
 }
 
 func findJob(j *jobsFile, idOrPrefix string) *JobRecord {
@@ -86,7 +88,7 @@ func spawnDetached(profileName string, profile *Profile, userCmd string) (*JobRe
 	}
 	defer c.Close()
 
-	jobID := genJobID()
+	jobID := srvutil.GenJobID()
 	pid, err := c.RunDetached(applyRemoteEnv(profile, userCmd), cwd, jobID)
 	if err != nil {
 		return nil, err
@@ -98,7 +100,7 @@ func spawnDetached(profileName string, profile *Profile, userCmd string) (*JobRe
 		Cwd:     cwd,
 		Pid:     pid,
 		Log:     fmt.Sprintf("~/.srv-jobs/%s.log", jobID),
-		Started: nowISO(),
+		Started: srvutil.NowISO(),
 	}
 	jobs := loadJobsFile()
 	jobs.Jobs = append(jobs.Jobs, rec)

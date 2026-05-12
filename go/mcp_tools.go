@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"srv/internal/session"
 	"srv/internal/srvtty"
 	"strconv"
 	"strings"
@@ -417,7 +418,7 @@ func resolveMCPProfile(cfg *Config, override string) (string, *Profile, *toolRes
 // `detach`, and any other tool that ferries a raw shell command to the
 // remote.
 func guardCheckRisky(tool, cmd string, confirm bool) *toolResult {
-	if !GuardOn() || confirm {
+	if !session.GuardOn() || confirm {
 		return nil
 	}
 	pat := runRiskyMatch(cmd)
@@ -818,7 +819,7 @@ func handleMCPUse(args map[string]any, cfg *Config, profileOverride string) tool
 	}
 	target, _ := args["profile"].(string)
 	if target == "" {
-		sid, rec := TouchSession()
+		sid, rec := session.Touch()
 		info := map[string]any{
 			"session": sid,
 			"pinned":  nil,
@@ -848,7 +849,7 @@ func handleMCPStatus(args map[string]any, cfg *Config, profileOverride string) t
 	if errResult != nil {
 		return *errResult
 	}
-	sid, rec := TouchSession()
+	sid, rec := session.Touch()
 	var pinned any
 	if rec.Profile != nil {
 		pinned = *rec.Profile
@@ -865,12 +866,12 @@ func handleMCPStatus(args map[string]any, cfg *Config, profileOverride string) t
 		"session":       sid,
 		"multiplex":     multiplex,
 		"compression":   prof.GetCompression(),
-		"guard":         GuardOn(),
+		"guard":         session.GuardOn(),
 	})
 }
 
 func handleMCPListProfiles(args map[string]any, cfg *Config, profileOverride string) toolResult {
-	sid, rec := TouchSession()
+	sid, rec := session.Touch()
 	var pinned any
 	if rec.Profile != nil {
 		pinned = *rec.Profile
@@ -1148,7 +1149,7 @@ func handleMCPSync(args map[string]any, cfg *Config, profileOverride string) too
 	if v, ok := args["yes"].(bool); ok {
 		o.yes = v
 	}
-	if o.delete && !o.dryRun && GuardOn() {
+	if o.delete && !o.dryRun && session.GuardOn() {
 		confirm, _ := args["confirm"].(bool)
 		if !confirm {
 			return guardBlocked("sync",
