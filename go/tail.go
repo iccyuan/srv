@@ -14,7 +14,7 @@ import (
 	"time"
 )
 
-// cmdTail follows one or more remote files in real time. Distinct from
+// Tail follows one or more remote files in real time. Distinct from
 // `srv run "tail -F path"` in two ways:
 //
 //  1. Auto-reconnect: if the SSH connection drops mid-stream we redial

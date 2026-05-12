@@ -10,7 +10,7 @@ import (
 	"time"
 )
 
-// cmdJournal is a thin, opinionated wrapper around remote
+// Journal is a thin, opinionated wrapper around remote
 // `journalctl`. The win over `srv run "journalctl ..."` is:
 //   - `-f` mode uses streamWithReconnect so a flaky link doesn't kill
 //     a long-running tail.

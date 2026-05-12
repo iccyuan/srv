@@ -3,154 +3,17 @@ package main
 import (
 	"crypto/sha256"
 	"encoding/hex"
-	"errors"
 	"fmt"
 	"io"
 	"os"
 	"path"
 	"path/filepath"
-	"srv/internal/daemon"
 	"srv/internal/progress"
 	"srv/internal/srvtty"
 	"strings"
 
 	"github.com/pkg/sftp"
 )
-
-// runRemoteStream opens a connection, runs `cmd` interactively (streaming
-// stdio), and closes. Returns remote exit code.
-//
-// Non-TTY runs go through the daemon when one is available -- the daemon's
-// pooled SSH connection saves the ~2.7s handshake. The daemon streams
-// stdout/stderr as base64 chunks (stream_run op) so commands like
-// `tail -f` and `find /` produce real-time output, not buffered.
-func runRemoteStream(profile *Profile, cwd, cmd string, tty bool) int {
-	if !tty {
-		if rc, ok := daemon.TryStreamRun(profile.Name, cwd, cmd); ok {
-			return rc
-		}
-	}
-	c, err := Dial(profile)
-	if err != nil {
-		printDiagError(err, profile)
-		return 255
-	}
-	defer c.Close()
-	rc, err := c.RunInteractive(cmd, cwd, tty)
-	if err != nil {
-		printDiagError(err, profile)
-		if rc == 0 {
-			return 255
-		}
-	}
-	return rc
-}
-
-// runRemoteCapture opens a connection, runs `cmd` capturing output, closes.
-//
-// Tries the daemon first when the profile is named -- the pooled SSH
-// connection reuses the handshake (~2.7s cold) and avoids spawning a
-// fresh keepalive goroutine per call. Falls back to a direct dial when
-// no daemon is reachable.
-//
-// Note: this is the path used by the MCP server (`run` tool, etc).
-// We deliberately do NOT inject any shell prologue here -- MCP wants
-// plain text the model can parse. CLI-only colour / init-file support
-// lives in cmdRun, where it belongs.
-func runRemoteCapture(profile *Profile, cwd, cmd string) (*RunCaptureResult, error) {
-	cmd = applyRemoteEnv(profile, cmd)
-	if profile.Name != "" {
-		if res, ok := daemon.TryRunCapture(profile.Name, cwd, cmd); ok {
-			return res, nil
-		}
-	}
-	c, err := Dial(profile)
-	if err != nil {
-		return &RunCaptureResult{
-			Stderr:   "ssh dial failed: " + err.Error(),
-			ExitCode: 255,
-			Cwd:      cwd,
-		}, nil
-	}
-	defer c.Close()
-	return c.RunCapture(cmd, cwd)
-}
-
-// changeRemoteCwd validates a target path on the remote and persists the
-// absolute result for the current session+profile. Tries the daemon first
-// (warm pooled SSH); falls back to a direct dial if no daemon. Returns
-// (newCwd, error). On failure, returns ("", err).
-func changeRemoteCwd(profileName string, profile *Profile, target string) (string, error) {
-	if target == "" {
-		target = "~"
-	}
-	current := GetCwd(profileName, profile)
-
-	// Fast path via daemon.
-	if newCwd, used, err := daemon.TryCd(profileName, current, target); used {
-		if err != nil {
-			return "", err
-		}
-		if perr := SetCwd(profileName, newCwd); perr != nil {
-			return "", perr
-		}
-		return newCwd, nil
-	}
-
-	// Direct dial fallback.
-	newCwd, err := validateRemoteCwd(profile, current, target)
-	if err != nil {
-		return "", err
-	}
-	if err := SetCwd(profileName, newCwd); err != nil {
-		return "", err
-	}
-	return newCwd, nil
-}
-
-// validateRemoteCwd is the side-effect-free "cd ... && pwd" probe that
-// returns the resolved absolute path. Used both by direct-dial cwd
-// changes and by the daemon's cd handler.
-func validateRemoteCwd(profile *Profile, current, target string) (string, error) {
-	if current == "" {
-		current = "~"
-	}
-	if target == "" {
-		target = "~"
-	}
-	cmd := fmt.Sprintf(
-		"cd %s 2>/dev/null || cd ~; cd %s && pwd",
-		srvtty.ShQuotePath(current), srvtty.ShQuotePath(target),
-	)
-	res, err := runRemoteCapture(profile, "", cmd)
-	if err != nil {
-		return "", err
-	}
-	if res.ExitCode != 0 {
-		stderr := strings.TrimSpace(res.Stderr)
-		if stderr == "" {
-			stderr = fmt.Sprintf("cd failed (exit %d)", res.ExitCode)
-		}
-		return "", errors.New(stderr)
-	}
-	lines := strings.Split(strings.TrimSpace(res.Stdout), "\n")
-	if len(lines) == 0 || strings.TrimSpace(lines[len(lines)-1]) == "" {
-		return "", errors.New("remote did not return a path")
-	}
-	return strings.TrimSpace(lines[len(lines)-1]), nil
-}
-
-// resolveRemotePath anchors a remote path: absolute or ~-prefixed stays
-// as-is, otherwise prepended with cwd.
-func resolveRemotePath(remote, cwd string) string {
-	if remote == "" {
-		return cwd
-	}
-	if strings.HasPrefix(remote, "/") || strings.HasPrefix(remote, "~") {
-		return remote
-	}
-	return strings.TrimRight(cwd, "/") + "/" + remote
-}
 
 // expandRemoteHome resolves a leading "~" by asking the remote `echo $HOME`
 // once and substituting. Cached on the *Client.

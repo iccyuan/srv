@@ -7,7 +7,7 @@ import (
 	"strings"
 )
 
-// cmdTop streams remote `top -b -d N` (batch mode, refresh every N
+// Top streams remote `top -b -d N` (batch mode, refresh every N
 // seconds) with auto-reconnect on SSH drop. Each frame scrolls
 // into local stdout -- this is the "log of snapshots" view; for
 // in-place curses-style top use `srv -t top` (gets a real pty).

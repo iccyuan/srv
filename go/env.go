@@ -4,7 +4,6 @@ import (
 	"fmt"
 	"os"
 	"sort"
-	"srv/internal/srvtty"
 	"strings"
 )
 
@@ -63,29 +62,4 @@ func cmdEnv(args []string, cfg *Config, profileOverride string) error {
 		return exitCode(2)
 	}
 	return nil
-}
-
-// applyRemoteEnv prepends `KEY=value ...` exports to the user's command,
-// using the profile's per-target env map. Sorted for deterministic shape
-// (so the same command builds to the same string under repeated calls).
-func applyRemoteEnv(profile *Profile, cmd string) string {
-	if profile == nil || len(profile.Env) == 0 {
-		return cmd
-	}
-	keys := make([]string, 0, len(profile.Env))
-	for k := range profile.Env {
-		keys = append(keys, k)
-	}
-	sort.Strings(keys)
-	parts := make([]string, 0, len(keys))
-	for _, k := range keys {
-		if k == "" {
-			continue
-		}
-		parts = append(parts, k+"="+srvtty.ShQuote(profile.Env[k]))
-	}
-	if len(parts) == 0 {
-		return cmd
-	}
-	return strings.Join(parts, " ") + " " + cmd
 }

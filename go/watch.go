@@ -12,7 +12,7 @@ import (
 	"time"
 )
 
-// cmdWatch runs a remote command repeatedly with an in-place refresh,
+// Watch runs a remote command repeatedly with an in-place refresh,
 // like the BSD/Linux `watch` utility but over SSH. Reuses the daemon
 // connection pool when available so each tick doesn't pay a fresh
 // handshake.
@@ -103,7 +103,7 @@ func cmdWatch(args []string, cfg *Config, profileOverride string) error {
 }
 
 // buildWatchFrame composes the header + body for one watch tick. Pulled
-// out of cmdWatch so the (otherwise side-effect-free) rendering can be
+// out of Watch so the (otherwise side-effect-free) rendering can be
 // covered by tests without driving a real SSH session.
 func buildWatchFrame(cmd, profile string, interval, latency time.Duration, res *RunCaptureResult, runErr error, prev string, diff bool) string {
 	var sb strings.Builder
