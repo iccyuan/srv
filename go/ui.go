@@ -55,6 +55,12 @@ type uiState struct {
 	liveness      map[string]bool
 	livenessFresh time.Time
 	hiddenJobs    int // filtered-out exited-jobs count for the title hint
+	// selectedProfile is the dashboard's notion of "which profile am I
+	// looking at right now". Independent of sessions.json so a dashboard
+	// open in one shell isn't yanked around by another shell's `srv use`.
+	// Persists across runs via ui-state.json; press `p` to cycle.
+	selectedProfile string
+	statusSetAt     time.Time // wall-clock when statusMsg was last set
 	// Snapshot of disk-backed state so rapid cursor / pane switches
 	// don't re-read config.toml + jobs.json + mcp.log (~50ms total)
 	// on every keystroke. Refreshed on tick, on forceRedraw, or when
@@ -148,6 +154,8 @@ func countUIRows(rows []uiRow) (tunnels, jobs, mcp int) {
 //	r             force a redraw
 //	↑ / ↓         move cursor within the focused window
 //	tab / h / l   switch between windows
+//	p / P         cycle the active profile forward / backward
+//	                (independent of the shell's `srv use` choice)
 //	k             kill the selected job (arms a Y/N confirm)
 func cmdUI(cfg *Config) error {
 	if !isStdinTTY() {
@@ -180,8 +188,19 @@ func cmdUI(cfg *Config) error {
 	defer fmt.Fprint(os.Stderr, ansiShow+altScreenOff)
 
 	kr := newKeyReader()
-	st := &uiState{forceRedraw: true, cursor: 0, liveness: map[string]bool{}}
+	st := &uiState{
+		forceRedraw:     true,
+		cursor:          0,
+		liveness:        map[string]bool{},
+		selectedProfile: pickInitialUIProfile(cfg),
+	}
 	const refreshEvery = 2 * time.Second
+	// pollEvery is how often the loop wakes when no key is pressed.
+	// Short enough that a terminal resize lands within ~150ms (without
+	// it, the redraw waited up to refreshEvery for the next keystroke
+	// or tick, which felt laggy). Snapshot reads stay gated by
+	// snapTTL, so the extra polls are essentially free.
+	const pollEvery = 150 * time.Millisecond
 	const livenessTTL = 10 * time.Second
 	// snapTTL bounds how long the on-disk snapshot may be reused
 	// between keystrokes. Matches refreshEvery so a 2s idle tick
@@ -212,11 +231,30 @@ func cmdUI(cfg *Config) error {
 			}
 			st.snapJobs = currentJobs()
 			st.snapMCP = readMCPStatus()
+			// Drop tool calls whose origin PID isn't in ActivePIDs --
+			// "history from a dead session" is noise; the user only
+			// wants to see what currently-running MCP servers are
+			// doing.
+			if len(st.snapMCP.RecentTools) > 0 {
+				kept := st.snapMCP.RecentTools[:0]
+				for _, tc := range st.snapMCP.RecentTools {
+					if pidIsActive(tc.PID, st.snapMCP.ActivePIDs) {
+						kept = append(kept, tc)
+					}
+				}
+				st.snapMCP.RecentTools = kept
+			}
 			st.snapAt = time.Now()
 		}
 		fresh := st.snapCfg
 		if fresh == nil {
 			fresh = cfg
+		}
+		// Keep selectedProfile valid against the freshest config: a
+		// profile rename / removal elsewhere shouldn't leave the
+		// dashboard pointing at a ghost.
+		if st.selectedProfile == "" || fresh.Profiles[st.selectedProfile] == nil {
+			st.selectedProfile = pickInitialUIProfile(fresh)
 		}
 		allJobs := st.snapJobs
 
@@ -266,12 +304,16 @@ func cmdUI(cfg *Config) error {
 			st.forceRedraw = false
 		}
 
-		b, ok := kr.readWithTimeout(refreshEvery)
+		b, ok := kr.readWithTimeout(pollEvery)
 		if !ok {
-			// 2s tick: clear any one-shot status message so the
-			// footer doesn't carry "killed 20260510" forever.
-			if st.statusMsg != "" {
+			// Poll tick: usually a no-op redraw (snapshot is cached,
+			// frame matches lastFrame, nothing flushes). The two
+			// things it actually does are detect a terminal resize
+			// promptly and age out the transient statusMsg after
+			// refreshEvery has elapsed since it was set.
+			if st.statusMsg != "" && !st.statusSetAt.IsZero() && time.Since(st.statusSetAt) > refreshEvery {
 				st.statusMsg = ""
+				st.statusSetAt = time.Time{}
 				st.forceRedraw = true
 			}
 			continue
@@ -576,6 +618,7 @@ func handleUIKey(b byte, st *uiState, jobs []*JobRecord, tunnelNames []string, c
 		} else {
 			st.statusMsg = ansiDim + title + " cancelled" + ansiReset
 		}
+		st.statusSetAt = time.Now()
 		return true
 	}
 
@@ -590,6 +633,16 @@ func handleUIKey(b byte, st *uiState, jobs []*JobRecord, tunnelNames []string, c
 	case 'r':
 		st.forceRedraw = true
 		st.snapAt = time.Time{} // manual refresh -- bypass snapTTL
+	case 'p', 'P':
+		dir := 1
+		if b == 'P' {
+			dir = -1
+		}
+		if next := cycleProfile(cfg, st.selectedProfile, dir); next != "" && next != st.selectedProfile {
+			st.selectedProfile = next
+			_ = saveUIPersistedState(&uiPersistedState{LastProfile: next})
+			st.forceRedraw = true
+		}
 	case '\t', 'l':
 		focusNextPane(st)
 	case 'h':
@@ -861,8 +914,8 @@ func redrawDashboard(content string, prevLines int) {
 func renderDashboard(cfg *Config, jobs []*JobRecord, tunnelNames []string, st *uiState) string {
 	var sb strings.Builder
 	btopHeader(&sb, st)
-	btopActive(&sb, cfg)
-	btopDaemon(&sb)
+	btopActive(&sb, cfg, st)
+	btopDaemon(&sb, st)
 
 	// Reuse the snapshot the main loop already tailed -- one disk
 	// read per snapTTL, not per redraw. Snapshot mode (st == nil) and
@@ -1086,7 +1139,8 @@ func btopHeader(sb *strings.Builder, st *uiState) {
 		fmt.Fprintln(sb)
 		return
 	}
-	boxLine(sb, fmt.Sprintf("keys: %sq%s quit  %sr%s redraw  %stab/h/l%s window  %s↑/↓%s row  %sk%s kill",
+	boxLine(sb, fmt.Sprintf("keys: %sq%s quit  %sr%s redraw  %stab/h/l%s window  %s↑/↓%s row  %sp%s profile  %sk%s kill",
+		ansiYellow+ansiBold, ansiReset,
 		ansiYellow+ansiBold, ansiReset,
 		ansiYellow+ansiBold, ansiReset,
 		ansiYellow+ansiBold, ansiReset,
@@ -1096,11 +1150,16 @@ func btopHeader(sb *strings.Builder, st *uiState) {
 	fmt.Fprintln(sb)
 }
 
-func btopActive(sb *strings.Builder, cfg *Config) {
+// btopActive renders the "what am I looking at" header as a single
+// inline row: profile · target · cwd · pinned. Compact form so a
+// long hostname or project path doesn't push us onto a second line
+// that the terminal then visually wraps; each section truncates
+// inline when the running total approaches dashboardContentWidth.
+func btopActive(sb *strings.Builder, cfg *Config, st *uiState) {
 	boxTop(sb, "active")
-	name, prof, err := ResolveProfile(cfg, "")
-	if err != nil {
-		boxLine(sb, btopKV("state", dashStatus("no profile", ansiDim)))
+	name, prof := lookupSelectedProfile(cfg, st)
+	if prof == nil {
+		boxLine(sb, ansiDim+"no profile selected"+ansiReset)
 		boxBottom(sb)
 		fmt.Fprintln(sb)
 		return
@@ -1112,20 +1171,116 @@ func btopActive(sb *strings.Builder, cfg *Config) {
 	if prof.GetPort() != 22 {
 		target += ":" + strconv.Itoa(prof.GetPort())
 	}
-	boxLine(sb, btopPair("profile", dashName(name), "target", ansiCyan+target+ansiReset))
-	boxLine(sb, btopKV("cwd", dashPath(GetCwd(name, prof))))
-	if pf := resolveProjectFile(); pf != nil {
-		boxLine(sb, btopKV("pinned", dashPath(pf.Path)))
+	cwd := GetCwd(name, prof)
+	parts := []string{
+		ansiYellow + ansiBold + name + ansiReset,
+		ansiCyan + target + ansiReset,
+		dashPath(cwd),
 	}
+	if pf := resolveProjectFile(); pf != nil {
+		parts = append(parts, ansiDim+"pinned "+ansiReset+dashPath(pf.Path))
+	}
+	// `p` cycles -- advertise it inline so the user doesn't have to
+	// read the help box to find the key.
+	hint := ansiDim + "(p switch)" + ansiReset
+	boxLine(sb, fitInlineParts(parts, hint, dashboardContentWidth))
 	boxBottom(sb)
 	fmt.Fprintln(sb)
 }
 
-func btopDaemon(sb *strings.Builder) {
+// lookupSelectedProfile reads the dashboard's chosen profile from
+// st.selectedProfile (preferred) and falls back to the first
+// available cfg profile -- the dashboard is no longer pegged to
+// sessions.json so we never call ResolveProfile here.
+func lookupSelectedProfile(cfg *Config, st *uiState) (string, *Profile) {
+	if cfg == nil {
+		return "", nil
+	}
+	if st != nil && st.selectedProfile != "" {
+		if p, ok := cfg.Profiles[st.selectedProfile]; ok {
+			p.Name = st.selectedProfile
+			return st.selectedProfile, p
+		}
+	}
+	for _, n := range sortedProfileNames(cfg) {
+		p := cfg.Profiles[n]
+		p.Name = n
+		return n, p
+	}
+	return "", nil
+}
+
+// fitInlineParts joins `parts` with a dim middot separator, appends
+// `tail` (right-aligned), and truncates the join from the right when
+// it overflows `width`. Used by the single-line panels so a long path
+// or profile-list shrinks instead of wrapping.
+func fitInlineParts(parts []string, tail string, width int) string {
+	sep := ansiDim + " · " + ansiReset
+	body := strings.Join(parts, sep)
+	tailW := visualWidth(tail)
+	bodyW := visualWidth(body)
+	avail := width - tailW - 1
+	if avail < 10 {
+		avail = 10
+	}
+	if bodyW > avail {
+		body = ellipsisAnsiRight(body, avail)
+		bodyW = visualWidth(body)
+	}
+	pad := width - bodyW - tailW
+	if pad < 1 {
+		pad = 1
+	}
+	return body + strings.Repeat(" ", pad) + tail
+}
+
+// ellipsisAnsiRight clips an ANSI-bearing string to visual width
+// `w`, replacing the last three visible cells with "..." when it
+// has to cut. Falls back to a plain-width truncation when the
+// string has no escape sequences -- the common case.
+func ellipsisAnsiRight(s string, w int) string {
+	if visualWidth(s) <= w {
+		return s
+	}
+	if w <= 3 {
+		return strings.Repeat(".", w)
+	}
+	// Walk visible cells, copying bytes verbatim and stopping when we
+	// hit the budget. ANSI escapes don't count toward the budget.
+	var out strings.Builder
+	seen := 0
+	inEscape := false
+	target := w - 3
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		if inEscape {
+			out.WriteByte(c)
+			if (c >= 0x40 && c <= 0x7e) || c == 'm' {
+				inEscape = false
+			}
+			continue
+		}
+		if c == 0x1b {
+			out.WriteByte(c)
+			inEscape = true
+			continue
+		}
+		if seen >= target {
+			break
+		}
+		out.WriteByte(c)
+		seen++
+	}
+	out.WriteString("...")
+	out.WriteString(ansiReset)
+	return out.String()
+}
+
+func btopDaemon(sb *strings.Builder, st *uiState) {
 	boxTop(sb, "daemon")
 	conn := daemonDial(300 * time.Millisecond)
 	if conn == nil {
-		boxLine(sb, btopKV("state", dashStatus("stopped", ansiDim)))
+		boxLine(sb, dashStatus("stopped", ansiDim))
 		boxBottom(sb)
 		fmt.Fprintln(sb)
 		return
@@ -1133,13 +1288,20 @@ func btopDaemon(sb *strings.Builder) {
 	defer conn.Close()
 	resp, err := daemonCall(conn, daemonRequest{Op: "status"}, time.Second)
 	if err != nil || resp == nil || !resp.OK {
-		boxLine(sb, btopKV("state", dashStatus("unreachable", ansiRed)))
+		boxLine(sb, dashStatus("unreachable", ansiRed))
 		boxBottom(sb)
 		fmt.Fprintln(sb)
 		return
 	}
-	boxLine(sb, btopPair("state", dashStatus("running", ansiGreen), "uptime", fmtDuration(time.Duration(resp.Uptime)*time.Second)))
-	boxLine(sb, btopPair("pooled", strconv.Itoa(len(resp.Profiles)), "profiles", ansiCyan+fitPlain(strings.Join(resp.Profiles, ", "), 42)+ansiReset))
+	parts := []string{
+		dashStatus("running", ansiGreen),
+		ansiDim + "up " + ansiReset + fmtDuration(time.Duration(resp.Uptime)*time.Second),
+		ansiDim + "pooled " + ansiReset + strconv.Itoa(len(resp.Profiles)),
+	}
+	if len(resp.Profiles) > 0 {
+		parts = append(parts, ansiCyan+strings.Join(resp.Profiles, ", ")+ansiReset)
+	}
+	boxLine(sb, fitInlineParts(parts, "", dashboardContentWidth))
 	boxBottom(sb)
 	fmt.Fprintln(sb)
 }
