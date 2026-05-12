@@ -5,6 +5,7 @@ import (
 	"os"
 	"sort"
 	"srv/internal/ansi"
+	"srv/internal/jobs"
 	"srv/internal/mcplog"
 	"srv/internal/srvtty"
 	"strconv"
@@ -83,7 +84,7 @@ type uiState struct {
 	// On a 150ms poll that's ~20% CPU just to redraw "nothing
 	// changed". With the cache idle redraws cost ~1ms (string build).
 	snapCfg          *Config
-	snapJobs         []*JobRecord
+	snapJobs         []*jobs.Record
 	snapMCP          mcplog.Status
 	snapDaemonResp   *daemonResponse
 	snapTunnelActive map[string]tunnelInfo
@@ -288,7 +289,17 @@ func cmdUI(cfg *Config) error {
 		// data). One SSH per profile, batched, so the cost is
 		// bounded even with many jobs.
 		if time.Since(st.livenessFresh) > livenessTTL || st.forceRedraw {
-			st.liveness = checkJobLiveness(allJobs, fresh)
+			// Wrap remoteExitMarkers as an ExitMarkerLister so the
+			// jobs package stays decoupled from Config / SSH client.
+			lister := func(profName string) (map[string]bool, bool) {
+				prof, ok := fresh.Profiles[profName]
+				if !ok {
+					return nil, false
+				}
+				markers := remoteExitMarkers(prof)
+				return markers, markers != nil
+			}
+			st.liveness = jobs.CheckLiveness(allJobs, lister)
 			st.livenessFresh = time.Now()
 		}
 
@@ -380,7 +391,7 @@ func sortedTunnelNames(cfg *Config) []string {
 // shared cursor. Order matches the visual stack of the left column
 // (tunnels -> jobs -> mcp recent), so a press of `j` walks the
 // cursor visually downward without jumping between sections.
-func buildSelectableRows(tunnels []string, jobs []*JobRecord, mcpRecent []mcplog.ToolCall) []uiRow {
+func buildSelectableRows(tunnels []string, jobs []*jobs.Record, mcpRecent []mcplog.ToolCall) []uiRow {
 	rows := make([]uiRow, 0, len(tunnels)+len(jobs)+len(mcpRecent))
 	for i, n := range tunnels {
 		rows = append(rows, uiRow{kind: "tunnel", id: n, idx: i})
@@ -491,8 +502,8 @@ func clampCursor(st *uiState) {
 
 // currentJobs loads jobs.json and returns the slice (nil-safe).
 // Pulled out so the main loop and the key handler share one source.
-func currentJobs() []*JobRecord {
-	jf := loadJobsFile()
+func currentJobs() []*jobs.Record {
+	jf := jobs.Load()
 	if jf == nil {
 		return nil
 	}
@@ -633,7 +644,7 @@ func indexOf(xs []string, v string) int {
 // Precedence: an active confirmation popup eats every key until it
 // resolves (Y = run, anything else = cancel), so a stray arrow press
 // can't accidentally trigger a different action while a "kill?" is up.
-func handleUIKey(b byte, st *uiState, jobs []*JobRecord, tunnelNames []string, cfg *Config, kr *keyReader) bool {
+func handleUIKey(b byte, st *uiState, jobs []*jobs.Record, tunnelNames []string, cfg *Config, kr *keyReader) bool {
 	if st.confirm != nil {
 		yes := b == 'y' || b == 'Y'
 		action := st.confirm.action
@@ -721,7 +732,7 @@ func handleUIKey(b byte, st *uiState, jobs []*JobRecord, tunnelNames []string, c
 // Non-applicable combinations (Space on a job, k on a tunnel) are
 // silently ignored -- the key hint in the footer already advertises
 // which keys apply to which kind of row.
-func armConfirmFor(st *uiState, row uiRow, jobs []*JobRecord, tunnelNames []string, cfg *Config, key byte) {
+func armConfirmFor(st *uiState, row uiRow, jobs []*jobs.Record, tunnelNames []string, cfg *Config, key byte) {
 	switch row.kind {
 	case "job":
 		if key != 'k' || row.idx < 0 || row.idx >= len(jobs) {
@@ -893,7 +904,7 @@ func uiTunnelRemove(name string, cfg *Config) (string, error) {
 // such pid ...") so the caller can put it in the footer. Errors flow
 // back to surface in the dashboard, NOT to stderr -- the screen is
 // in raw mode and stray writes break the layout.
-func uiKillJob(j *JobRecord, cfg *Config) (string, error) {
+func uiKillJob(j *jobs.Record, cfg *Config) (string, error) {
 	prof, ok := cfg.Profiles[j.Profile]
 	if !ok {
 		return "", fmt.Errorf("profile %q not found", j.Profile)
@@ -910,7 +921,7 @@ func uiKillJob(j *JobRecord, cfg *Config) (string, error) {
 	// Drop the local record regardless of whether the remote pid
 	// existed -- a "no such pid" usually means the job already exited
 	// and we just hadn't cleaned up.
-	jf := loadJobsFile()
+	jf := jobs.Load()
 	if jf != nil {
 		kept := jf.Jobs[:0]
 		for _, x := range jf.Jobs {
@@ -919,7 +930,7 @@ func uiKillJob(j *JobRecord, cfg *Config) (string, error) {
 			}
 		}
 		jf.Jobs = kept
-		_ = saveJobsFile(jf)
+		_ = jobs.Save(jf)
 	}
 	return out, nil
 }
@@ -948,7 +959,7 @@ func redrawDashboard(content string, prevLines int) {
 //
 // Snapshot mode (st == nil) skips the side-by-side -- a piped
 // output of stacked boxes is more useful than ascii-art columns.
-func renderDashboard(cfg *Config, jobs []*JobRecord, tunnelNames []string, st *uiState) string {
+func renderDashboard(cfg *Config, jobs []*jobs.Record, tunnelNames []string, st *uiState) string {
 	var sb strings.Builder
 	panelHeader(&sb, st)
 	panelActive(&sb, cfg, st)
@@ -1497,7 +1508,7 @@ func panelTunnels(sb *strings.Builder, cfg *Config, names []string, st *uiState)
 	fmt.Fprintln(sb)
 }
 
-func panelJobs(sb *strings.Builder, jobs []*JobRecord, st *uiState) {
+func panelJobs(sb *strings.Builder, jobs []*jobs.Record, st *uiState) {
 	hidden := 0
 	if st != nil {
 		hidden = st.hiddenJobs
@@ -1541,7 +1552,7 @@ func panelJobs(sb *strings.Builder, jobs []*JobRecord, st *uiState) {
 // arrow / Tab event so the user doesn't have to press Enter to
 // "open" a row -- ranger / mutt / lazygit pattern. Falls back to a
 // hint when nothing is selected.
-func panelDetail(sb *strings.Builder, cfg *Config, jobs []*JobRecord, tunnelNames []string, mcp mcplog.Status, st *uiState) {
+func panelDetail(sb *strings.Builder, cfg *Config, jobs []*jobs.Record, tunnelNames []string, mcp mcplog.Status, st *uiState) {
 	row := st.currentRow()
 	switch row.kind {
 	case "tunnel":
@@ -1607,7 +1618,7 @@ func panelMCPDetail(sb *strings.Builder, tc mcplog.ToolCall, mcp mcplog.Status) 
 // panelJobDetail renders job details fit for the right column.
 // Same fields as the old full-screen renderJobDetail, just laid out
 // against the narrower width.
-func panelJobDetail(sb *strings.Builder, j *JobRecord) {
+func panelJobDetail(sb *strings.Builder, j *jobs.Record) {
 	boxTop(sb, "job detail")
 	boxLine(sb, kvLine("id", dashName(j.ID)))
 	boxLine(sb, kvLine("profile", ansi.Cyan+j.Profile+ansi.Reset))
@@ -1829,9 +1840,9 @@ func max(a, b int) int {
 
 // renderJobDetail is the full-screen view that replaces the
 // dashboard when the user hits Enter on a job row. Shows every
-// field of the JobRecord plus the local references the user might
+// field of the jobs.Record plus the local references the user might
 // need to act on it (`srv logs`, `srv kill`).
-func renderJobDetail(j *JobRecord, st *uiState) string {
+func renderJobDetail(j *jobs.Record, st *uiState) string {
 	var sb strings.Builder
 	fmt.Fprintf(&sb, "%sJOB DETAIL%s  %s%s%s\n",
 		ansi.Bold+ansi.Magenta, ansi.Reset, ansi.Dim, j.ID, ansi.Reset)
@@ -2213,7 +2224,7 @@ func dashTunnels(sb *strings.Builder, cfg *Config, names []string, st *uiState) 
 // If the active filter (default) hid completed jobs, the section
 // header gets a "(N hidden)" tail so the user knows to consult
 // `srv jobs` for the full list.
-func dashJobs(sb *strings.Builder, jobs []*JobRecord, st *uiState) {
+func dashJobs(sb *strings.Builder, jobs []*jobs.Record, st *uiState) {
 	hidden := 0
 	if st != nil {
 		hidden = st.hiddenJobs

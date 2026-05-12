@@ -20,33 +20,6 @@ import (
 // probe per profile. Jobs in profiles we couldn't reach (or whose
 // profile no longer exists in config) are omitted from the result;
 // callers should treat "not in map" as alive (= don't hide).
-func checkJobLiveness(jobs []*JobRecord, cfg *Config) map[string]bool {
-	out := map[string]bool{}
-	if cfg == nil || len(jobs) == 0 {
-		return out
-	}
-	// Group jobs by profile so we can pay one SSH per profile.
-	byProfile := map[string][]*JobRecord{}
-	for _, j := range jobs {
-		byProfile[j.Profile] = append(byProfile[j.Profile], j)
-	}
-	for profName, profJobs := range byProfile {
-		prof, ok := cfg.Profiles[profName]
-		if !ok {
-			continue
-		}
-		done := remoteExitMarkers(prof)
-		if done == nil {
-			// Probe failed -- leave these jobs out of the result so
-			// the UI treats them as "alive" (= visible) by default.
-			continue
-		}
-		for _, j := range profJobs {
-			out[j.ID] = !done[j.ID]
-		}
-	}
-	return out
-}
 
 // remoteExitMarkers asks the profile for the set of `.exit` files
 // under ~/.srv-jobs/. Returns a map jobID -> true for each present

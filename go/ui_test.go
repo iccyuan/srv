@@ -1,6 +1,7 @@
 package main
 
 import (
+	"srv/internal/jobs"
 	"testing"
 	"time"
 )
@@ -93,7 +94,7 @@ func TestClampCursor(t *testing.T) {
 
 func TestBuildSelectableRows_OrderTunnelsBeforeJobs(t *testing.T) {
 	tunnels := []string{"db", "web"}
-	jobs := []*JobRecord{
+	jobs := []*jobs.Record{
 		{ID: "j1", Profile: "p"},
 		{ID: "j2", Profile: "p"},
 	}

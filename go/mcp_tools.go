@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"srv/internal/jobs"
 	"srv/internal/session"
 	"srv/internal/srvtty"
 	"strconv"
@@ -339,7 +340,7 @@ func runRejectUnfilteredMessage(label, body string) toolResult {
 	return r
 }
 
-func mcpDetachedResult(rec *JobRecord) toolResult {
+func mcpDetachedResult(rec *jobs.Record) toolResult {
 	info := map[string]any{
 		"job_id":    rec.ID,
 		"status":    "running",
@@ -1435,17 +1436,17 @@ func handleMCPRunGroup(args map[string]any, cfg *Config, profileOverride string)
 }
 
 func handleMCPListJobs(args map[string]any, cfg *Config, profileOverride string) toolResult {
-	jobs := loadJobsFile().Jobs
+	rs := jobs.Load().Jobs
 	if profileOverride != "" {
-		out := jobs[:0]
-		for _, j := range jobs {
+		out := rs[:0]
+		for _, j := range rs {
 			if j.Profile == profileOverride {
 				out = append(out, j)
 			}
 		}
-		jobs = out
+		rs = out
 	}
-	return mcpJSONResult(map[string]any{"jobs": jobs})
+	return mcpJSONResult(map[string]any{"jobs": rs})
 }
 
 func handleMCPTailLog(args map[string]any, cfg *Config, profileOverride string) toolResult {
@@ -1454,8 +1455,8 @@ func handleMCPTailLog(args map[string]any, cfg *Config, profileOverride string) 
 	if v, ok := args["lines"].(float64); ok {
 		lines = int(v)
 	}
-	jobs := loadJobsFile()
-	j := findJob(jobs, jid)
+	jf := jobs.Load()
+	j := jobs.Find(jf, jid)
 	if j == nil {
 		return mcpTextErr(fmt.Sprintf("no such job %q", jid))
 	}
@@ -1488,8 +1489,8 @@ func handleMCPWaitJob(args map[string]any, cfg *Config, profileOverride string) 
 	if v, ok := args["tail_lines"].(float64); ok && v > 0 {
 		tailLines = int(v)
 	}
-	jobs := loadJobsFile()
-	j := findJob(jobs, jid)
+	jf := jobs.Load()
+	j := jobs.Find(jf, jid)
 	if j == nil {
 		return mcpTextErr(fmt.Sprintf("no such job %q", jid))
 	}
@@ -1548,14 +1549,14 @@ tail -n %d %s
 		// doesn't keep advertising it. The .log / .exit files on
 		// the remote stay; users can still tail historical logs
 		// manually if they want.
-		out := jobs.Jobs[:0]
-		for _, x := range jobs.Jobs {
+		out := jf.Jobs[:0]
+		for _, x := range jf.Jobs {
 			if x.ID != j.ID {
 				out = append(out, x)
 			}
 		}
-		jobs.Jobs = out
-		_ = saveJobsFile(jobs)
+		jf.Jobs = out
+		_ = jobs.Save(jf)
 	} else if strings.HasPrefix(statusLine, "STATUS=killed") {
 		status = "killed"
 	} else if strings.HasPrefix(statusLine, "STATUS=running") {
@@ -1638,8 +1639,8 @@ func handleMCPKillJob(args map[string]any, cfg *Config, profileOverride string) 
 	if sig == "" {
 		sig = "TERM"
 	}
-	jobs := loadJobsFile()
-	j := findJob(jobs, jid)
+	jf := jobs.Load()
+	j := jobs.Find(jf, jid)
 	if j == nil {
 		return mcpTextErr(fmt.Sprintf("no such job %q", jid))
 	}
@@ -1649,14 +1650,14 @@ func handleMCPKillJob(args map[string]any, cfg *Config, profileOverride string) 
 	}
 	cmd := fmt.Sprintf("kill -%s %d 2>/dev/null && echo killed || echo 'no such pid'", sig, j.Pid)
 	res, _ := runRemoteCapture(prof, "", cmd)
-	out := jobs.Jobs[:0]
-	for _, x := range jobs.Jobs {
+	out := jf.Jobs[:0]
+	for _, x := range jf.Jobs {
 		if x.ID != j.ID {
 			out = append(out, x)
 		}
 	}
-	jobs.Jobs = out
-	_ = saveJobsFile(jobs)
+	jf.Jobs = out
+	_ = jobs.Save(jf)
 	text := strings.TrimSpace(res.Stdout)
 	if text == "" {
 		text = strings.TrimSpace(res.Stderr)

@@ -1,85 +1,17 @@
 package main
 
 import (
-	"encoding/json"
 	"fmt"
-	"os"
 	"sort"
-	"srv/internal/srvio"
-	"srv/internal/srvpath"
-	"srv/internal/srvutil"
 	"strings"
+
+	"srv/internal/jobs"
+	"srv/internal/srvutil"
 )
 
-type JobRecord struct {
-	ID      string `json:"id"`
-	Profile string `json:"profile"`
-	Cmd     string `json:"cmd"`
-	Cwd     string `json:"cwd"`
-	Pid     int    `json:"pid"`
-	Log     string `json:"log"`
-	Started string `json:"started"`
-}
-
-type jobsFile struct {
-	Version int          `json:"_version,omitempty"`
-	Jobs    []*JobRecord `json:"jobs"`
-}
-
-func loadJobsFile() *jobsFile {
-	data, err := os.ReadFile(srvpath.Jobs())
-	j := &jobsFile{}
-	if err != nil {
-		return j
-	}
-	if err := json.Unmarshal(data, j); err != nil {
-		// Helper used in MCP-reachable paths -- can't os.Exit.
-		// Treat a corrupt jobs file as empty; the user can `srv jobs`
-		// see the empty list and recover.
-		fmt.Fprintf(os.Stderr, "warning: %s is not valid JSON: %v\n", srvpath.Jobs(), err)
-		return j
-	}
-	if j.Jobs == nil {
-		j.Jobs = []*JobRecord{}
-	}
-	srvio.WarnIfNewerSchema(srvpath.Jobs(), j.Version)
-	return j
-}
-
-func saveJobsFile(j *jobsFile) error {
-	j.Version = srvio.SchemaVersion
-	return srvio.WriteJSONFile(srvpath.Jobs(), j)
-}
-
-func findJob(j *jobsFile, idOrPrefix string) *JobRecord {
-	for _, job := range j.Jobs {
-		if job.ID == idOrPrefix {
-			return job
-		}
-	}
-	matches := []*JobRecord{}
-	for _, job := range j.Jobs {
-		if strings.HasPrefix(job.ID, idOrPrefix) {
-			matches = append(matches, job)
-		}
-	}
-	if len(matches) == 1 {
-		return matches[0]
-	}
-	if len(matches) > 1 {
-		// Helper -- callers (cmdLogs, cmdKill, MCP tail_log/kill_job)
-		// each format the error themselves. Surface ambiguity as
-		// "no match" so they treat it as not-found and the user sees
-		// our hint.
-		fmt.Fprintf(os.Stderr, "ambiguous job id %q matches %d jobs.\n", idOrPrefix, len(matches))
-		return nil
-	}
-	return nil
-}
-
 // spawnDetached runs `userCmd` on the remote with nohup, returns the new
-// JobRecord (already persisted to jobs.json).
-func spawnDetached(profileName string, profile *Profile, userCmd string) (*JobRecord, error) {
+// jobs.Record (already persisted to jobs.json).
+func spawnDetached(profileName string, profile *Profile, userCmd string) (*jobs.Record, error) {
 	cwd := GetCwd(profileName, profile)
 
 	c, err := Dial(profile)
@@ -93,7 +25,7 @@ func spawnDetached(profileName string, profile *Profile, userCmd string) (*JobRe
 	if err != nil {
 		return nil, err
 	}
-	rec := &JobRecord{
+	rec := &jobs.Record{
 		ID:      jobID,
 		Profile: profileName,
 		Cmd:     userCmd,
@@ -102,9 +34,9 @@ func spawnDetached(profileName string, profile *Profile, userCmd string) (*JobRe
 		Log:     fmt.Sprintf("~/.srv-jobs/%s.log", jobID),
 		Started: srvutil.NowISO(),
 	}
-	jobs := loadJobsFile()
-	jobs.Jobs = append(jobs.Jobs, rec)
-	if err := saveJobsFile(jobs); err != nil {
+	jf := jobs.Load()
+	jf.Jobs = append(jf.Jobs, rec)
+	if err := jobs.Save(jf); err != nil {
 		return rec, err
 	}
 	return rec, nil
@@ -131,22 +63,22 @@ func cmdDetach(args []string, cfg *Config, profileOverride string) error {
 }
 
 func cmdJobs(cfg *Config, profileOverride string) error {
-	jobs := loadJobsFile().Jobs
+	rs := jobs.Load().Jobs
 	if profileOverride != "" {
-		filtered := jobs[:0]
-		for _, j := range jobs {
+		filtered := rs[:0]
+		for _, j := range rs {
 			if j.Profile == profileOverride {
 				filtered = append(filtered, j)
 			}
 		}
-		jobs = filtered
+		rs = filtered
 	}
-	if len(jobs) == 0 {
+	if len(rs) == 0 {
 		fmt.Println("(no jobs)")
 		return nil
 	}
-	sort.Slice(jobs, func(i, k int) bool { return jobs[i].ID < jobs[k].ID })
-	for _, j := range jobs {
+	sort.Slice(rs, func(i, k int) bool { return rs[i].ID < rs[k].ID })
+	for _, j := range rs {
 		cmd := j.Cmd
 		if len(cmd) > 60 {
 			cmd = cmd[:57] + "..."
@@ -171,8 +103,8 @@ see also:
 			follow = true
 		}
 	}
-	jobs := loadJobsFile()
-	j := findJob(jobs, jid)
+	jf := jobs.Load()
+	j := jobs.Find(jf, jid)
 	if j == nil {
 		return exitErr(1, "error: no such job %q", jid)
 	}
@@ -200,8 +132,8 @@ func cmdKill(args []string, cfg *Config, profileOverride string) error {
 			sig = "KILL"
 		}
 	}
-	jobs := loadJobsFile()
-	j := findJob(jobs, jid)
+	jf := jobs.Load()
+	j := jobs.Find(jf, jid)
 	if j == nil {
 		return exitErr(1, "error: no such job %q", jid)
 	}
@@ -212,13 +144,13 @@ func cmdKill(args []string, cfg *Config, profileOverride string) error {
 	cmd := fmt.Sprintf("kill -%s %d 2>/dev/null && echo killed || echo 'no such pid (already exited?)'", sig, j.Pid)
 	rc := runRemoteStream(prof, "", cmd, false)
 	// Drop the job record.
-	out := jobs.Jobs[:0]
-	for _, x := range jobs.Jobs {
+	out := jf.Jobs[:0]
+	for _, x := range jf.Jobs {
 		if x.ID != j.ID {
 			out = append(out, x)
 		}
 	}
-	jobs.Jobs = out
-	_ = saveJobsFile(jobs)
+	jf.Jobs = out
+	_ = jobs.Save(jf)
 	return exitCode(rc)
 }

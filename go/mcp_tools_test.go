@@ -1,6 +1,7 @@
 package main
 
 import (
+	"srv/internal/jobs"
 	"strings"
 	"testing"
 )
@@ -193,7 +194,7 @@ func TestBuildMCPRunText_TruncatesAtCap(t *testing.T) {
 }
 
 func TestMcpDetachedResult(t *testing.T) {
-	rec := &JobRecord{
+	rec := &jobs.Record{
 		ID:      "abc123",
 		Profile: "prod",
 		Pid:     42,
