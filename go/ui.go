@@ -16,13 +16,21 @@ import (
 // whether a "press Y to kill" prompt is up. Kept in one struct so
 // the renderers can read it without each one growing a parameter.
 type uiState struct {
-	selectedJob int    // index into the rendered jobs list; -1 = no jobs
+	selectedJob int    // index into the rendered jobs list (post-filter); -1 = empty
 	detailMode  bool   // showing the per-job detail panel
 	killPrompt  bool   // armed for confirmation; next 'y' actually kills
+	showAll     bool   // include completed (`.exit` marker present) jobs in the table
 	statusMsg   string // transient line in the footer (kill result, etc.)
 	lastFrame   string
 	prevLines   int
 	forceRedraw bool
+	// liveness is the result of the last remote "which job ids have
+	// an .exit marker" sweep: jobID -> alive. Missing entries mean
+	// "unknown" (e.g. profile unreachable) and are treated as alive
+	// so we never hide a job whose status we couldn't probe.
+	liveness      map[string]bool
+	livenessFresh time.Time
+	hiddenJobs    int // filtered-out count for the footer hint
 }
 
 // cmdUI is `srv ui` -- a one-screen dashboard showing the bits of srv
@@ -80,8 +88,9 @@ func cmdUI(cfg *Config) error {
 	defer fmt.Fprint(os.Stderr, ansiShow)
 
 	kr := newKeyReader()
-	st := &uiState{forceRedraw: true, selectedJob: 0}
+	st := &uiState{forceRedraw: true, selectedJob: 0, liveness: map[string]bool{}}
 	const refreshEvery = 2 * time.Second
+	const livenessTTL = 10 * time.Second
 
 	for {
 		// Reload config and jobs each loop so edits from another
@@ -90,13 +99,41 @@ func cmdUI(cfg *Config) error {
 		if fresh == nil {
 			fresh = cfg
 		}
-		jobs := currentJobs()
+		allJobs := currentJobs()
+
+		// Liveness: refresh from the remote whenever it's gone stale
+		// (or whenever a forced redraw signals the user wants fresh
+		// data). One SSH per profile, batched, so the cost is
+		// bounded even with many jobs.
+		if time.Since(st.livenessFresh) > livenessTTL || st.forceRedraw {
+			st.liveness = checkJobLiveness(allJobs, fresh)
+			st.livenessFresh = time.Now()
+		}
+
+		// Filter to active jobs unless the user asked for the full
+		// list via 'a'. Active = no `.exit` marker yet (or liveness
+		// unknown, e.g. profile down). This matches the semantics
+		// `wait_job` uses to decide "completed".
+		jobs := allJobs
+		hidden := 0
+		if !st.showAll {
+			kept := allJobs[:0]
+			for _, j := range allJobs {
+				if alive, ok := st.liveness[j.ID]; ok && !alive {
+					hidden++
+					continue
+				}
+				kept = append(kept, j)
+			}
+			jobs = kept
+		}
 		clampJobSelection(st, len(jobs))
 
 		var out string
 		if st.detailMode && st.selectedJob >= 0 && st.selectedJob < len(jobs) {
 			out = renderJobDetail(jobs[st.selectedJob], st)
 		} else {
+			st.hiddenJobs = hidden
 			out = renderDashboard(fresh, jobs, st)
 		}
 		if st.forceRedraw || out != st.lastFrame {
@@ -195,6 +232,10 @@ func handleUIKey(b byte, st *uiState, jobs []*JobRecord, cfg *Config, kr *keyRea
 	case 'q', '\x03': // q / Ctrl-C
 		return false
 	case 'r':
+		st.forceRedraw = true
+	case 'a':
+		st.showAll = !st.showAll
+		st.selectedJob = 0
 		st.forceRedraw = true
 	case 'j':
 		if st.selectedJob >= 0 && st.selectedJob+1 < len(jobs) {
@@ -401,14 +442,20 @@ func dashHeader(sb *strings.Builder, st *uiState) {
 		fmt.Fprintf(sb, "%ssnapshot mode (no tty)%s\n\n", ansiDim, ansiReset)
 		return
 	}
+	mode := "active only"
+	if st.showAll {
+		mode = "all jobs"
+	}
 	fmt.Fprintf(sb,
-		"Keys: %sq%s quit   %sr%s redraw   %sjk%s/%s↑↓%s select   %s⏎%s detail   %sK%s kill\n\n",
+		"Keys: %sq%s quit  %sr%s redraw  %sjk%s/%s↑↓%s select  %s⏎%s detail  %sK%s kill  %sa%s %s\n\n",
 		ansiYellow+ansiBold, ansiReset,
 		ansiYellow+ansiBold, ansiReset,
 		ansiYellow+ansiBold, ansiReset,
 		ansiYellow+ansiBold, ansiReset,
 		ansiYellow+ansiBold, ansiReset,
 		ansiYellow+ansiBold, ansiReset,
+		ansiYellow+ansiBold, ansiReset,
+		ansiDim+"("+mode+")"+ansiReset,
 	)
 }
 
@@ -561,11 +608,30 @@ func dashTunnels(sb *strings.Builder, cfg *Config) {
 // caller has a valid selection (st.selectedJob in range), the
 // matching row gets a `>` marker + reverse video so the user can
 // see what their next Enter / K will target.
+//
+// If the active filter (default) hid completed jobs, the section
+// header gets a "(N hidden)" tail so the user knows to press 'a'
+// when they want the full list.
 func dashJobs(sb *strings.Builder, jobs []*JobRecord, st *uiState) {
-	if len(jobs) == 0 {
+	hidden := 0
+	if st != nil && !st.showAll {
+		hidden = st.hiddenJobs
+	}
+	if len(jobs) == 0 && hidden == 0 {
 		return
 	}
-	dashSectionCount(sb, "Jobs", len(jobs))
+	if hidden > 0 {
+		fmt.Fprintf(sb, "%s== JOBS %s(%d, %d completed hidden -- press %sa%s%s%s)%s ==%s\n",
+			ansiBold+ansiCyan, ansiDim, len(jobs), hidden,
+			ansiYellow+ansiBold, ansiReset+ansiDim, "", "",
+			ansiReset+ansiBold+ansiCyan, ansiReset)
+	} else {
+		dashSectionCount(sb, "Jobs", len(jobs))
+	}
+	if len(jobs) == 0 {
+		fmt.Fprintf(sb, "  %s(nothing running)%s\n\n", ansiDim, ansiReset)
+		return
+	}
 	dashTableHeader(sb, "  ID            PROFILE     PID       AGE       COMMAND")
 	for i, j := range jobs {
 		cmd := j.Cmd
@@ -660,13 +726,19 @@ func dashFooter(sb *strings.Builder, st *uiState) {
 			ansiRed+ansiBold, ansiYellow+ansiBold, ansiRed+ansiBold, ansiReset)
 		return
 	}
-	fmt.Fprintf(sb, "Keys: %sq%s quit   %sr%s redraw   %sjk%s/%s↑↓%s move   %s⏎%s detail   %sK%s kill\n",
+	mode := "active only"
+	if st.showAll {
+		mode = "all jobs"
+	}
+	fmt.Fprintf(sb, "Keys: %sq%s quit  %sr%s redraw  %sjk%s/%s↑↓%s move  %s⏎%s detail  %sK%s kill  %sa%s %s\n",
 		ansiYellow+ansiBold, ansiReset,
 		ansiYellow+ansiBold, ansiReset,
 		ansiYellow+ansiBold, ansiReset,
 		ansiYellow+ansiBold, ansiReset,
 		ansiYellow+ansiBold, ansiReset,
 		ansiYellow+ansiBold, ansiReset,
+		ansiYellow+ansiBold, ansiReset,
+		ansiDim+"("+mode+")"+ansiReset,
 	)
 	if st.statusMsg != "" {
 		fmt.Fprintf(sb, "%s\n", st.statusMsg)
