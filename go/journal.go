@@ -184,6 +184,14 @@ func (j journalCmd) toRemoteCommand() string {
 // handleMCPJournal exposes journal to the MCP server. Bounded
 // duration (same idea as `tail`): follow_seconds defaults to 30s,
 // caps at 60s. Always non-follow if follow_seconds=0.
+//
+// Token-economy gates:
+//   - lines is clamped to 2000 to bound one-shot reads (the underlying
+//     journal can be GBs).
+//   - follow_seconds > 5 requires at least one of unit/since/priority/
+//     grep so a chatty system journal can't flood progress
+//     notifications. The CLI counterpart has no such gate -- this is
+//     purely an MCP rule.
 func handleMCPJournal(args map[string]any, cfg *Config, profileOverride string) toolResult {
 	unit, _ := args["unit"].(string)
 	since, _ := args["since"].(string)
@@ -192,6 +200,7 @@ func handleMCPJournal(args map[string]any, cfg *Config, profileOverride string) 
 	if v, ok := args["lines"].(float64); ok && v >= 0 {
 		lines = int(v)
 	}
+	lines, linesClamped := clampLines(lines, 2000)
 	grep, _ := args["grep"].(string)
 	follow := 0
 	if v, ok := args["follow_seconds"].(float64); ok && v > 0 {
@@ -199,6 +208,16 @@ func handleMCPJournal(args map[string]any, cfg *Config, profileOverride string) 
 	}
 	if follow > 60 {
 		follow = 60
+	}
+
+	// Token-economy gate. A bare `journalctl -f` taps the whole system
+	// log and floods within seconds. unit / since / priority / grep
+	// each meaningfully constrain the firehose; any one is enough.
+	if r := requireStreamFilter("journal", follow,
+		[]string{unit, since, priority, grep},
+		`{ unit: "nginx.service", follow_seconds: 30 }`,
+	); r != nil {
+		return *r
 	}
 
 	profName, prof, errResult := resolveMCPProfile(cfg, profileOverride)
@@ -217,9 +236,10 @@ func handleMCPJournal(args map[string]any, cfg *Config, profileOverride string) 
 		res, _ := runRemoteCapture(prof, cwd, remoteCmd)
 		text, truncatedBytes := buildMCPRunText(res, cwd)
 		structured := map[string]any{
-			"exit_code": res.ExitCode,
-			"cwd":       cwd,
-			"unit":      unit,
+			"exit_code":     res.ExitCode,
+			"cwd":           cwd,
+			"unit":          unit,
+			"lines_clamped": linesClamped,
 		}
 		if truncatedBytes > 0 {
 			structured["truncated_bytes"] = truncatedBytes
@@ -274,6 +294,7 @@ func handleMCPJournal(args map[string]any, cfg *Config, profileOverride string) 
 			"follow_seconds": follow,
 			"bytes_captured": captured,
 			"capped":         capped,
+			"lines_clamped":  linesClamped,
 		},
 	}
 }
