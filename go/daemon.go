@@ -205,7 +205,7 @@ func daemonSocketPath() string {
 	return filepath.Join(srvpath.Dir(), "daemon.sock")
 }
 
-// cmdDaemon starts the daemon listener (foreground). Ctrl-C stops it
+// Cmd starts the daemon listener (foreground). Ctrl-C stops it
 // cleanly and unlinks the socket file.
 func cmdDaemon(args []string) error {
 	// Subcommands of `srv daemon` itself: status / stop.
@@ -232,7 +232,7 @@ func cmdDaemon(args []string) error {
 				fmt.Println("daemon: restarted")
 				return nil
 			}
-			return exitErr(1, "daemon: restart failed")
+			return fmt.Errorf("daemon: restart failed")
 		case "logs":
 			return exitCode(daemonClientLogs())
 		case "prune-cache":
@@ -248,14 +248,14 @@ func cmdDaemon(args []string) error {
 			_ = os.Remove(sockPath)
 		} else {
 			fmt.Fprintln(os.Stderr, "daemon already running at", sockPath)
-			return exitCode(1)
+			return fmt.Errorf("")
 		}
 	}
 
 	listener, err := net.Listen("unix", sockPath)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "daemon listen:", err)
-		return exitCode(1)
+		return fmt.Errorf("")
 	}
 	_ = os.Chmod(sockPath, 0o600)
 	fmt.Fprintln(os.Stderr, "srv daemon listening at", sockPath)

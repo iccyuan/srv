@@ -13,7 +13,7 @@ import (
 	"time"
 )
 
-// daemonDial connects to the daemon socket with a short timeout. Returns
+// Dial connects to the daemon socket with a short timeout. Returns
 // nil + nil error if no daemon is reachable (the caller falls back to
 // direct dial). Returns an error for unexpected failures.
 func daemonDial(timeout time.Duration) net.Conn {
@@ -313,4 +313,22 @@ func daemonClientStop() int {
 	}
 	fmt.Fprintln(os.Stderr, "daemon: shutdown returned without ok")
 	return 1
+}
+
+// tunnelInfo flows from the daemon to the CLI as the "active" view
+// of one tunnel. JSON-tagged for the daemon protocol; never written
+// to disk.
+type tunnelInfo struct {
+	Name    string `json:"name"`
+	Type    string `json:"type"`
+	Spec    string `json:"spec"`
+	Profile string `json:"profile,omitempty"`
+	Listen  string `json:"listen,omitempty"`
+	Started int64  `json:"started,omitempty"`
+}
+
+// String makes tunnelInfo printable for diagnostics.
+func (t tunnelInfo) String() string {
+	b, _ := json.Marshal(t)
+	return string(b)
 }

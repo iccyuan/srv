@@ -8,6 +8,7 @@ package main
 import (
 	"fmt"
 	"os"
+	"srv/internal/clierr"
 
 	"srv/internal/i18n"
 )
@@ -88,53 +89,17 @@ func parseGlobalFlags(args []string) (globalOpts, []string) {
 	return opts, args[i:]
 }
 
-// errExit is the error type cmd handlers return to signal a non-zero
-// exit code with an optional stderr message. main.go's run() translates
-// it back into an exit code via translateExit. Replaces the old global
-// fatal() / os.Exit pattern: cmd code now propagates rather than
-// terminating, so the same handler can be safely reused under the MCP
-// path (where os.Exit would have killed the whole server).
-type errExit struct {
-	code int
-	msg  string
-}
+// errExit / exitErr / exitCode / exitCodeOf moved to internal/clierr
+// so feature subpackages can produce ExitError values translateExit
+// recognises. The aliases below keep every package-main call site
+// unchanged while the types live in the new shared package.
+type errExit = clierr.ExitError
 
-func (e *errExit) Error() string {
-	if e.msg == "" {
-		return fmt.Sprintf("exit %d", e.code)
-	}
-	return e.msg
-}
-
-// exitErr builds an errExit with a printf-formatted message. Use code 1
-// for ordinary failures, 2 for usage / argument errors (POSIX convention).
-func exitErr(code int, format string, args ...any) error {
-	return &errExit{code: code, msg: fmt.Sprintf(format, args...)}
-}
-
-// exitCode wraps a bare numeric exit code into an error. Useful when a
-// non-cmd helper (runRemoteStream, etc.) already returned the right
-// code and we just want to propagate it without an extra message.
-func exitCode(code int) error {
-	if code == 0 {
-		return nil
-	}
-	return &errExit{code: code}
-}
-
-// exitCodeOf is the inverse of exitCode -- pulls the numeric code out
-// of an error. nil → 0, errExit → its code, anything else → 1. Used by
-// cmdRunWithHints to decide whether a remote command exited 127 (the
-// "did you mean a local subcommand?" hint trigger).
-func exitCodeOf(err error) int {
-	if err == nil {
-		return 0
-	}
-	if ex, ok := err.(*errExit); ok {
-		return ex.code
-	}
-	return 1
-}
+var (
+	exitErr    = clierr.Errf
+	exitCode   = clierr.Code
+	exitCodeOf = clierr.CodeOf
+)
 
 // translateExit converts a cmd handler's error return into the int
 // run() needs to pass to os.Exit. Empty-msg errExits (exitCode-style)
@@ -145,10 +110,10 @@ func translateExit(err error) int {
 		return 0
 	}
 	if ex, ok := err.(*errExit); ok {
-		if ex.msg != "" {
-			fmt.Fprintln(os.Stderr, ex.msg)
+		if ex.Msg != "" {
+			fmt.Fprintln(os.Stderr, ex.Msg)
 		}
-		return ex.code
+		return ex.Code
 	}
 	fmt.Fprintln(os.Stderr, err)
 	return 1

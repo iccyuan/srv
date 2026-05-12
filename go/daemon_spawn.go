@@ -15,7 +15,7 @@ import (
 //
 // Auto-spawn is racy by design: two parallel srv invocations might both
 // try to start a daemon. The second one's listen() will fail because the
-// socket is already bound; cmdDaemon detects this and exits cleanly. Net
+// socket is already bound; Cmd detects this and exits cleanly. Net
 // result: exactly one daemon survives.
 func ensureDaemon() bool {
 	if daemonPing() {
