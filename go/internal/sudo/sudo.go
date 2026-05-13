@@ -1,9 +1,21 @@
-package main
+// Package sudo implements `srv sudo <cmd>` -- running sudo on the
+// remote without going through a remote pty.
+//
+// Two convenience knobs:
+//   - The password is read from the local terminal with echo off
+//     (term.ReadPassword), so it's never visible on screen or in
+//     shell history.
+//   - The daemon keeps a per-profile in-memory cache (default TTL 5
+//     min) so consecutive sudos in the same shell don't re-prompt.
+//     The cache lives only in the daemon process; never persisted.
+//     Pass --no-cache to skip both read and write.
+package sudo
 
 import (
 	"encoding/base64"
 	"fmt"
 	"os"
+	"srv/internal/clierr"
 	"srv/internal/config"
 	"srv/internal/daemon"
 	"srv/internal/srvtty"
@@ -14,21 +26,10 @@ import (
 	"golang.org/x/term"
 )
 
-// cmdSudo runs `sudo <cmd>` on the remote. The hard part is the
-// password prompt: under `srv -t sudo ...` the remote pty handles it
-// fine, but that's heavier than necessary and only works when stdin is
-// a tty. cmdSudo runs the command non-tty and pipes the password
-// through `sudo -S` from local stdin.
-//
-// Two convenience knobs:
-//   - The password is read from the local terminal with echo off
-//     (term.ReadPassword), so it's never visible on screen or shell
-//     history.
-//   - The daemon keeps a per-profile in-memory cache (default TTL 5
-//     min) so consecutive sudos in the same shell don't re-prompt.
-//     The cache lives only in the daemon process; never persisted.
-//     Pass --no-cache to skip both read and write.
-func cmdSudo(args []string, cfg *config.Config, opts globalOpts) error {
+// Cmd implements `srv sudo [--no-cache] [--cache-ttl <dur>] [--clear-cache] <command>`.
+// profileOverride is the value of the global `-P/--profile` flag (empty
+// when not set).
+func Cmd(args []string, cfg *config.Config, profileOverride string) error {
 	useCache := true
 	cacheTTL := 5 * time.Minute
 	var cmdArgs []string
@@ -39,20 +40,20 @@ func cmdSudo(args []string, cfg *config.Config, opts globalOpts) error {
 			useCache = false
 		case a == "--cache-ttl":
 			if i+1 >= len(args) {
-				return exitErr(2, "--cache-ttl requires a value (e.g. 10m)")
+				return clierr.Errf(2, "--cache-ttl requires a value (e.g. 10m)")
 			}
 			d, err := time.ParseDuration(args[i+1])
 			if err != nil {
-				return exitErr(2, "bad --cache-ttl %q: %v", args[i+1], err)
+				return clierr.Errf(2, "bad --cache-ttl %q: %v", args[i+1], err)
 			}
 			cacheTTL = d
 			i++
 		case a == "--clear-cache":
-			profName, _, err := config.Resolve(cfg, opts.profile)
+			profName, _, err := config.Resolve(cfg, profileOverride)
 			if err != nil {
-				return exitErr(1, "%v", err)
+				return clierr.Errf(1, "%v", err)
 			}
-			daemonSudoCacheClear(profName)
+			cacheClear(profName)
 			fmt.Println("sudo cache cleared for profile", profName)
 			return nil
 		case a == "--":
@@ -63,34 +64,34 @@ func cmdSudo(args []string, cfg *config.Config, opts globalOpts) error {
 		}
 	}
 	if len(cmdArgs) == 0 {
-		return exitErr(2, "usage: srv sudo [--no-cache] [--cache-ttl <dur>] <command>")
+		return clierr.Errf(2, "usage: srv sudo [--no-cache] [--cache-ttl <dur>] <command>")
 	}
 	cmd := strings.Join(cmdArgs, " ")
 
-	profName, profile, err := config.Resolve(cfg, opts.profile)
+	profName, profile, err := config.Resolve(cfg, profileOverride)
 	if err != nil {
-		return exitErr(1, "%v", err)
+		return clierr.Errf(1, "%v", err)
 	}
 
 	password, fromCache := "", false
 	if useCache {
-		if pw := daemonSudoCacheGet(profName); pw != "" {
+		if pw := cacheGet(profName); pw != "" {
 			password = pw
 			fromCache = true
 		}
 	}
 	if password == "" {
-		pw, err := promptSudoPassword(profile.User)
+		pw, err := promptPassword(profile.User)
 		if err != nil {
-			return exitErr(1, "read password: %v", err)
+			return clierr.Errf(1, "read password: %v", err)
 		}
 		password = pw
 	}
 
 	cwd := config.GetCwd(profName, profile)
-	rc, err := runRemoteSudo(profile, cwd, cmd, password)
+	rc, err := runRemote(profile, cwd, cmd, password)
 	if err != nil {
-		return exitErr(1, "%v", err)
+		return clierr.Errf(1, "%v", err)
 	}
 
 	// Treat exit code 1 + "incorrect password" as auth failure and
@@ -99,24 +100,24 @@ func cmdSudo(args []string, cfg *config.Config, opts globalOpts) error {
 	// fragments rather than exact strings; false negatives only mean
 	// the user retypes the password one extra time.
 	if rc == 1 {
-		daemonSudoCacheClear(profName)
+		cacheClear(profName)
 		if fromCache {
 			fmt.Fprintln(os.Stderr, "srv sudo: cached password rejected, cleared cache")
 		}
 	} else if rc == 0 && useCache {
 		// Refresh on success so a long-running session keeps the TTL
 		// alive without forcing re-prompts at the cliff edge.
-		daemonSudoCacheSet(profName, password, cacheTTL)
+		cacheSet(profName, password, cacheTTL)
 	}
-	return exitCode(rc)
+	return clierr.Code(rc)
 }
 
-// promptSudoPassword reads a password from the local terminal with
-// echo off. Fails fast when stdin isn't a tty -- MCP / piped contexts
+// promptPassword reads a password from the local terminal with echo
+// off. Fails fast when stdin isn't a tty -- MCP / piped contexts
 // can't prompt interactively, and we don't want to read a password
 // from arbitrary stdin (would surface in shell history if `--no-cache
 // </file`-style mistakes happen).
-func promptSudoPassword(user string) (string, error) {
+func promptPassword(user string) (string, error) {
 	if !srvtty.IsStdinTTY() {
 		return "", fmt.Errorf("stdin is not a tty; cannot prompt (use cache or run from an interactive shell)")
 	}
@@ -136,7 +137,7 @@ func promptSudoPassword(user string) (string, error) {
 	return string(b), nil
 }
 
-// runRemoteSudo dials the profile, runs `sudo -S -p ” <cmd>` with the
+// runRemote dials the profile, runs `sudo -S -p ” <cmd>` with the
 // supplied password piped on stdin, and forwards stdout/stderr to the
 // local terminal. Returns the remote exit code.
 //
@@ -144,7 +145,7 @@ func promptSudoPassword(user string) (string, error) {
 // password and don't want sudo to print "[sudo] password for ..." to
 // stderr. The trailing newline on the password is required so sudo's
 // read() returns.
-func runRemoteSudo(profile *config.Profile, cwd, cmd, password string) (int, error) {
+func runRemote(profile *config.Profile, cwd, cmd, password string) (int, error) {
 	c, err := sshx.Dial(profile)
 	if err != nil {
 		return 255, err
@@ -154,9 +155,9 @@ func runRemoteSudo(profile *config.Profile, cwd, cmd, password string) (int, err
 	return c.RunStreamStdin(full, strings.NewReader(password+"\n"))
 }
 
-// daemonSudoCacheGet returns the cached sudo password for `profile`,
-// or "" on miss / no daemon. Decoded from the wire base64 form.
-func daemonSudoCacheGet(profile string) string {
+// cacheGet returns the cached sudo password for `profile`, or "" on
+// miss / no daemon. Decoded from the wire base64 form.
+func cacheGet(profile string) string {
 	conn := daemon.DialSock(300 * time.Millisecond)
 	if conn == nil {
 		return ""
@@ -176,12 +177,12 @@ func daemonSudoCacheGet(profile string) string {
 	return string(b)
 }
 
-// daemonSudoCacheSet stores `password` in the daemon's in-memory cache
-// for `profile`, expiring after `ttl`. Best-effort: if the daemon
-// isn't running, caching just doesn't happen (we don't spawn it for
-// this, since sudo is interactive and the user paid the prompt cost
+// cacheSet stores `password` in the daemon's in-memory cache for
+// `profile`, expiring after `ttl`. Best-effort: if the daemon isn't
+// running, caching just doesn't happen (we don't spawn it for this,
+// since sudo is interactive and the user paid the prompt cost
 // already).
-func daemonSudoCacheSet(profile, password string, ttl time.Duration) {
+func cacheSet(profile, password string, ttl time.Duration) {
 	conn := daemon.DialSock(300 * time.Millisecond)
 	if conn == nil {
 		return
@@ -195,9 +196,9 @@ func daemonSudoCacheSet(profile, password string, ttl time.Duration) {
 	}, 2*time.Second)
 }
 
-// daemonSudoCacheClear evicts the cached password for `profile`.
-// Idempotent on cache miss.
-func daemonSudoCacheClear(profile string) {
+// cacheClear evicts the cached password for `profile`. Idempotent on
+// cache miss.
+func cacheClear(profile string) {
 	conn := daemon.DialSock(300 * time.Millisecond)
 	if conn == nil {
 		return

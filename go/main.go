@@ -11,6 +11,7 @@ import (
 	"srv/internal/clierr"
 	"srv/internal/config"
 	"srv/internal/group"
+	"srv/internal/hints"
 
 	"srv/internal/i18n"
 )
@@ -191,7 +192,7 @@ func run(args []string) int {
 	// Default: treat as a remote command. Nudge the user if the first
 	// token is suspiciously close to a known local subcommand -- the
 	// run still proceeds (their command might be the right one).
-	emitTypoHintPre(ctx.cfg, opts, sub)
+	hints.EmitTypoPre(ctx.cfg, opts.noHints, sub)
 	if opts.group != "" {
 		return translateExit(group.RunCmd(rest, ctx.cfg, opts.group))
 	}

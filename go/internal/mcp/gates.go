@@ -1,0 +1,335 @@
+package mcp
+
+import (
+	"fmt"
+	"regexp"
+	"srv/internal/session"
+	"strconv"
+	"strings"
+)
+
+// Pre-execution gates: high-risk command guard, sync-rejection
+// patterns (sleep N, tail -f, etc), token-economy filters for
+// unbounded sources (cat /file, dmesg, journalctl, find /), and the
+// streaming-must-have-a-filter rule. All called from handlers; none
+// touch SSH directly.
+
+// riskyPattern flags a remote command as destructive enough to
+// require confirm=true when the session guard is on. Each pattern is
+// a regex matched against the full command string; `name` is the
+// human-readable label surfaced to the model in the block reason.
+//
+// The list is intentionally short and conservative -- false-positives
+// are recoverable (re-issue with confirm=true), false-negatives are
+// not. We cover the canonical "oh no" set: recursive force delete,
+// raw-disk writes, mkfs, system halt, SQL drops, explicit truncates.
+//
+// Word boundaries (\b) keep us from matching `farm -rf` etc. Quoted
+// content (echo "rm -rf /") is filtered out separately by riskyMatch
+// via isInsideQuotes, since \b alone can't tell a real command
+// position from a string-literal occurrence.
+type riskyPattern struct {
+	name string
+	re   *regexp.Regexp
+}
+
+var riskyPatterns = []riskyPattern{
+	{"rm -rf", regexp.MustCompile(`(?i)\brm\s+(?:-[a-zA-Z]*[rR][a-zA-Z]*[fF]\b|-[a-zA-Z]*[fF][a-zA-Z]*[rR]\b|--recursive\s+--force|--force\s+--recursive|-[rRfF]\s+--(?:recursive|force)\b|--(?:recursive|force)\s+-[rRfF]\b)`)},
+	{"dd of=/...", regexp.MustCompile(`(?i)\bdd\s+(?:[^|;&\n]*\s)?(?:of=|if=/dev/(?:zero|random|urandom)\b)`)},
+	{"mkfs", regexp.MustCompile(`(?i)\bmkfs(?:\.[a-z0-9]+)?\b`)},
+	{"shutdown", regexp.MustCompile(`(?i)\bshutdown\b`)},
+	{"reboot", regexp.MustCompile(`(?i)\breboot\b`)},
+	{"halt", regexp.MustCompile(`(?i)\bhalt\b`)},
+	{"poweroff", regexp.MustCompile(`(?i)\bpoweroff\b`)},
+	{"drop database", regexp.MustCompile(`(?i)\bdrop\s+(?:database|table|schema)\b`)},
+	{"truncate table", regexp.MustCompile(`(?i)\btruncate\s+(?:table\b|-)`)},
+	{":>/", regexp.MustCompile(`:\s*>\s*/`)},
+	{"chattr -i", regexp.MustCompile(`(?i)\bchattr\s+-i\b`)},
+	{"> /dev/disk", regexp.MustCompile(`>\s*/dev/(?:sd|nvme|disk|hd)`)},
+}
+
+// riskyMatch reports the name of the first risky pattern present in
+// `command`, or "" if none. Matches inside single- or double-quoted
+// strings (e.g. `echo "rm -rf foo"`) are skipped -- they're operands,
+// not commands. Quote tracking is best-effort: it handles common
+// shell quoting but doesn't try to mirror full POSIX rules.
+func riskyMatch(command string) string {
+	if command == "" {
+		return ""
+	}
+	for _, p := range riskyPatterns {
+		for _, loc := range p.re.FindAllStringIndex(command, -1) {
+			if !isInsideQuotes(command, loc[0]) {
+				return p.name
+			}
+		}
+	}
+	return ""
+}
+
+// isInsideQuotes reports whether byte offset `pos` in `s` falls
+// inside a `"..."` or `'...'` quoted region. Tracks backslash escapes
+// inside double quotes (POSIX rule); single quotes are literal.
+// Heredocs and $'...' are not modeled -- treating their contents as
+// "real command" favors safety (catch the risky token) over
+// precision.
+func isInsideQuotes(s string, pos int) bool {
+	inDouble, inSingle, escape := false, false, false
+	for i := 0; i < pos && i < len(s); i++ {
+		c := s[i]
+		if escape {
+			escape = false
+			continue
+		}
+		if c == '\\' && inDouble {
+			escape = true
+			continue
+		}
+		if c == '"' && !inSingle {
+			inDouble = !inDouble
+		} else if c == '\'' && !inDouble {
+			inSingle = !inSingle
+		}
+	}
+	return inDouble || inSingle
+}
+
+// guardCheckRisky returns a blocking toolResult when the session
+// guard is on AND `cmd` matches a high-risk pattern AND the caller
+// didn't pass confirm=true. Returns nil to mean "allowed". Used by
+// `run`, `detach`, `run_stream`, `run_group`, and any other tool
+// that ferries a raw shell command to the remote.
+func guardCheckRisky(tool, cmd string, confirm bool) *toolResult {
+	if !session.GuardOn() || confirm {
+		return nil
+	}
+	pat := riskyMatch(cmd)
+	if pat == "" {
+		return nil
+	}
+	r := guardBlocked(tool, fmt.Sprintf("command contains a high-risk pattern %q", pat))
+	return &r
+}
+
+// longWaitSleep matches `sleep N` or `sleep N.X` where N > 5. Doesn't
+// catch `sleep 5m` / `sleep 1h` (rare in AI-generated commands;
+// would match if we tried, with false-positive risk on `sleep
+// ${VAR}`).
+var longWaitSleep = regexp.MustCompile(`\bsleep\s+(\d+(?:\.\d+)?)\b`)
+
+// foreverPatterns are commands that don't terminate on their own.
+// `tail -f`, `watch`, and `journalctl -f` are the canonical sins.
+//
+// `[^;&|\n]*?` allows arbitrary intervening flags (`journalctl -u
+// nginx -f`, `tail -n 100 -f log`) while still stopping at shell
+// separators -- so `echo hi; journalctl -u svc -f` triggers, but a
+// quoted argument cannot hop the separator boundary. Note: case-
+// sensitive `-f` -- we do not flag `tail -F` (retry-on-truncate),
+// which has legitimate non-blocking uses in scripted contexts.
+var foreverPatterns = []*regexp.Regexp{
+	regexp.MustCompile(`\btail\b[^;&|\n]*?\s(?:-f|--follow)\b`),
+	regexp.MustCompile(`\bwatch\s+`),
+	regexp.MustCompile(`\bjournalctl\b[^;&|\n]*?\s(?:-f|--follow)\b`),
+}
+
+// rejectSync inspects a command planned for synchronous execution
+// and returns a non-empty hint if it would block the MCP turn for
+// too long. AI clients reach for sleep+poll loops by reflex, but
+// those tie up the MCP per-tool timeout and produce the "tools no
+// longer available" red dot. We catch the patterns here and route
+// the model toward background=true / wait_job. Empty return =
+// command is fine to run sync.
+func rejectSync(cmd string) string {
+	if m := longWaitSleep.FindStringSubmatch(cmd); m != nil {
+		if n, err := strconv.ParseFloat(m[1], 64); err == nil && n > 5 {
+			return fmt.Sprintf("contains `sleep %s` which would block %ss synchronously", m[1], m[1])
+		}
+	}
+	for _, re := range foreverPatterns {
+		if loc := re.FindStringIndex(cmd); loc != nil {
+			return fmt.Sprintf("contains a never-terminating pattern (%s)", cmd[loc[0]:loc[1]])
+		}
+	}
+	return ""
+}
+
+// rejectMessage builds the educational error returned when sync run
+// hits a long-blocking pattern. Tells the model exactly what to swap
+// to.
+func rejectMessage(cmd, why string) string {
+	return fmt.Sprintf(
+		"rejected: %s. Synchronous `run` is bound by the MCP per-tool timeout (default 60s); long blocks tank the connection.\n\nUse the background pattern instead:\n  run { command: %q, background: true }   -> returns job_id immediately\n  wait_job { id: <returned id> }           -> short polls (default 8s, cap 15s)\n\nFor commands that legitimately need their full output streamed back synchronously, restructure them to finish in <60s (e.g. cap with `head`/`timeout 30`).",
+		why, cmd,
+	)
+}
+
+// Token-economy gates for MCP `run` / `run_stream`. The 64 KiB result
+// cap stops the model from drowning in output, but it doesn't stop
+// the WASTED tokens that get paid when the model asks for an
+// unbounded source and we serve them the wrong 64 KiB slice. Forcing
+// an explicit slicing decision usually returns more relevant content
+// AND saves tokens; the model can read the rejection and pick a
+// `head -n N` / `tail -n N` / `grep` / dedicated MCP tool path.
+var (
+	// reBareCat matches `cat <something>` at a command-position. We
+	// don't reject `cat` with no arg (it's just `stdin -> stdout`).
+	reBareCat        = regexp.MustCompile(`(?i)(?:^|[;&|\n])\s*cat\s+\S`)
+	reBareDmesg      = regexp.MustCompile(`(?i)(?:^|[;&|\n])\s*dmesg\b`)
+	reBareJournalctl = regexp.MustCompile(`(?i)(?:^|[;&|\n])\s*journalctl\b`)
+	reBareFind       = regexp.MustCompile(`(?i)(?:^|[;&|\n])\s*find\s+/`)
+
+	// reDownstreamLimiter -- a pipe into one of these counts as a
+	// bound; downstream is conservative-limited and we let the call
+	// through.
+	reDownstreamLimiter  = regexp.MustCompile(`(?i)\|\s*(head|tail|grep|awk|sed|wc|cut|jq|sort|uniq|column|less|more|fold|tr|xxd|od)\b`)
+	reHeadBounded        = regexp.MustCompile(`(?i)\bhead\s+-[cnN][= ]?\s*\d`)
+	reTailBounded        = regexp.MustCompile(`(?i)\btail\s+-n[= ]?\s*\d`)
+	reJournalctlFiltered = regexp.MustCompile(`(?i)\bjournalctl\b[^|;&\n]*?(\s-u\b|\s--unit\b|\s--since\b|\s--until\b|\s-S\b|\s-U\b|\s-n\b|\s-g\b|\s--grep\b|\s-p\b|\s--priority\b|\s-k\b|\s-f\b)`)
+	reFindFiltered       = regexp.MustCompile(`(?i)\bfind\b[^|;&\n]*?\s-(maxdepth|name|iname|type|newer|mtime|mmin|size|path|prune|regex|wholename)\b`)
+)
+
+// rejectUnfiltered checks `cmd` (already quote-stripped) for
+// "dumps everything" patterns. Returns (label, message) when the
+// command would likely produce unbounded output; ("", "") to proceed.
+//
+// Patterns checked, in order:
+//   - `cat <file>`           (no native limit; demand slicing)
+//   - `dmesg`                (kernel ring buffer; demand filter pipe)
+//   - `journalctl ...`       (without -u / --since / -p / -g / -n / -k / -f)
+//   - `find /path ...`       (without -maxdepth / -name / -type / ...)
+//
+// Each check is short-circuited by a "downstream limiter": a pipe
+// into head / tail / grep / wc / ... is enough to call the output
+// bounded, since the model has made an explicit slicing decision.
+func rejectUnfiltered(cmd string) (string, string) {
+	stripped := stripShellQuotedContent(cmd)
+	if reDownstreamLimiter.MatchString(stripped) ||
+		reHeadBounded.MatchString(stripped) ||
+		reTailBounded.MatchString(stripped) {
+		return "", ""
+	}
+	if reBareCat.MatchString(stripped) {
+		return "cat", "`cat <file>` returns the whole file with no native limit. Pick a slice:\n" +
+			"  run { command: \"head -n 100 <file>\" }\n" +
+			"  run { command: \"tail -n 100 <file>\" }\n" +
+			"  run { command: \"grep PATTERN <file>\" }\n" +
+			"  tail { path: \"<file>\", lines: 100 }   (dedicated MCP tool, no `cat` needed)"
+	}
+	if reBareDmesg.MatchString(stripped) {
+		return "dmesg", "`dmesg` dumps the entire kernel ring buffer (often hundreds of KB). Add a downstream slicer:\n" +
+			"  run { command: \"dmesg | tail -n 100\" }\n" +
+			"  run { command: \"dmesg | grep -i error\" }"
+	}
+	if reBareJournalctl.MatchString(stripped) && !reJournalctlFiltered.MatchString(stripped) {
+		return "journalctl", "`journalctl` with no filter returns the whole journal. Use the dedicated MCP tool:\n" +
+			"  journal { unit: \"nginx.service\", lines: 100 }\n" +
+			"or add a filter to the run call:\n" +
+			"  run { command: \"journalctl -u nginx -n 100\" }\n" +
+			"  run { command: \"journalctl --since '10 min ago' -p err\" }"
+	}
+	if reBareFind.MatchString(stripped) && !reFindFiltered.MatchString(stripped) {
+		return "find", "`find <path>` with no narrowing flags can traverse arbitrarily large trees. Add one of: -maxdepth N, -name PATTERN, -type f/d, -newer FILE, -mtime N.\n" +
+			"  run { command: \"find /var/log -maxdepth 2 -name '*.log'\" }"
+	}
+	return "", ""
+}
+
+// stripShellQuotedContent removes the contents (but not the
+// delimiters) of double / single-quoted strings in `s`. Used to keep
+// the unbounded-pattern matchers from false-positiving on `echo "cat
+// foo"` or `grep "journalctl" log`. Best-effort: backslash escapes
+// inside double quotes are honored, single-quoted runs are literal,
+// $'...' and heredocs are not modeled.
+func stripShellQuotedContent(s string) string {
+	var b strings.Builder
+	b.Grow(len(s))
+	inDouble, inSingle, escape := false, false, false
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		if escape {
+			escape = false
+			continue
+		}
+		if c == '\\' && inDouble {
+			escape = true
+			continue
+		}
+		if c == '"' && !inSingle {
+			inDouble = !inDouble
+			b.WriteByte(c)
+			continue
+		}
+		if c == '\'' && !inDouble {
+			inSingle = !inSingle
+			b.WriteByte(c)
+			continue
+		}
+		if inDouble || inSingle {
+			b.WriteByte(' ')
+			continue
+		}
+		b.WriteByte(c)
+	}
+	return b.String()
+}
+
+// rejectUnfilteredMessage formats the rejection into the standard
+// MCP shape: a clear text explanation + structured metadata the
+// client can branch on.
+func rejectUnfilteredMessage(label, body string) toolResult {
+	r := textErr("rejected: " + body)
+	r.StructuredContent = map[string]any{
+		"rejected_reason": "unbounded_output",
+		"pattern":         label,
+	}
+	return r
+}
+
+// emptyFilterRegex matches grep patterns that filter nothing in
+// practice -- a `.*` / `.` / `.+` / `[\s\S]*` "filter" is a bypass
+// dressed up as a regex.
+var emptyFilterRegex = regexp.MustCompile(`^(\.[\*\+\?]?|\[.*?\][\*\+\?]?)$`)
+
+// isMeaningfulFilter reports whether `s` is a grep / unit / since
+// value that actually constrains output. Empty, whitespace-only, and
+// "matches everything" patterns count as no filter.
+func isMeaningfulFilter(s string) bool {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return false
+	}
+	if emptyFilterRegex.MatchString(s) {
+		return false
+	}
+	return true
+}
+
+// requireStreamFilter is the gate that follow-mode MCP streaming
+// tools call before kicking off a stream. Rule: any follow_seconds
+// > 0 requires at least one meaningful output filter. Earlier
+// versions exempted "short" follows (≤5s), but a chatty log can
+// flood the per-call progress channel even in five seconds, and the
+// exemption left no incentive for the model to ever pass a filter.
+//
+// Returns nil to proceed, or a populated toolResult that the caller
+// should `return *r`.
+func requireStreamFilter(toolName string, follow int, filters []string, hint string) *toolResult {
+	if follow <= 0 {
+		return nil
+	}
+	for _, f := range filters {
+		if isMeaningfulFilter(f) {
+			return nil
+		}
+	}
+	msg := fmt.Sprintf(
+		"streaming `%s` (follow_seconds=%d) requires at least one output filter to keep token cost bounded. The cap on the final tool-result text does NOT cap the progress-notification stream, so even a short unfiltered follow can flood the conversation. Add a constraint and retry; or omit follow_seconds for a one-shot fetch.\n\nExample: %s",
+		toolName, follow, hint,
+	)
+	r := textErr(msg)
+	r.StructuredContent = map[string]any{
+		"rejected_reason": "unbounded_streaming",
+		"follow_seconds":  follow,
+	}
+	return &r
+}

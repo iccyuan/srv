@@ -1,4 +1,4 @@
-package main
+package mcp
 
 import (
 	"srv/internal/jobs"
@@ -7,14 +7,13 @@ import (
 	"testing"
 )
 
-// runRiskyMatch — high-confidence catches AND the false-positive cases
+// riskyMatch -- high-confidence catches AND the false-positive cases
 // the substring-based predecessor used to fire on.
-func TestRunRiskyMatch_Catches(t *testing.T) {
+func TestRiskyMatch_Catches(t *testing.T) {
 	cases := []struct {
 		cmd  string
 		want string // pattern name; "" = should NOT match
 	}{
-		// canonical destructive forms
 		{"rm -rf /tmp/foo", "rm -rf"},
 		{"rm -fr /tmp/foo", "rm -rf"},
 		{"rm -Rf /var", "rm -rf"},
@@ -51,25 +50,25 @@ func TestRunRiskyMatch_Catches(t *testing.T) {
 		// safe / unrelated commands
 		{"ls -la", ""},
 		{"echo hello", ""},
-		{"rm foo.txt", ""},    // no -rf
-		{"rm -r somedir", ""}, // no -f
-		{"rm -f foo", ""},     // no -r
+		{"rm foo.txt", ""},
+		{"rm -r somedir", ""},
+		{"rm -f foo", ""},
 		{"git checkout -f main", ""},
-		{"farm -rfast", ""}, // word-boundary protection
+		{"farm -rfast", ""},
 		{"docker run --rm -ti alpine sh", ""},
-		{"ls /dev/sda", ""}, // listing isn't redirecting
+		{"ls /dev/sda", ""},
 	}
 	for _, tc := range cases {
-		got := runRiskyMatch(tc.cmd)
+		got := riskyMatch(tc.cmd)
 		if got != tc.want {
-			t.Errorf("runRiskyMatch(%q) = %q, want %q", tc.cmd, got, tc.want)
+			t.Errorf("riskyMatch(%q) = %q, want %q", tc.cmd, got, tc.want)
 		}
 	}
 }
 
-// quoted strings shouldn't trigger -- this was the main pain point with
-// the old substring matcher (echo "rm -rf" would flag).
-func TestRunRiskyMatch_QuotedIsIgnored(t *testing.T) {
+// Quoted strings shouldn't trigger -- this was the main pain point
+// with the old substring matcher (echo "rm -rf" would flag).
+func TestRiskyMatch_QuotedIsIgnored(t *testing.T) {
 	cases := []string{
 		`echo "rm -rf /tmp"`,
 		`echo 'rm -rf /tmp'`,
@@ -78,25 +77,21 @@ func TestRunRiskyMatch_QuotedIsIgnored(t *testing.T) {
 		`echo "be careful with mkfs.ext4"`,
 	}
 	for _, c := range cases {
-		if got := runRiskyMatch(c); got != "" {
-			t.Errorf("runRiskyMatch(%q) = %q, want empty (string-literal)", c, got)
+		if got := riskyMatch(c); got != "" {
+			t.Errorf("riskyMatch(%q) = %q, want empty (string-literal)", c, got)
 		}
 	}
 }
 
-// command-then-quoted: real command at start, quoted noise after must
-// still trigger. (Regression guard against an over-eager quote-stripping
-// rewrite.)
-func TestRunRiskyMatch_RealCommandWithQuotedNoise(t *testing.T) {
+// Real command at start, quoted noise after must still trigger.
+func TestRiskyMatch_RealCommandWithQuotedNoise(t *testing.T) {
 	cmd := `rm -rf /tmp/foo && echo "done"`
-	if got := runRiskyMatch(cmd); got != "rm -rf" {
-		t.Errorf("runRiskyMatch(%q) = %q, want rm -rf", cmd, got)
+	if got := riskyMatch(cmd); got != "rm -rf" {
+		t.Errorf("riskyMatch(%q) = %q, want rm -rf", cmd, got)
 	}
 }
 
 func TestIsInsideQuotes(t *testing.T) {
-	// pos points at the 'X' inside the string; we check whether that
-	// offset is inside a quoted region.
 	cases := []struct {
 		s    string
 		pos  int
@@ -105,11 +100,8 @@ func TestIsInsideQuotes(t *testing.T) {
 		{`echo X foo`, 5, false},
 		{`echo "X" foo`, 6, true},
 		{`echo 'X' foo`, 6, true},
-		{`echo "a" X foo`, 9, false}, // outside the closed quote
-		{`echo "a\"X" foo`, 8, true}, // escaped " stays inside double
-		// Backslash inside single quotes is literal, so `'a\'` closes
-		// the single-quoted region at the second '. X at pos 9 is
-		// therefore outside any quote.
+		{`echo "a" X foo`, 9, false},
+		{`echo "a\"X" foo`, 8, true},
 		{`echo 'a\'X bar`, 9, false},
 	}
 	for _, tc := range cases {
@@ -119,7 +111,7 @@ func TestIsInsideQuotes(t *testing.T) {
 	}
 }
 
-func TestRunRejectSync(t *testing.T) {
+func TestRejectSync(t *testing.T) {
 	cases := []struct {
 		cmd        string
 		shouldFail bool
@@ -130,7 +122,7 @@ func TestRunRejectSync(t *testing.T) {
 		{"sleep 30", true},
 		{"sleep 12.5", true},
 		{"tail -f /var/log/syslog", true},
-		{"tail -F app.log", false}, // -F is not -f / --follow
+		{"tail -F app.log", false},
 		{"tail -n 100 file", false},
 		{"watch -n 1 ls", true},
 		{"journalctl -u nginx -f", true},
@@ -139,20 +131,20 @@ func TestRunRejectSync(t *testing.T) {
 		{"", false},
 	}
 	for _, tc := range cases {
-		got := runRejectSync(tc.cmd)
+		got := rejectSync(tc.cmd)
 		if (got != "") != tc.shouldFail {
-			t.Errorf("runRejectSync(%q) = %q, shouldFail=%v", tc.cmd, got, tc.shouldFail)
+			t.Errorf("rejectSync(%q) = %q, shouldFail=%v", tc.cmd, got, tc.shouldFail)
 		}
 	}
 }
 
-func TestBuildMCPRunText_NoTruncation(t *testing.T) {
+func TestBuildRunText_NoTruncation(t *testing.T) {
 	res := &sshx.RunCaptureResult{
 		Stdout:   "hello\nworld",
 		Stderr:   "",
 		ExitCode: 0,
 	}
-	text, truncated := buildMCPRunText(res, "/home/user")
+	text, truncated := buildRunText(res, "/home/user")
 	if truncated != 0 {
 		t.Errorf("truncated = %d, want 0", truncated)
 	}
@@ -164,13 +156,13 @@ func TestBuildMCPRunText_NoTruncation(t *testing.T) {
 	}
 }
 
-func TestBuildMCPRunText_StderrFenced(t *testing.T) {
+func TestBuildRunText_StderrFenced(t *testing.T) {
 	res := &sshx.RunCaptureResult{
 		Stdout:   "out",
 		Stderr:   "err",
 		ExitCode: 1,
 	}
-	text, _ := buildMCPRunText(res, "/tmp")
+	text, _ := buildRunText(res, "/tmp")
 	if !strings.Contains(text, "--- stderr ---") {
 		t.Errorf("missing stderr fence: %q", text)
 	}
@@ -179,10 +171,10 @@ func TestBuildMCPRunText_StderrFenced(t *testing.T) {
 	}
 }
 
-func TestBuildMCPRunText_TruncatesAtCap(t *testing.T) {
-	big := strings.Repeat("a", mcpRunTextMax+1234)
+func TestBuildRunText_TruncatesAtCap(t *testing.T) {
+	big := strings.Repeat("a", runTextMax+1234)
 	res := &sshx.RunCaptureResult{Stdout: big, ExitCode: 0}
-	text, truncated := buildMCPRunText(res, "/x")
+	text, truncated := buildRunText(res, "/x")
 	if truncated != 1234 {
 		t.Errorf("truncated = %d, want 1234", truncated)
 	}
@@ -194,7 +186,7 @@ func TestBuildMCPRunText_TruncatesAtCap(t *testing.T) {
 	}
 }
 
-func TestMcpDetachedResult(t *testing.T) {
+func TestDetachedResult(t *testing.T) {
 	rec := &jobs.Record{
 		ID:      "abc123",
 		Profile: "prod",
@@ -204,7 +196,7 @@ func TestMcpDetachedResult(t *testing.T) {
 		Started: "2026-05-11T10:00:00Z",
 	}
 	r := rec
-	tr := mcpDetachedResult(r)
+	tr := detachedResult(r)
 	if tr.IsError {
 		t.Errorf("IsError = true, want false")
 	}
@@ -226,13 +218,13 @@ func TestMcpDetachedResult(t *testing.T) {
 	}
 }
 
-func TestMcpToolRegistry_NoDriftBetweenDefsAndDispatch(t *testing.T) {
-	defs := mcpToolDefs()
-	if len(defs) != len(mcpToolMap) {
-		t.Fatalf("defs (%d) and map (%d) disagree on tool count", len(defs), len(mcpToolMap))
+func TestRegistry_NoDriftBetweenDefsAndDispatch(t *testing.T) {
+	defs := toolDefs()
+	if len(defs) != len(toolMap) {
+		t.Fatalf("defs (%d) and map (%d) disagree on tool count", len(defs), len(toolMap))
 	}
 	for _, d := range defs {
-		if _, ok := mcpToolMap[d.Name]; !ok {
+		if _, ok := toolMap[d.Name]; !ok {
 			t.Errorf("tool %q in defs but not in map", d.Name)
 		}
 	}

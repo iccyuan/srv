@@ -6,9 +6,13 @@ import (
 	"srv/internal/config"
 	"srv/internal/daemon"
 	"srv/internal/group"
+	"srv/internal/guard"
+	"srv/internal/hints"
 	"srv/internal/install"
+	"srv/internal/mcp"
 	"srv/internal/project"
 	"srv/internal/streams"
+	"srv/internal/sudo"
 	"srv/internal/syncx"
 	"srv/internal/theme"
 	"srv/internal/tunnel"
@@ -123,15 +127,16 @@ var subcommands = []subcommand{
 	{name: "sessions", handler: func(c cmdCtx) error { return cmdSessions(c.args) }},
 
 	// Integrations / settings.
-	{name: "mcp", handler: func(c cmdCtx) error { return cmdMcp(c.cfg) }},
-	{name: "guard", handler: func(c cmdCtx) error { return cmdGuard(c.args) }},
+	{name: "mcp", handler: func(c cmdCtx) error {
+		mcpMode = true
+		return mcp.Run(c.cfg, Version, mcpDeps())
+	}},
+	{name: "guard", handler: func(c cmdCtx) error { return guard.Cmd(c.args) }},
 	{name: "color", handler: func(c cmdCtx) error { return theme.Cmd(c.args) }},
 	{name: "daemon", handler: func(c cmdCtx) error { return daemon.Cmd(c.args) }},
 	{name: "project", noConfig: true, handler: func(c cmdCtx) error { return project.Cmd(c.args) }},
 	{name: "group", handler: func(c cmdCtx) error { return group.Cmd(c.args, c.cfg) }},
-	{name: "sudo", handler: func(c cmdCtx) error {
-		return cmdSudo(c.args, c.cfg, globalOpts{profile: c.profileOverride})
-	}},
+	{name: "sudo", handler: func(c cmdCtx) error { return sudo.Cmd(c.args, c.cfg, c.profileOverride) }},
 	{name: "ui", handler: func(c cmdCtx) error { return ui.Cmd(c.cfg) }},
 	{name: "tail", handler: func(c cmdCtx) error { return streams.Tail(c.args, c.cfg, c.profileOverride) }},
 	{name: "watch", handler: func(c cmdCtx) error { return streams.Watch(c.args, c.cfg, c.profileOverride) }},
@@ -204,6 +209,14 @@ func init() {
 			}
 		}
 	}
+	// Seed the hint engine's fuzzy-match set from the reserved-name
+	// table. Hidden helpers (_profiles / _ls) and dash-flag aliases are
+	// filtered out inside internal/hints.
+	names := make([]string, 0, len(reservedSubcommands))
+	for n := range reservedSubcommands {
+		names = append(names, n)
+	}
+	hints.SetCandidates(names)
 }
 
 func lookupSub(name string) (*subcommand, bool) {
