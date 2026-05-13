@@ -3,8 +3,10 @@ package mcp
 import (
 	"encoding/json"
 	"fmt"
+	"srv/internal/check"
 	"srv/internal/config"
 	"srv/internal/daemon"
+	"srv/internal/doctor"
 	"srv/internal/remote"
 	"srv/internal/session"
 	"strings"
@@ -124,10 +126,10 @@ func handleCheck(args map[string]any, cfg *config.Config, profileOverride string
 	if errResult != nil {
 		return *errResult
 	}
-	res := deps.Check(prof)
+	res := check.Run(prof)
 	var advice []string
 	if !res.OK {
-		advice = deps.CheckAdvice(res.Diagnosis, prof, profName)
+		advice = check.Advice(res.Diagnosis, prof, profName)
 	}
 	info := map[string]any{
 		"profile":   profName,
@@ -157,7 +159,7 @@ func handleCheck(args map[string]any, cfg *config.Config, profileOverride string
 }
 
 func handleDoctor(args map[string]any, cfg *config.Config, profileOverride string) toolResult {
-	checks, ok := deps.Doctor(cfg, profileOverride)
+	checks, ok := doctor.Checks(cfg, profileOverride, version)
 	res := jsonResult(map[string]any{"ok": ok, "checks": checks})
 	res.IsError = !ok
 	return res

@@ -1,4 +1,14 @@
-package main
+// Package check probes SSH connectivity for a profile: dials with a
+// strict no-prompt config and a 15 s watchdog, classifies failures
+// into stable diagnosis tags (no-key / host-key-changed / dns /
+// refused / no-route / tcp-timeout / timeout / perm-denied /
+// unknown), and renders actionable fix advice.
+//
+// The same Run() result feeds both the `srv check` CLI subcommand
+// (Cmd) and the MCP `check` tool handler. PrintDialError is the
+// "best-effort diagnosis if this looks like an SSH failure" wrapper
+// used by other CLI commands when their own SSH dial fails.
+package check
 
 import (
 	"errors"
@@ -6,6 +16,7 @@ import (
 	"net"
 	"os"
 	"sort"
+	"srv/internal/clierr"
 	"srv/internal/config"
 	"srv/internal/sshx"
 	"strconv"
@@ -13,39 +24,42 @@ import (
 	"time"
 )
 
-// CheckResult is what _ssh_check returns in the Python version.
-type CheckResult struct {
+// Result mirrors the Python `_ssh_check` payload: a bool plus a
+// stable diagnosis tag, plus whatever stderr / exit code the probe
+// captured before deciding.
+type Result struct {
 	OK        bool   `json:"ok"`
 	Diagnosis string `json:"diagnosis"`
 	ExitCode  int    `json:"exit_code"`
 	Stderr    string `json:"stderr"`
 }
 
-// runCheck probes the server with a strict, no-prompt config and a 15s
-// timeout. Returns a diagnosis tag matching the Python version's set:
-// ok / no-key / host-key-changed / dns / refused / no-route /
+// Run probes the server with a strict, no-prompt config and a 15 s
+// timeout. Returns a diagnosis tag matching the Python version's
+// set: ok / no-key / host-key-changed / dns / refused / no-route /
 // tcp-timeout / timeout / perm-denied / unknown.
-func runCheck(profile *config.Profile) *CheckResult {
-	res := &CheckResult{}
+func Run(profile *config.Profile) *Result {
+	res := &Result{}
 
-	// The dial budget must stay strictly inside the outer 15s timeout --
-	// otherwise a profile with a large `connect_timeout` (some users set
-	// 30s or 60s for high-latency links) leaves the inner goroutine
-	// blocked in Dial well after runCheck has already returned a
-	// "timeout" verdict, briefly piling up under repeated checks.
+	// The dial budget must stay strictly inside the outer 15 s
+	// timeout -- otherwise a profile with a large `connect_timeout`
+	// (some users set 30 s or 60 s for high-latency links) leaves
+	// the inner goroutine blocked in Dial well after Run has
+	// already returned a "timeout" verdict, briefly piling up under
+	// repeated checks.
 	dialTimeout := time.Duration(profile.GetConnectTimeout()) * time.Second
 	if dialTimeout <= 0 || dialTimeout > 14*time.Second {
 		dialTimeout = 14 * time.Second
 	}
 
-	done := make(chan *CheckResult, 1)
+	done := make(chan *Result, 1)
 	go func() {
 		c, err := sshx.DialOpts(profile, sshx.DialOptions{
 			StrictHostKey: false, // accept-new like the Python version
 			Timeout:       dialTimeout,
 		})
 		if err != nil {
-			done <- &CheckResult{
+			done <- &Result{
 				OK:        false,
 				Diagnosis: classifyDialError(err),
 				ExitCode:  255,
@@ -56,7 +70,7 @@ func runCheck(profile *config.Profile) *CheckResult {
 		defer c.Close()
 		r, _ := c.RunCapture("echo srv-check-ok", "")
 		if r != nil && r.ExitCode == 0 && strings.Contains(r.Stdout, "srv-check-ok") {
-			done <- &CheckResult{OK: true, Diagnosis: "ok"}
+			done <- &Result{OK: true, Diagnosis: "ok"}
 			return
 		}
 		stderr := ""
@@ -65,7 +79,7 @@ func runCheck(profile *config.Profile) *CheckResult {
 			stderr = r.Stderr
 			exit = r.ExitCode
 		}
-		done <- &CheckResult{
+		done <- &Result{
 			OK:        false,
 			Diagnosis: "unknown",
 			ExitCode:  exit,
@@ -76,7 +90,7 @@ func runCheck(profile *config.Profile) *CheckResult {
 	select {
 	case res = <-done:
 	case <-time.After(15 * time.Second):
-		res = &CheckResult{
+		res = &Result{
 			OK:        false,
 			Diagnosis: "timeout",
 			ExitCode:  -1,
@@ -85,7 +99,9 @@ func runCheck(profile *config.Profile) *CheckResult {
 	return res
 }
 
-// classifyDialError maps a Go SSH dial error into a stable diagnosis tag.
+// classifyDialError maps a Go SSH dial error into a stable diagnosis
+// tag. Internal -- callers that need the tag go through Run() (which
+// embeds it in Result.Diagnosis) or PrintDialError.
 func classifyDialError(err error) string {
 	msg := strings.ToLower(err.Error())
 
@@ -137,8 +153,10 @@ func classifyDialError(err error) string {
 	return "unknown"
 }
 
-// checkAdvice returns the actionable lines for a given diagnosis.
-func checkAdvice(diag string, profile *config.Profile, profileName string) []string {
+// Advice returns the actionable lines for a given diagnosis. Used
+// by both the CLI (Cmd) and the MCP check tool to render the
+// fix-it section after a failure.
+func Advice(diag string, profile *config.Profile, profileName string) []string {
 	user := profile.User
 	host := profile.Host
 	port := profile.GetPort()
@@ -219,10 +237,14 @@ func checkAdvice(diag string, profile *config.Profile, profileName string) []str
 	return []string{"unknown failure mode -- see stderr above."}
 }
 
-// printDiagError writes an error to stderr, augmenting with a diagnosis tag
-// and actionable fix steps if the error matches a known SSH failure mode
-// (no-key / refused / dns / etc.). Falls back to the raw error otherwise.
-func printDiagError(err error, profile *config.Profile) {
+// PrintDialError writes an error to stderr, augmenting with a
+// diagnosis tag and actionable fix steps if the error matches a
+// known SSH failure mode (no-key / refused / dns / etc.). Falls back
+// to the raw error otherwise. Called by other CLI commands when
+// their own dial fails -- centralises the "explain why this looks
+// broken" surface so every command's failure path produces the same
+// advice.
+func PrintDialError(err error, profile *config.Profile) {
 	if err == nil {
 		return
 	}
@@ -237,12 +259,13 @@ func printDiagError(err error, profile *config.Profile) {
 	if profile != nil {
 		name = profile.Name
 	}
-	for _, line := range checkAdvice(diag, profile, name) {
+	for _, line := range Advice(diag, profile, name) {
 		fmt.Fprintln(os.Stderr, line)
 	}
 }
 
-func cmdCheck(args []string, cfg *config.Config, profileOverride string) error {
+// Cmd implements `srv check [--rtt [--count N] [--interval D]]`.
+func Cmd(args []string, cfg *config.Config, profileOverride string) error {
 	rtt := false
 	count := 10
 	interval := 200 * time.Millisecond
@@ -271,18 +294,18 @@ func cmdCheck(args []string, cfg *config.Config, profileOverride string) error {
 			}
 		default:
 			if strings.HasPrefix(a, "-") {
-				return exitErr(1, "error: unknown check flag %q", a)
+				return clierr.Errf(1, "error: unknown check flag %q", a)
 			}
 		}
 	}
 
 	name, profile, err := config.Resolve(cfg, profileOverride)
 	if err != nil {
-		return exitErr(1, "%v", err)
+		return clierr.Errf(1, "%v", err)
 	}
 
 	if rtt {
-		return exitCode(runRTTProbe(profile, name, count, interval))
+		return clierr.Code(runRTTProbe(profile, name, count, interval))
 	}
 
 	user := profile.User
@@ -299,7 +322,7 @@ func cmdCheck(args []string, cfg *config.Config, profileOverride string) error {
 	}
 	fmt.Println()
 
-	res := runCheck(profile)
+	res := Run(profile)
 
 	if res.OK {
 		fmt.Println("OK -- connected; key authentication works.")
@@ -314,19 +337,19 @@ func cmdCheck(args []string, cfg *config.Config, profileOverride string) error {
 		}
 	}
 	fmt.Println()
-	for _, line := range checkAdvice(res.Diagnosis, profile, name) {
+	for _, line := range Advice(res.Diagnosis, profile, name) {
 		fmt.Println(line)
 	}
-	return exitCode(1)
+	return clierr.Code(1)
 }
 
-// runRTTProbe times `count` SSH-level keepalive round trips against the
-// profile's server and prints a per-probe + summary report. Useful when
-// you want to know whether `srv` is slow because of the server, the link,
-// or your local environment.
+// runRTTProbe times `count` SSH-level keepalive round trips against
+// the profile's server and prints a per-probe + summary report.
+// Useful when you want to know whether `srv` is slow because of the
+// server, the link, or your local environment.
 //
-// Returns 1 if more than half the probes were lost (link is unusable),
-// otherwise 0.
+// Returns 1 if more than half the probes were lost (link is
+// unusable), otherwise 0.
 func runRTTProbe(profile *config.Profile, name string, count int, interval time.Duration) int {
 	user := profile.User
 	host := profile.Host
@@ -338,7 +361,7 @@ func runRTTProbe(profile *config.Profile, name string, count int, interval time.
 
 	c, err := sshx.DialOpts(profile, sshx.DialOptions{StrictHostKey: false})
 	if err != nil {
-		printDiagError(err, profile)
+		PrintDialError(err, profile)
 		return 1
 	}
 	defer c.Close()

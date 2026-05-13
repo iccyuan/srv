@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"sort"
+	"srv/internal/check"
 	"srv/internal/config"
 	"srv/internal/i18n"
 	"srv/internal/picker"
@@ -516,7 +517,7 @@ func cmdCd(path string, cfg *config.Config, profileOverride string) error {
 	}
 	newCwd, err := remote.ChangeCwd(name, profile, path)
 	if err != nil {
-		printDiagError(err, profile)
+		check.PrintDialError(err, profile)
 		return exitCode(1)
 	}
 	fmt.Println(newCwd)
@@ -573,13 +574,13 @@ func cmdShell(cfg *config.Config, profileOverride string) error {
 	cwd := config.GetCwd(name, profile)
 	c, err := sshx.Dial(profile)
 	if err != nil {
-		printDiagError(err, profile)
+		check.PrintDialError(err, profile)
 		return exitCode(255)
 	}
 	defer c.Close()
 	rc, err := c.Shell(cwd)
 	if err != nil {
-		printDiagError(err, profile)
+		check.PrintDialError(err, profile)
 	}
 	return exitCode(rc)
 }
@@ -630,7 +631,7 @@ func cmdPush(args []string, cfg *config.Config, profileOverride string) error {
 	abs := remote.ResolvePath(rpath, cwd)
 	rc, _, err := transfer.PushPath(profile, local, abs, recursive)
 	if err != nil {
-		printDiagError(err, profile)
+		check.PrintDialError(err, profile)
 	}
 	return exitCode(rc)
 }
@@ -653,7 +654,7 @@ func cmdPull(args []string, cfg *config.Config, profileOverride string) error {
 	abs := remote.ResolvePath(rpath, cwd)
 	rc, _, err := transfer.PullPath(profile, abs, local, recursive)
 	if err != nil {
-		printDiagError(err, profile)
+		check.PrintDialError(err, profile)
 	}
 	return exitCode(rc)
 }

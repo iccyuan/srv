@@ -8,6 +8,7 @@ import (
 	"path"
 	"path/filepath"
 	"runtime"
+	"srv/internal/check"
 	"srv/internal/config"
 	"srv/internal/remote"
 	"srv/internal/sshx"
@@ -43,7 +44,7 @@ func cmdEdit(args []string, cfg *config.Config, profileOverride string) error {
 
 	c, err := sshx.Dial(profile)
 	if err != nil {
-		printDiagError(err, profile)
+		check.PrintDialError(err, profile)
 		return exitCode(255)
 	}
 	defer c.Close()

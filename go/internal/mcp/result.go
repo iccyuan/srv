@@ -41,29 +41,6 @@ type toolContent struct {
 	Text string `json:"text"`
 }
 
-// CheckResult is the host-provided shape returned by Deps.Check.
-// Mirrors top-level main.CheckResult, restated here so internal/mcp
-// doesn't depend on the main package.
-type CheckResult struct {
-	OK        bool
-	Diagnosis string
-	Stderr    string
-	ExitCode  int
-}
-
-// Deps bundles the few host callbacks the MCP handlers need to reach
-// back into. Main wires these from check.go / feature_cmds.go /
-// completion_remote.go when starting the MCP server. Keeping them as
-// a struct avoids dragging top-level helpers into internal/mcp's
-// import graph.
-type Deps struct {
-	Check       func(prof *config.Profile) CheckResult
-	CheckAdvice func(diag string, prof *config.Profile, profName string) []string
-	Doctor      func(cfg *config.Config, profileOverride string) (checks []map[string]any, ok bool)
-	Diff        func(cfg *config.Config, profileOverride, local, remoteArg string) (text string, exitCode int, err error)
-	ListEntries func(prefix string, cfg *config.Config, profileOverride string) ([]string, error)
-}
-
 // textErr wraps a plain string as an isError tool result. Used by
 // every handler for pre-flight validation failures (missing args,
 // profile not found, etc.).

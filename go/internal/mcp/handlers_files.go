@@ -4,7 +4,9 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"srv/internal/completion"
 	"srv/internal/config"
+	"srv/internal/diff"
 	"srv/internal/progress"
 	"srv/internal/remote"
 	"srv/internal/session"
@@ -20,7 +22,7 @@ func handleDiff(args map[string]any, cfg *config.Config, profileOverride string)
 		return textErr("local is required")
 	}
 	remotePath, _ := args["remote"].(string)
-	text, rc, err := deps.Diff(cfg, profileOverride, local, remotePath)
+	text, rc, err := diff.Compare(cfg, profileOverride, local, remotePath)
 	if err != nil {
 		return textErr(err.Error())
 	}
@@ -365,7 +367,7 @@ func handleListDir(args map[string]any, cfg *config.Config, profileOverride stri
 	if v, ok := args["limit"].(float64); ok && v > 0 {
 		limit = int(v)
 	}
-	entries, err := deps.ListEntries(path, cfg, profileOverride)
+	entries, err := completion.ListEntries(path, cfg, profileOverride)
 	if err != nil {
 		return textErr(err.Error())
 	}

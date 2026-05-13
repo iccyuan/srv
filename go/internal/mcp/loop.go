@@ -27,9 +27,11 @@ var currentProgressToken any
 // find out if the client asked for streaming.
 func progressToken() any { return currentProgressToken }
 
-// deps is the package-level handle to the host's callbacks. Set by
-// Run() before the loop starts; never mutated afterwards.
-var deps Deps
+// version is the srv build version, stashed by Run() at the
+// package level so handlers (e.g. handleDoctor) can read it without
+// it being threaded through every dispatch frame. The loop is
+// strictly serial so the global is race-free.
+var version string
 
 // Run is the stdio MCP server entry point. Reads JSON-RPC frames from
 // stdin one line at a time, dispatches by method, writes responses
@@ -37,17 +39,14 @@ var deps Deps
 // can be post-mortem'd (the client doesn't surface why a session
 // ended).
 //
-// version is embedded in the `initialize` reply's serverInfo and in
-// the lifecycle log; callers pass the build's main.Version.
-//
-// d carries the small set of callbacks the handlers need to reach
-// back into top-level orchestration (check / doctor / diff / list_dir).
-func Run(cfg *config.Config, version string, d Deps) error {
-	deps = d
+// versionStr is embedded in the `initialize` reply's serverInfo and
+// in the lifecycle log; callers pass the build's main.Version.
+func Run(cfg *config.Config, versionStr string) error {
+	version = versionStr
 	i18n.SetMCPMode(true)
 	project.SetSilent(true)
 	progress.SetQuiet(true)
-	mcplog.Logf("start v=%s", version)
+	mcplog.Logf("start v=%s", versionStr)
 	rd := bufio.NewReader(os.Stdin)
 	for {
 		line, err := rd.ReadString('\n')
@@ -77,7 +76,7 @@ func Run(cfg *config.Config, version string, d Deps) error {
 			send(response(req.ID, map[string]any{
 				"protocolVersion": protocolVersion,
 				"capabilities":    map[string]any{"tools": map[string]any{"listChanged": false}},
-				"serverInfo":      map[string]any{"name": "srv", "version": version},
+				"serverInfo":      map[string]any{"name": "srv", "version": versionStr},
 			}, nil))
 		case "notifications/initialized":
 			// no response for notifications

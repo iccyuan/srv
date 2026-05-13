@@ -2,9 +2,12 @@ package main
 
 import (
 	"fmt"
+	"srv/internal/check"
 	"srv/internal/completion"
 	"srv/internal/config"
 	"srv/internal/daemon"
+	"srv/internal/diff"
+	"srv/internal/doctor"
 	"srv/internal/group"
 	"srv/internal/guard"
 	"srv/internal/hints"
@@ -105,8 +108,8 @@ var subcommands = []subcommand{
 	}},
 	{name: "pwd", handler: func(c cmdCtx) error { return cmdPwd(c.cfg, c.profileOverride) }},
 	{name: "status", handler: func(c cmdCtx) error { return cmdStatus(c.cfg, c.profileOverride) }},
-	{name: "check", handler: func(c cmdCtx) error { return cmdCheck(c.args, c.cfg, c.profileOverride) }},
-	{name: "doctor", handler: func(c cmdCtx) error { return cmdDoctor(c.args, c.cfg, c.profileOverride) }},
+	{name: "check", handler: func(c cmdCtx) error { return check.Cmd(c.args, c.cfg, c.profileOverride) }},
+	{name: "doctor", handler: func(c cmdCtx) error { return doctor.Cmd(c.args, c.cfg, c.profileOverride, Version) }},
 	{name: "shell", handler: func(c cmdCtx) error { return cmdShell(c.cfg, c.profileOverride) }},
 	{name: "env", handler: func(c cmdCtx) error { return cmdEnv(c.args, c.cfg, c.profileOverride) }},
 
@@ -117,7 +120,7 @@ var subcommands = []subcommand{
 	{name: "edit", handler: func(c cmdCtx) error { return cmdEdit(c.args, c.cfg, c.profileOverride) }},
 	{name: "open", handler: func(c cmdCtx) error { return cmdOpen(c.args, c.cfg, c.profileOverride) }},
 	{name: "code", handler: func(c cmdCtx) error { return cmdCode(c.args, c.cfg, c.profileOverride) }},
-	{name: "diff", handler: func(c cmdCtx) error { return cmdDiff(c.args, c.cfg, c.profileOverride) }},
+	{name: "diff", handler: func(c cmdCtx) error { return diff.Cmd(c.args, c.cfg, c.profileOverride) }},
 
 	// Tunnel / jobs / sessions.
 	{name: "tunnel", handler: func(c cmdCtx) error { return tunnel.Cmd(c.args, c.cfg, c.profileOverride) }},
@@ -129,7 +132,7 @@ var subcommands = []subcommand{
 	// Integrations / settings.
 	{name: "mcp", handler: func(c cmdCtx) error {
 		mcpMode = true
-		return mcp.Run(c.cfg, Version, mcpDeps())
+		return mcp.Run(c.cfg, Version)
 	}},
 	{name: "guard", handler: func(c cmdCtx) error { return guard.Cmd(c.args) }},
 	{name: "color", handler: func(c cmdCtx) error { return theme.Cmd(c.args) }},
@@ -168,7 +171,7 @@ var subcommands = []subcommand{
 		}
 		return nil
 	}},
-	{name: "_ls", hidden: true, handler: func(c cmdCtx) error { return cmdInternalLs(c.args, c.cfg, c.profileOverride) }},
+	{name: "_ls", hidden: true, handler: func(c cmdCtx) error { return completion.LsCmd(c.args, c.cfg, c.profileOverride) }},
 }
 
 // subcommandMap and reservedSubcommands are populated by init() rather

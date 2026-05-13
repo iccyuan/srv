@@ -20,6 +20,13 @@ import (
 // goreleaser sets it from the git tag on release builds.
 var Version = "2.6.6"
 
+// mcpMode is true while the process is acting as a stdio MCP server.
+// fatal() reads it to panic instead of os.Exit so a stray error
+// can't silently kill the JSON-RPC loop. internal/mcp does its own
+// silencing of i18n / project / progress; this flag is just for
+// top-level helpers that can't import internal/mcp.
+var mcpMode bool
+
 func init() {
 	// Let the i18n package read Config.Lang lazily without having to
 	// import package main. Provider is invoked the first time T() is
