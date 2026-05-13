@@ -136,6 +136,7 @@ func Run(cfg *config.Config, versionStr string) error {
 			_ = mcpstats.AppendCall(mcpstats.Call{
 				TS:            start,
 				Tool:          p.Name,
+				Cmd:           mcpstats.DescribeArgs(p.Name, args),
 				DurMs:         dur.Milliseconds(),
 				InBytes:       len(argsJSON),
 				OutBytes:      len(resJSON),

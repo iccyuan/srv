@@ -143,6 +143,112 @@ func TestCheckpointRoundTrip(t *testing.T) {
 	}
 }
 
+func TestDescribeArgs(t *testing.T) {
+	cases := []struct {
+		tool string
+		args map[string]any
+		want string
+	}{
+		// command-position tools pick "command".
+		{"run", map[string]any{"command": "ls -la /tmp"}, "ls -la /tmp"},
+		{"run_stream", map[string]any{"command": "make build"}, "make build"},
+		{"detach", map[string]any{"command": "sleep 60"}, "sleep 60"},
+		// run_group prefixes with [group=X] when group is set.
+		{"run_group", map[string]any{"group": "prod", "command": "uptime"}, "[prod] uptime"},
+		{"run_group", map[string]any{"command": "uptime"}, "uptime"},
+		// path-driven tools.
+		{"tail", map[string]any{"path": "/var/log/syslog"}, "/var/log/syslog"},
+		{"list_dir", map[string]any{"path": "/etc"}, "/etc"},
+		{"cd", map[string]any{"path": "~/work"}, "~/work"},
+		// id-driven tools.
+		{"tail_log", map[string]any{"id": "abc123"}, "abc123"},
+		{"wait_job", map[string]any{"id": "abc123"}, "abc123"},
+		{"kill_job", map[string]any{"id": "abc123"}, "abc123"},
+		// journal builds "k=v k=v" from non-empty filter args.
+		{"journal", map[string]any{"unit": "nginx", "since": "10 min ago"}, "unit=nginx since=10 min ago"},
+		{"journal", map[string]any{"unit": "nginx"}, "unit=nginx"},
+		{"journal", map[string]any{"priority": "err", "grep": "ERROR"}, "priority=err grep=ERROR"},
+		{"journal", map[string]any{}, ""},
+		// other named-arg tools.
+		{"use", map[string]any{"profile": "prod-east"}, "prod-east"},
+		{"diff", map[string]any{"local": "main.go"}, "main.go"},
+		{"push", map[string]any{"local": "main.go"}, "main.go"},
+		{"pull", map[string]any{"remote": "/tmp/out.log"}, "/tmp/out.log"},
+		// env: action-specific.
+		{"env", map[string]any{"action": "set", "key": "PATH", "value": "/usr/bin"}, "set PATH"},
+		{"env", map[string]any{"action": "unset", "key": "FOO"}, "unset FOO"},
+		{"env", map[string]any{"action": "list"}, "list"},
+		{"env", map[string]any{}, "list"}, // default action
+		// tools with no naturally identifying arg.
+		{"pwd", map[string]any{}, ""},
+		{"status", map[string]any{}, ""},
+		{"doctor", map[string]any{}, ""},
+		// unknown tool: blank rather than guessing.
+		{"future_tool", map[string]any{"command": "x"}, ""},
+	}
+	for _, c := range cases {
+		got := DescribeArgs(c.tool, c.args)
+		if got != c.want {
+			t.Errorf("DescribeArgs(%q, %v) = %q, want %q", c.tool, c.args, got, c.want)
+		}
+	}
+}
+
+func TestDescribeArgsTruncation(t *testing.T) {
+	long := make([]byte, CmdMaxLen+50)
+	for i := range long {
+		long[i] = 'a'
+	}
+	got := DescribeArgs("run", map[string]any{"command": string(long)})
+	if len(got) != CmdMaxLen {
+		t.Errorf("truncated len = %d, want %d", len(got), CmdMaxLen)
+	}
+	if got[CmdMaxLen-3:] != "..." {
+		t.Errorf("trailing ellipsis missing: %q", got[CmdMaxLen-3:])
+	}
+}
+
+func TestAggregateByToolCmd_SplitsByCommand(t *testing.T) {
+	calls := []Call{
+		{TS: time.Now(), Tool: "run", Cmd: "ls", OutBytes: 100, OK: true},
+		{TS: time.Now(), Tool: "run", Cmd: "ls", OutBytes: 200, OK: true},
+		{TS: time.Now(), Tool: "run", Cmd: "make build", OutBytes: 50000, OK: true},
+		{TS: time.Now(), Tool: "tail", Cmd: "/var/log/syslog", OutBytes: 5000, OK: true},
+	}
+	aggs := AggregateByToolCmd(calls)
+	if len(aggs) != 3 {
+		t.Fatalf("expected 3 (tool, cmd) groups, got %d: %+v", len(aggs), aggs)
+	}
+	byKey := map[string]Aggregate{}
+	for _, a := range aggs {
+		byKey[a.Tool+"|"+a.Cmd] = a
+	}
+	if a, ok := byKey["run|ls"]; !ok || a.Calls != 2 || a.TotalOutBytes != 300 {
+		t.Errorf("run/ls aggregate wrong: %+v", a)
+	}
+	if a, ok := byKey["run|make build"]; !ok || a.Calls != 1 || a.MaxOutBytes != 50000 {
+		t.Errorf("run/make build aggregate wrong: %+v", a)
+	}
+	if a, ok := byKey["tail|/var/log/syslog"]; !ok || a.Calls != 1 {
+		t.Errorf("tail aggregate wrong: %+v", a)
+	}
+}
+
+func TestAggregateByToolCmd_EmptyCmdKeepsToolKey(t *testing.T) {
+	// `pwd` has no naturally identifying arg, so its rows have Cmd="".
+	// They should still aggregate into one row keyed on the tool name
+	// alone, not collapse into some other empty-Cmd tool's row.
+	calls := []Call{
+		{Tool: "pwd", Cmd: "", OutBytes: 100, OK: true},
+		{Tool: "pwd", Cmd: "", OutBytes: 200, OK: true},
+		{Tool: "status", Cmd: "", OutBytes: 300, OK: true},
+	}
+	aggs := AggregateByToolCmd(calls)
+	if len(aggs) != 2 {
+		t.Fatalf("expected 2 groups (pwd / status), got %d", len(aggs))
+	}
+}
+
 func TestAggregateByTool(t *testing.T) {
 	now := time.Now()
 	calls := []Call{

@@ -32,6 +32,7 @@ func Cmd(args []string) error {
 		jsonOut    bool
 		clearFlag  bool
 		sinceLast  bool
+		byCmd      bool
 		topLimit   = 20
 		callsLimit = 20
 	)
@@ -44,6 +45,8 @@ func Cmd(args []string) error {
 			clearFlag = true
 		case a == "--since-last":
 			sinceLast = true
+		case a == "--by-cmd":
+			byCmd = true
 		case a == "--since" && i+1 < len(args):
 			d, err := time.ParseDuration(args[i+1])
 			if err != nil {
@@ -124,9 +127,12 @@ func Cmd(args []string) error {
 	}
 
 	var renderErr error
-	if toolFilter != "" {
+	switch {
+	case toolFilter != "":
 		renderErr = renderTool(toolFilter, calls, windowLabel, callsLimit, jsonOut)
-	} else {
+	case byCmd:
+		renderErr = renderAggregateByCmd(calls, windowLabel, topLimit, jsonOut)
+	default:
 		renderErr = renderAggregate(calls, windowLabel, topLimit, jsonOut)
 	}
 	if renderErr == nil && sinceLast {
@@ -142,8 +148,11 @@ USAGE:
 
 EXAMPLES:
   srv mcp stats                      top tools by total output bytes (last 7d)
+  srv mcp stats --by-cmd             top (tool, cmd) pairs -- splits one tool's
+                                     budget across the specific invocations
   srv mcp stats --since 24h          last 24 hours
-  srv mcp stats journal              recent calls to the 'journal' tool
+  srv mcp stats journal              recent calls to the 'journal' tool,
+                                     with each call's cmd / path / unit shown
   srv mcp stats journal --calls 50   last 50 'journal' calls
   srv mcp stats --json               machine-readable output
   srv mcp stats --clear              wipe ~/.srv/mcp-stats.jsonl
@@ -152,6 +161,8 @@ FLAGS:
   --since DURATION   time window (e.g. 1h, 30m, 7d). default 7d (168h).
   --since-last       only calls since the last --since-last view
                      (writes a checkpoint on success).
+  --by-cmd           aggregate by (tool, cmd) instead of just tool.
+                     Surfaces "this specific invocation is the hog" patterns.
   --top N            number of aggregate rows. default 20.
   --calls N          number of per-tool drill rows. default 20.
   --json             JSON output.
@@ -227,6 +238,53 @@ func renderAggregate(calls []Call, windowLabel string, topLimit int, jsonOut boo
 	return nil
 }
 
+// renderAggregateByCmd is the --by-cmd alternate view: one row per
+// distinct (tool, cmd) pair instead of one row per tool. Lets the
+// reader see "this specific `make build` invocation accounts for
+// 80% of the run-tool budget" that the by-tool view smears.
+func renderAggregateByCmd(calls []Call, windowLabel string, topLimit int, jsonOut bool) error {
+	aggs := AggregateByToolCmd(calls)
+	sort.Slice(aggs, func(i, j int) bool {
+		return aggs[i].TotalOutBytes+aggs[i].TotalProgress >
+			aggs[j].TotalOutBytes+aggs[j].TotalProgress
+	})
+	if topLimit > 0 && len(aggs) > topLimit {
+		aggs = aggs[:topLimit]
+	}
+	if jsonOut {
+		b, _ := json.MarshalIndent(aggs, "", "  ")
+		fmt.Println(string(b))
+		return nil
+	}
+	fmt.Printf("MCP token stats by (tool, cmd) -- %s, %d calls across %d distinct invocations\n\n",
+		windowLabel, len(calls), len(aggs))
+	// Same column shape as renderAggregate but with a CMD column
+	// instead of putting per-tool stats next to a single name. CMD
+	// is fixed at 40 chars so the row stays comparable to the
+	// by-tool view's width.
+	const cmdW = 40
+	fmt.Printf("%-12s %-*s %6s %10s %10s %10s %12s %4s\n",
+		"TOOL", cmdW, "CMD", "CALLS", "AVG OUT", "MAX OUT", "TOTAL OUT", "EST TOKENS", "ERR")
+	fmt.Println(strings.Repeat("-", 28+cmdW+58))
+	for _, a := range aggs {
+		line := fmt.Sprintf("%-12s %-*s %6d %10s %10s %10s %12s %4d",
+			truncateRight(a.Tool, 12),
+			cmdW, truncateRight(a.Cmd, cmdW),
+			a.Calls,
+			fmtBytes(int64(a.AvgOutBytes)),
+			fmtBytes(int64(a.MaxOutBytes)),
+			fmtBytes(a.TotalOutBytes),
+			fmtCount(int64(a.EstTotalTokens)),
+			a.Errors,
+		)
+		if a.P95OutBytes > 0 && a.MaxOutBytes > a.P95OutBytes*3 {
+			line = ansi.Red + line + ansi.Reset
+		}
+		fmt.Println(line)
+	}
+	return nil
+}
+
 func renderTool(tool string, calls []Call, windowLabel string, callsLimit int, jsonOut bool) error {
 	filtered := calls[:0]
 	for _, c := range calls {
@@ -257,21 +315,27 @@ func renderTool(tool string, calls []Call, windowLabel string, callsLimit int, j
 	}
 	fmt.Printf("recent calls to %q -- %s, %d total (showing %d)\n\n",
 		tool, windowLabel, len(filtered), len(display))
-	fmt.Printf("%-19s %8s %10s %10s %10s %4s\n",
-		"WHEN", "DUR", "IN", "OUT", "PROGRESS", "OK")
-	fmt.Println(strings.Repeat("-", 70))
+	// Column widths sum to 84 visible chars before CMD; the rest of
+	// the row goes to the command summary (truncated). Fits on a
+	// 120-col terminal with a roomy CMD; narrower terminals will
+	// soft-wrap, which is preferable to losing the command entirely.
+	const cmdW = 48
+	fmt.Printf("%-19s %8s %10s %10s %10s %4s  %-*s\n",
+		"WHEN", "DUR", "IN", "OUT", "PROGRESS", "OK", cmdW, "CMD")
+	fmt.Println(strings.Repeat("-", 78+cmdW))
 	for _, c := range display {
 		okMark := "ok"
 		if !c.OK {
 			okMark = "err"
 		}
-		fmt.Printf("%-19s %7dms %10s %10s %10s %4s\n",
+		fmt.Printf("%-19s %7dms %10s %10s %10s %4s  %s\n",
 			c.TS.Format("2006-01-02 15:04:05"),
 			c.DurMs,
 			fmtBytes(int64(c.InBytes)),
 			fmtBytes(int64(c.OutBytes)),
 			fmtBytes(int64(c.ProgressBytes)),
 			okMark,
+			truncateRight(c.Cmd, cmdW),
 		)
 	}
 	return nil

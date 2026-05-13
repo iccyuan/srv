@@ -29,6 +29,7 @@ import (
 	"os"
 	"path/filepath"
 	"srv/internal/srvpath"
+	"strings"
 	"sync"
 	"time"
 )
@@ -37,11 +38,96 @@ import (
 type Call struct {
 	TS            time.Time `json:"ts"`
 	Tool          string    `json:"tool"`
+	Cmd           string    `json:"cmd,omitempty"`
 	DurMs         int64     `json:"dur_ms"`
 	InBytes       int       `json:"in_bytes"`
 	OutBytes      int       `json:"out_bytes"`
 	ProgressBytes int       `json:"progress_bytes,omitempty"`
 	OK            bool      `json:"ok"`
+}
+
+// CmdMaxLen bounds the per-record Cmd field so a 50 KB shell script
+// passed as args["command"] doesn't bloat the JSONL file. Truncation
+// is best-effort identification, not a faithful replay.
+const CmdMaxLen = 200
+
+// DescribeArgs returns a one-line human-readable summary of the most
+// informative arg for `tool`. Priority list per tool:
+//
+//	run / run_stream / detach          args["command"]
+//	run_group                          "[group=X] " + args["command"]
+//	tail / list_dir / cd               args["path"]
+//	tail_log / wait_job / kill_job     args["id"]
+//	journal                            "unit=X since=Y" (whichever set)
+//	use                                args["profile"]
+//	diff                               args["local"]
+//	push                               args["local"]
+//	pull                               args["remote"]
+//	env                                "action key" when action != list
+//	everything else                    "" (no meaningful arg)
+//
+// Output is truncated to CmdMaxLen so log rows stay bounded. Empty
+// return means the tool has no naturally identifying arg (status /
+// pwd / list_profiles / doctor / daemon_status / list_jobs /
+// sync_delete_dry_run). The CLI just leaves the column blank for
+// those rows.
+func DescribeArgs(tool string, args map[string]any) string {
+	get := func(k string) string {
+		v, _ := args[k].(string)
+		return v
+	}
+	var out string
+	switch tool {
+	case "run", "run_stream", "detach":
+		out = get("command")
+	case "run_group":
+		cmd := get("command")
+		grp := get("group")
+		if grp != "" {
+			out = "[" + grp + "] " + cmd
+		} else {
+			out = cmd
+		}
+	case "tail", "list_dir", "cd":
+		out = get("path")
+	case "tail_log", "wait_job", "kill_job":
+		out = get("id")
+	case "journal":
+		var parts []string
+		if v := get("unit"); v != "" {
+			parts = append(parts, "unit="+v)
+		}
+		if v := get("since"); v != "" {
+			parts = append(parts, "since="+v)
+		}
+		if v := get("priority"); v != "" {
+			parts = append(parts, "priority="+v)
+		}
+		if v := get("grep"); v != "" {
+			parts = append(parts, "grep="+v)
+		}
+		out = strings.Join(parts, " ")
+	case "use":
+		out = get("profile")
+	case "diff", "push":
+		out = get("local")
+	case "pull":
+		out = get("remote")
+	case "env":
+		action := get("action")
+		if action == "" {
+			action = "list"
+		}
+		if action == "list" || action == "clear" {
+			out = action
+		} else {
+			out = action + " " + get("key")
+		}
+	}
+	if len(out) > CmdMaxLen {
+		out = out[:CmdMaxLen-3] + "..."
+	}
+	return out
 }
 
 // EstTokens is a coarse byte→token estimate. The real tokenizer
@@ -199,7 +285,11 @@ func SaveCheckpoint(now time.Time) error {
 // by TotalOutBytes descending so the largest token-consumers float
 // to the top of `srv stats`.
 type Aggregate struct {
-	Tool           string
+	Tool string
+	// Cmd is populated only by AggregateByToolCmd. Empty in the
+	// by-tool rollup since one tool's rows fan out across many
+	// commands.
+	Cmd            string
 	Calls          int
 	TotalInBytes   int64
 	TotalOutBytes  int64
@@ -218,13 +308,55 @@ type Aggregate struct {
 // to tokens spent reading the result -- the most actionable signal
 // for "this tool needs tighter truncation").
 func AggregateByTool(calls []Call) []Aggregate {
-	byTool := map[string]*Aggregate{}
-	outsByTool := map[string][]int{}
+	return aggregateBy(calls, func(c Call) string { return c.Tool }, func(key string, a *Aggregate) {
+		a.Tool = key
+	})
+}
+
+// AggregateByToolCmd rolls Calls up to one Aggregate per (tool, cmd)
+// pair. Surfaces "this specific invocation is the token hog"
+// patterns that AggregateByTool flattens: a single `run` row in the
+// by-tool view might collapse 50 small ls calls + one giant
+// `make -j build` -- by-cmd splits them so the build's cost stands
+// out.
+//
+// Calls with empty Cmd (tools where DescribeArgs has no meaningful
+// arg, e.g. `pwd`) keep their tool name as the key so they don't
+// vanish from the report.
+func AggregateByToolCmd(calls []Call) []Aggregate {
+	return aggregateBy(calls,
+		func(c Call) string {
+			if c.Cmd == "" {
+				return c.Tool + "\x00"
+			}
+			return c.Tool + "\x00" + c.Cmd
+		},
+		func(key string, a *Aggregate) {
+			// Split tool / cmd back out. The \x00 separator can't
+			// occur in either of the source strings (tool names are
+			// ASCII alpha, Cmd is truncated user input but JSON
+			// already strips control chars).
+			parts := strings.SplitN(key, "\x00", 2)
+			a.Tool = parts[0]
+			if len(parts) > 1 {
+				a.Cmd = parts[1]
+			}
+		})
+}
+
+// aggregateBy is the shared body of the by-tool / by-(tool,cmd)
+// rollups. keyFn maps each Call to a grouping key; finalize is
+// called once per group to populate identifying fields on the
+// finished Aggregate.
+func aggregateBy(calls []Call, keyFn func(Call) string, finalize func(string, *Aggregate)) []Aggregate {
+	byKey := map[string]*Aggregate{}
+	outsByKey := map[string][]int{}
 	for _, c := range calls {
-		a, ok := byTool[c.Tool]
+		k := keyFn(c)
+		a, ok := byKey[k]
 		if !ok {
-			a = &Aggregate{Tool: c.Tool}
-			byTool[c.Tool] = a
+			a = &Aggregate{}
+			byKey[k] = a
 		}
 		a.Calls++
 		a.TotalInBytes += int64(c.InBytes)
@@ -237,16 +369,17 @@ func AggregateByTool(calls []Call) []Aggregate {
 		if !c.OK {
 			a.Errors++
 		}
-		outsByTool[c.Tool] = append(outsByTool[c.Tool], c.OutBytes)
+		outsByKey[k] = append(outsByKey[k], c.OutBytes)
 	}
-	out := make([]Aggregate, 0, len(byTool))
-	for tool, a := range byTool {
+	out := make([]Aggregate, 0, len(byKey))
+	for k, a := range byKey {
+		finalize(k, a)
 		if a.Calls > 0 {
 			a.AvgOutBytes = int(a.TotalOutBytes / int64(a.Calls))
 			a.AvgDurMs /= float64(a.Calls)
 		}
-		a.P50OutBytes = percentile(outsByTool[tool], 50)
-		a.P95OutBytes = percentile(outsByTool[tool], 95)
+		a.P50OutBytes = percentile(outsByKey[k], 50)
+		a.P95OutBytes = percentile(outsByKey[k], 95)
 		a.EstTotalTokens = int((a.TotalInBytes + a.TotalOutBytes + a.TotalProgress) / 4)
 		out = append(out, *a)
 	}
