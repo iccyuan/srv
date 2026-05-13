@@ -69,6 +69,56 @@ func Call(conn net.Conn, req Request, deadline time.Duration) (*Response, error)
 	return &resp, nil
 }
 
+// DisconnectResult is what the disconnect ops report back to the CLI.
+// Wasn't-connected is not an error, just OK=false with no profiles
+// freed -- the CLI can still print a useful "(not connected)" line.
+type DisconnectResult struct {
+	Freed []string // profile names whose pooled connection was closed
+	OK    bool     // server reachable and the call ran
+}
+
+// Disconnect asks the daemon to drop the pooled SSH client for
+// `profileName` and evict its ls-cache rows. Returns OK=true with
+// Freed=[profileName] when something was actually closed; OK=true
+// with Freed=nil when the profile wasn't pooled to begin with;
+// OK=false when the daemon isn't reachable (caller should report
+// "no daemon running, nothing to do").
+func Disconnect(profileName string) DisconnectResult {
+	conn := DialSock(time.Second)
+	if conn == nil {
+		return DisconnectResult{OK: false}
+	}
+	defer conn.Close()
+	resp, err := Call(conn, Request{Op: "disconnect", Profile: profileName}, 3*time.Second)
+	if err != nil || resp == nil {
+		return DisconnectResult{OK: false}
+	}
+	// Server's resp.OK reflects "was actually pooled"; we expose
+	// our own OK=true to mean "the call succeeded" and Freed to
+	// mean "this is what was actually closed."
+	out := DisconnectResult{OK: true}
+	if resp.OK {
+		out.Freed = []string{profileName}
+	}
+	return out
+}
+
+// DisconnectAll asks the daemon to drop every pooled SSH client
+// and wipe the ls cache. Returns OK=true on success with Freed
+// containing the names that were actually closed.
+func DisconnectAll() DisconnectResult {
+	conn := DialSock(time.Second)
+	if conn == nil {
+		return DisconnectResult{OK: false}
+	}
+	defer conn.Close()
+	resp, err := Call(conn, Request{Op: "disconnect_all"}, 3*time.Second)
+	if err != nil || resp == nil || !resp.OK {
+		return DisconnectResult{OK: false}
+	}
+	return DisconnectResult{OK: true, Freed: resp.Profiles}
+}
+
 // TryLs short-circuits the cold SSH handshake when a daemon is
 // running and has the profile already pooled. Returns (entries, true) on
 // success; (nil, false) when the caller should fall back to direct ssh.

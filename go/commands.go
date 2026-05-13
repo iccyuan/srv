@@ -154,6 +154,7 @@ var subcommands = []subcommand{
 	{name: "guard", handler: func(c cmdCtx) error { return guard.Cmd(c.args) }},
 	{name: "color", handler: func(c cmdCtx) error { return theme.Cmd(c.args) }},
 	{name: "daemon", handler: func(c cmdCtx) error { return daemon.Cmd(c.args) }},
+	{name: "disconnect", handler: func(c cmdCtx) error { return daemon.DisconnectCmd(c.args, c.cfg, c.profileOverride) }},
 	{name: "project", noConfig: true, handler: func(c cmdCtx) error { return project.Cmd(c.args) }},
 	{name: "group", handler: func(c cmdCtx) error { return group.Cmd(c.args, c.cfg) }},
 	{name: "sudo", handler: func(c cmdCtx) error { return sudo.Cmd(c.args, c.cfg, c.profileOverride) }},

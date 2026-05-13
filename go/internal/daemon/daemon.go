@@ -445,6 +445,10 @@ func (s *daemonState) dispatch(req Request) (resp Response) {
 		return s.handleSudoCacheSet(req)
 	case "sudo_cache_clear":
 		return s.handleSudoCacheClear(req)
+	case "disconnect":
+		return s.handleDisconnect(req)
+	case "disconnect_all":
+		return s.handleDisconnectAll(req)
 	}
 	return Response{OK: false, Err: "unknown op: " + req.Op}
 }
@@ -894,6 +898,68 @@ func (s *daemonState) evictPooledClient(profileName string) {
 	if ok && pc.client != nil {
 		_ = pc.client.Close()
 	}
+}
+
+// handleDisconnect drops the pooled SSH client for req.Profile and
+// evicts every ls-cache row keyed on that profile. The next call
+// referencing the profile will re-dial cold. Tunnels are NOT torn
+// down -- they hold their own *sshx.Client handed out by getClient,
+// and stopping them is `srv tunnel down <name>`'s job.
+//
+// Response.OK is true iff a pooled client was actually present and
+// closed. The CLI uses that to render "disconnected" vs "(not
+// connected)" without an extra round-trip.
+func (s *daemonState) handleDisconnect(req Request) Response {
+	if req.Profile == "" {
+		return Response{OK: false, Err: "profile required"}
+	}
+	s.mu.Lock()
+	pc, ok := s.pool[req.Profile]
+	if ok {
+		delete(s.pool, req.Profile)
+	}
+	cachePrefix := req.Profile + "\x00"
+	evictedCache := 0
+	for k := range s.lsCache {
+		if strings.HasPrefix(k, cachePrefix) {
+			delete(s.lsCache, k)
+			evictedCache++
+		}
+	}
+	s.mu.Unlock()
+	if ok && pc.client != nil {
+		_ = pc.client.Close()
+	}
+	return Response{
+		OK:  ok,
+		Err: "", // ok=false here just means "wasn't connected"; not a failure
+	}
+}
+
+// handleDisconnectAll iterates the pool, closes every client, and
+// wipes the ls cache. Used by `srv disconnect --all`. Returns the
+// list of profiles whose connections were closed so the CLI can
+// list them.
+func (s *daemonState) handleDisconnectAll(req Request) Response {
+	s.mu.Lock()
+	freed := make([]string, 0, len(s.pool))
+	pooled := make([]*pooledClient, 0, len(s.pool))
+	for name, pc := range s.pool {
+		freed = append(freed, name)
+		pooled = append(pooled, pc)
+	}
+	s.pool = map[string]*pooledClient{}
+	// Wipe the full ls cache -- it was keyed on the profiles we
+	// just disconnected (plus possibly cold ones that haven't been
+	// pooled lately). Rebuild on demand.
+	s.lsCache = map[string]*lsCacheEntry{}
+	s.mu.Unlock()
+	for _, pc := range pooled {
+		if pc.client != nil {
+			_ = pc.client.Close()
+		}
+	}
+	return Response{OK: true, Profiles: freed}
 }
 
 func (s *daemonState) closeAll() {
