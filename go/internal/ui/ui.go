@@ -17,6 +17,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"golang.org/x/term"
 )
@@ -55,6 +56,7 @@ type uiState struct {
 	detailMode   bool       // showing the per-row detail panel
 	confirm      *uiConfirm // non-nil = popup is up, awaiting Y/N
 	statusMsg    string     // transient line in the footer (kill result, etc.)
+	demoMode     bool       // true when rendering/handling the built-in demo dataset
 	lastFrame    string
 	prevLines    int
 	forceRedraw  bool
@@ -176,12 +178,18 @@ func countUIRows(rows []uiRow) (tunnels, jobs, mcp int) {
 //	↑ / ↓         move cursor within the focused window
 //	tab / h / l   switch between windows
 //	k             kill the selected job (arms a Y/N confirm)
-func Cmd(cfg *config.Config) error {
+func Cmd(args []string, cfg *config.Config) error {
+	demo := uiDemoMode(args)
 	if !srvtty.IsStdinTTY() {
 		// Without a TTY there's no way to read keys; degrade to a
 		// one-shot print of the snapshot so `srv ui | less` still
 		// works (or piped into a script). Jobs are still listed --
 		// just without the selection markers and key hints.
+		if demo {
+			demoCfg, demoJobs, demoMCP := demoDashboardData(cfg)
+			fmt.Print(renderDashboardWithMCP(demoCfg, demoJobs, sortedTunnelNames(demoCfg), nil, demoMCP))
+			return nil
+		}
 		fmt.Print(renderDashboard(cfg, currentJobs(), sortedTunnelNames(cfg), nil))
 		return nil
 	}
@@ -211,6 +219,7 @@ func Cmd(cfg *config.Config) error {
 		forceRedraw: true,
 		cursor:      0,
 		liveness:    map[string]bool{},
+		demoMode:    demo,
 	}
 	const refreshEvery = 2 * time.Second
 	// pollEvery is how often the loop wakes when no key is pressed.
@@ -245,7 +254,16 @@ func Cmd(cfg *config.Config) error {
 		// Cursor and pane moves don't touch snapAt at all, so they
 		// reuse the cached reads -- the visible latency the user
 		// notices when MCP-switching.
-		if st.snapCfg == nil || st.snapAt.IsZero() || time.Since(st.snapAt) > snapTTL {
+		if demo {
+			demoCfg, demoJobs, demoMCP := demoDashboardData(cfg)
+			st.snapCfg = demoCfg
+			st.snapJobs = demoJobs
+			st.snapMCP = demoMCP
+			st.snapDaemonResp = &daemon.Response{OK: true, Profiles: []string{"美国备用", "tokyo-demo"}, Uptime: int64(2 * time.Hour / time.Second)}
+			st.snapTunnelActive = map[string]daemon.TunnelInfo{}
+			st.snapTunnelErrs = map[string]string{}
+			st.snapAt = time.Now()
+		} else if st.snapCfg == nil || st.snapAt.IsZero() || time.Since(st.snapAt) > snapTTL {
 			if fresh, _ := config.Load(); fresh != nil {
 				st.snapCfg = fresh
 			}
@@ -281,7 +299,13 @@ func Cmd(cfg *config.Config) error {
 		// NOT re-probe — otherwise a window resize would block the
 		// repaint on SSH round-trips and the dashboard would freeze on
 		// the old (clipped) frame for seconds.
-		if time.Since(st.livenessFresh) > livenessTTL {
+		if demo {
+			st.liveness = map[string]bool{}
+			for _, j := range allJobs {
+				st.liveness[j.ID] = true
+			}
+			st.livenessFresh = time.Now()
+		} else if time.Since(st.livenessFresh) > livenessTTL {
 			// Wrap remoteExitMarkers as an ExitMarkerLister so the
 			// jobs package stays decoupled from Config / SSH client.
 			lister := func(profName string) (map[string]bool, bool) {
@@ -346,8 +370,7 @@ func Cmd(cfg *config.Config) error {
 				prefix = clearScreen + cursorHome
 				st.needFullClear = false
 			}
-			flushed := strings.ReplaceAll(out, "\n", "\x1b[K\n")
-			fmt.Fprint(os.Stderr, prefix+flushed+clearEnd)
+			fmt.Fprint(os.Stderr, prefix+altScreenFrame(out, dashboardHeight)+clearEnd)
 			st.lastFrame = out
 			st.forceRedraw = false
 		}
@@ -558,13 +581,9 @@ func cyclePane(st *uiState, dir int) {
 	st.forceRedraw = true
 }
 
-// moveFocusedRow moves the cursor in the focused pane by `delta`
-// (1 = down, -1 = up). At pane boundaries the cursor automatically
-// crosses into the next non-empty section (down past last row
-// jumps to the top of the next pane; up past first row jumps to
-// the bottom of the previous pane). Arrow keys therefore walk every
-// selectable row across all three panes without the user having to
-// press Tab.
+// moveFocusedRow moves the cursor inside the focused pane only.
+// Arrow keys wrap within that pane; Tab / h / l are the only keys
+// that switch panes.
 func moveFocusedRow(st *uiState, delta int) {
 	if len(st.rows) == 0 {
 		return
@@ -594,34 +613,9 @@ func moveFocusedRow(st *uiState, delta int) {
 	}
 
 	cur := cursors[st.focusPane]
-	next := *cur + delta
 	size := sizes[st.focusPane]
-	if next >= 0 && next < size {
-		*cur = next
-		clampCursor(st)
-		st.forceRedraw = true
-		return
-	}
-
-	// Crossing a pane boundary -- find the next non-empty pane in
-	// the requested direction.
-	idx := indexOf(order, st.focusPane)
-	step := 1
-	if delta < 0 {
-		step = -1
-	}
-	for i := 1; i <= len(order); i++ {
-		p := order[(idx+i*step+len(order))%len(order)]
-		if sizes[p] == 0 {
-			continue
-		}
-		st.focusPane = p
-		if step > 0 {
-			*cursors[p] = 0
-		} else {
-			*cursors[p] = sizes[p] - 1
-		}
-		break
+	if size > 0 {
+		*cur = (*cur + delta + size) % size
 	}
 	clampCursor(st)
 	st.forceRedraw = true
@@ -730,6 +724,10 @@ func armConfirmFor(st *uiState, row uiRow, jobs []*jobs.Record, tunnelNames []st
 			return
 		}
 		j := jobs[row.idx]
+		action := func() (string, error) { return uiKillJob(j, cfg) }
+		if st.demoMode {
+			action = func() (string, error) { return "demo kill acknowledged; no process changed", nil }
+		}
 		st.confirm = &uiConfirm{
 			title: "kill " + j.ID,
 			body: []string{
@@ -738,7 +736,7 @@ func armConfirmFor(st *uiState, row uiRow, jobs []*jobs.Record, tunnelNames []st
 				"",
 				"Send SIGTERM to the remote pid and drop the local jobs.json entry.",
 			},
-			action: func() (string, error) { return uiKillJob(j, cfg) },
+			action: action,
 		}
 		st.forceRedraw = true
 	case "tunnel":
@@ -751,9 +749,16 @@ func armConfirmFor(st *uiState, row uiRow, jobs []*jobs.Record, tunnelNames []st
 			return
 		}
 		active := tunnel.LoadActive()
+		if st.demoMode {
+			active = st.snapTunnelActive
+		}
 		_, isUp := active[name]
 		switch key {
 		case ' ':
+			action := func() (string, error) { return uiTunnelDown(name) }
+			if st.demoMode {
+				action = func() (string, error) { return "demo tunnel stopped; no daemon changed", nil }
+			}
 			if isUp {
 				st.confirm = &uiConfirm{
 					title: "tunnel down " + name,
@@ -762,9 +767,13 @@ func armConfirmFor(st *uiState, row uiRow, jobs []*jobs.Record, tunnelNames []st
 						"",
 						"Stop the daemon-hosted listener. Existing connections drop.",
 					},
-					action: func() (string, error) { return uiTunnelDown(name) },
+					action: action,
 				}
 			} else {
+				action := func() (string, error) { return uiTunnelUp(name) }
+				if st.demoMode {
+					action = func() (string, error) { return "demo tunnel started; no daemon changed", nil }
+				}
 				st.confirm = &uiConfirm{
 					title: "tunnel up " + name,
 					body: []string{
@@ -772,7 +781,7 @@ func armConfirmFor(st *uiState, row uiRow, jobs []*jobs.Record, tunnelNames []st
 						"",
 						"Bring the tunnel up via the daemon.",
 					},
-					action: func() (string, error) { return uiTunnelUp(name) },
+					action: action,
 				}
 			}
 			st.forceRedraw = true
@@ -781,6 +790,10 @@ func armConfirmFor(st *uiState, row uiRow, jobs []*jobs.Record, tunnelNames []st
 			if isUp {
 				extra = " The currently-running tunnel will be stopped first."
 			}
+			action := func() (string, error) { return uiTunnelRemove(name, cfg) }
+			if st.demoMode {
+				action = func() (string, error) { return "demo tunnel removed; no config changed", nil }
+			}
 			st.confirm = &uiConfirm{
 				title: "remove tunnel " + name,
 				body: []string{
@@ -788,7 +801,7 @@ func armConfirmFor(st *uiState, row uiRow, jobs []*jobs.Record, tunnelNames []st
 					"",
 					"Delete the saved definition from config." + extra,
 				},
-				action: func() (string, error) { return uiTunnelRemove(name, cfg) },
+				action: action,
 			}
 			st.forceRedraw = true
 		}
@@ -934,6 +947,81 @@ func redrawDashboard(content string, prevLines int) {
 	srvtty.RedrawInPlace(content, prevLines)
 }
 
+func altScreenFrame(content string, height int) string {
+	lines := splitDashboardLines(content)
+	if height > 0 && len(lines) > height {
+		lines = lines[:height]
+	}
+	if len(lines) == 0 {
+		return ""
+	}
+	return strings.Join(lines, "\x1b[K\n") + "\x1b[K"
+}
+
+func uiDemoMode(args []string) bool {
+	if os.Getenv("SRV_UI_DEMO") == "1" {
+		return true
+	}
+	for _, a := range args {
+		switch a {
+		case "demo", "--demo":
+			return true
+		}
+	}
+	return false
+}
+
+func demoDashboardData(base *config.Config) (*config.Config, []*jobs.Record, mcplog.Status) {
+	cfg := config.New()
+	if base != nil {
+		cfg.Lang = base.Lang
+		cfg.Hints = base.Hints
+	}
+	cfg.DefaultProfile = "美国备用"
+	cfg.Profiles = map[string]*config.Profile{
+		"美国备用":       {Host: "backup.example.com", User: "deploy", DefaultCwd: "/srv/demo"},
+		"美国服务":       {Host: "service.example.com", User: "ops", DefaultCwd: "/data/app"},
+		"tokyo-demo": {Host: "tokyo.example.com", User: "dev", DefaultCwd: "/workspace"},
+	}
+	cfg.Groups = map[string][]string{
+		"演示组": {"美国备用", "美国服务", "tokyo-demo"},
+	}
+	cfg.Tunnels = map[string]*config.TunnelDef{
+		"数据库": {Type: "local", Spec: "15432:db.internal:5432", Profile: "美国备用"},
+		"监控":  {Type: "remote", Spec: "19090:127.0.0.1:9090", Profile: "tokyo-demo", Autostart: true},
+	}
+
+	now := time.Now()
+	demoJobs := []*jobs.Record{
+		{ID: "demo-job-0001", Profile: "美国备用", Pid: 31001, Started: now.Add(-42 * time.Minute).Format("2006-01-02T15:04:05"), Cmd: "npm run build -- --watch"},
+		{ID: "demo-job-0002", Profile: "美国服务", Pid: 31002, Started: now.Add(-37 * time.Minute).Format("2006-01-02T15:04:05"), Cmd: "python worker.py --queue default"},
+		{ID: "demo-job-0003", Profile: "tokyo-demo", Pid: 31003, Started: now.Add(-29 * time.Minute).Format("2006-01-02T15:04:05"), Cmd: "go test ./..."},
+		{ID: "demo-job-0004", Profile: "美国备用", Pid: 31004, Started: now.Add(-21 * time.Minute).Format("2006-01-02T15:04:05"), Cmd: "tail -f /var/log/app.log"},
+		{ID: "demo-job-0005", Profile: "美国服务", Pid: 31005, Started: now.Add(-13 * time.Minute).Format("2006-01-02T15:04:05"), Cmd: "docker compose up api"},
+		{ID: "demo-job-0006", Profile: "tokyo-demo", Pid: 31006, Started: now.Add(-8 * time.Minute).Format("2006-01-02T15:04:05"), Cmd: "bash scripts/deploy.sh staging"},
+		{ID: "demo-job-0007", Profile: "美国备用", Pid: 31007, Started: now.Add(-3 * time.Minute).Format("2006-01-02T15:04:05"), Cmd: "sleep 300"},
+	}
+
+	tools := []mcplog.ToolCall{
+		{When: now.Add(-16 * time.Minute), Name: "read_file", Dur: "42ms", OK: true, PID: 4242},
+		{When: now.Add(-14 * time.Minute), Name: "search", Dur: "118ms", OK: true, PID: 4242},
+		{When: now.Add(-12 * time.Minute), Name: "go_test", Dur: "1.8s", OK: true, PID: 4242},
+		{When: now.Add(-10 * time.Minute), Name: "shell", Dur: "250ms", OK: true, PID: 4242},
+		{When: now.Add(-8 * time.Minute), Name: "apply_patch", Dur: "96ms", OK: true, PID: 4242},
+		{When: now.Add(-6 * time.Minute), Name: "ui_snapshot", Dur: "77ms", OK: true, PID: 4242},
+		{When: now.Add(-4 * time.Minute), Name: "build", Dur: "2.4s", OK: true, PID: 4242},
+		{When: now.Add(-2 * time.Minute), Name: "mcp_error_demo", Dur: "30ms", OK: false, PID: 4242},
+	}
+	demoMCP := mcplog.Status{
+		LogPath:     "demo://srv-ui",
+		LogExists:   true,
+		ActivePIDs:  []int{4242},
+		LastActive:  now.Add(-2 * time.Minute),
+		RecentTools: tools,
+	}
+	return cfg, demoJobs, demoMCP
+}
+
 // renderDashboard collects every section into a single multi-line
 // string. Pulled out so non-tty mode and the interactive loop share
 // the same renderer. The output is deterministic from the inputs (no
@@ -951,11 +1039,6 @@ func redrawDashboard(content string, prevLines int) {
 // Snapshot mode (st == nil) skips the side-by-side -- a piped
 // output of stacked boxes is more useful than ascii-art columns.
 func renderDashboard(cfg *config.Config, jobs []*jobs.Record, tunnelNames []string, st *uiState) string {
-	var sb strings.Builder
-	panelHeader(&sb, st)
-	panelProfiles(&sb, cfg, st)
-	panelDaemon(&sb, st)
-
 	// Reuse the snapshot the main loop already tailed -- one disk
 	// read per snapTTL, not per redraw. Snapshot mode (st == nil) and
 	// the legacy paths still hit disk because there's no cache to
@@ -966,33 +1049,215 @@ func renderDashboard(cfg *config.Config, jobs []*jobs.Record, tunnelNames []stri
 	} else {
 		mcpSnapshot = mcplog.Read()
 	}
+	return renderDashboardWithMCP(cfg, jobs, tunnelNames, st, mcpSnapshot)
+}
 
-	if st == nil {
+func renderDashboardWithMCP(cfg *config.Config, jobs []*jobs.Record, tunnelNames []string, st *uiState, mcpSnapshot mcplog.Status) string {
+	var sb strings.Builder
+	panelHeader(&sb, st)
+	panelProfiles(&sb, cfg, st)
+	if st == nil || dashboardWidth < dashboardTwoColumnMinWidth {
+		panelOverview(&sb, cfg, jobs, tunnelNames, mcpSnapshot, st)
+		panelDaemon(&sb, st)
 		panelTunnels(&sb, cfg, tunnelNames, st)
 		panelJobs(&sb, jobs, st)
 		panelMCP(&sb, mcpSnapshot, st)
+		if st != nil {
+			panelFooter(&sb, st)
+		}
 	} else {
 		leftW, rightW, gap := splitColumnsWidth(dashboardWidth)
-		var leftBuf strings.Builder
+		// The DETAIL panel's `╰─╯` is anchored to the bottom of the
+		// JOBS panel: rendering the left column in two stages lets us
+		// measure exactly how tall OVERVIEW + DAEMON + TUNNELS + JOBS
+		// are together, and target the detail panel to that height so
+		// the two columns close on the same row. MCP + FOOTER follow
+		// below on the left while the right side is just plain blank
+		// space (writeSideBySide pads with spaces, no floating walls).
+		var leftTop, leftBot strings.Builder
 		withDashboardWidth(leftW, func() {
-			panelTunnels(&leftBuf, cfg, tunnelNames, st)
-			panelJobs(&leftBuf, jobs, st)
-			panelMCP(&leftBuf, mcpSnapshot, st)
+			panelOverview(&leftTop, cfg, jobs, tunnelNames, mcpSnapshot, st)
+			panelDaemon(&leftTop, st)
+			panelTunnels(&leftTop, cfg, tunnelNames, st)
+			panelJobs(&leftTop, jobs, st)
+			panelMCP(&leftBot, mcpSnapshot, st)
+			panelFooter(&leftBot, st)
 		})
-		leftLines := splitDashboardLines(leftBuf.String())
+		topLines := splitDashboardLines(leftTop.String())
+		// DETAIL is anchored exactly to leftTop: its `╭─╮` lines up
+		// with OVERVIEW's `╭─╮` (both start on the same row of the
+		// side-by-side block) and its `╰─╯` lines up with JOBS' `╰─╯`
+		// (both close on the last row of leftTop). On terminals too
+		// short to fit leftTop, the bottom edges land below the visible
+		// frame together -- that's a terminal-size problem, not a
+		// layout one.
 		var rightBuf strings.Builder
 		withDashboardWidth(rightW, func() {
-			renderStretchedDetail(&rightBuf, cfg, jobs, tunnelNames, mcpSnapshot, st, len(leftLines))
+			renderStretchedDetail(&rightBuf, cfg, jobs, tunnelNames, mcpSnapshot, st, len(topLines))
 		})
-		writeSideBySide(&sb, leftBuf.String(), rightBuf.String(), leftW, rightW, gap)
+		writeSideBySide(&sb, leftTop.String(), rightBuf.String(), leftW, rightW, gap)
+		// MCP + FOOTER stack underneath the side-by-side block, at the
+		// left column's width. The right side of those rows stays
+		// genuinely empty so the panels naturally hang off the bottom
+		// of the now-closed DETAIL column without re-opening any
+		// border walls.
+		sb.WriteString(leftBot.String())
 	}
 
 	panelGroups(&sb, cfg)
-	panelFooter(&sb, st)
-	if st != nil && st.confirm != nil {
-		renderConfirmPopup(&sb, st.confirm)
+	if st == nil {
+		panelFooter(&sb, st)
 	}
-	return sb.String()
+	out := sb.String()
+	if st != nil && st.confirm != nil {
+		return overlayConfirmPopup(out, st.confirm)
+	}
+	return out
+}
+
+func overlayConfirmPopup(content string, c *uiConfirm) string {
+	lines := splitDashboardLines(content)
+	visibleHeight := len(lines)
+	if dashboardHeight > 0 {
+		visibleHeight = dashboardHeight
+	}
+	if visibleHeight < 1 {
+		visibleHeight = 1
+	}
+	for len(lines) < visibleHeight {
+		lines = append(lines, strings.Repeat(" ", dashboardWidth))
+	}
+
+	var popup strings.Builder
+	renderConfirmPopup(&popup, c)
+	popupLines := splitDashboardLines(popup.String())
+	if len(popupLines) == 0 {
+		return content
+	}
+	if len(popupLines) > visibleHeight {
+		popupLines = popupLines[:visibleHeight]
+	}
+
+	start := (visibleHeight - len(popupLines)) / 2
+	if start < 0 {
+		start = 0
+	}
+	for i, line := range popupLines {
+		lines[start+i] = overlayLineSegment(lines[start+i], line, dashboardWidth)
+	}
+	return strings.Join(lines, "\n") + "\n"
+}
+
+func overlayLineSegment(base, popup string, width int) string {
+	if width <= 0 {
+		return popup
+	}
+	popupWidth := visualWidth(popup)
+	if popupWidth >= width {
+		return popup
+	}
+	left := (width - popupWidth) / 2
+	rightStart := left + popupWidth
+	return ansiLeft(base, left) + ansi.Reset + popup + ansi.Reset + ansiRight(base, rightStart, width)
+}
+
+func centerAnsiContent(content string, width int) string {
+	if width <= 0 {
+		return content
+	}
+	contentWidth := visualWidth(content)
+	if contentWidth >= width {
+		return content
+	}
+	left := (width - contentWidth) / 2
+	right := width - contentWidth - left
+	return strings.Repeat(" ", left) + content + strings.Repeat(" ", right)
+}
+
+func ansiLeft(s string, width int) string {
+	return ansiSlice(s, 0, width)
+}
+
+func ansiRight(s string, start, width int) string {
+	if start >= width {
+		return ""
+	}
+	right := ansiSlice(s, start, width)
+	if visualWidth(right) < width-start {
+		right += strings.Repeat(" ", width-start-visualWidth(right))
+	}
+	return right
+}
+
+func ansiSlice(s string, start, end int) string {
+	if end <= start {
+		return ""
+	}
+	var out strings.Builder
+	col := 0
+	inEsc := false
+	sawEsc := false
+	for i := 0; i < len(s); {
+		c := s[i]
+		if inEsc {
+			// Always copy escape bytes, even when the slice has not
+			// started yet. SGR state is sticky -- if the base line
+			// opened with `\x1b[2m` (dim) at column 0 and we slice
+			// columns 80-95, the slice's visible cells were rendered
+			// in dim on the original line. Dropping the dim escape
+			// would resurface the underlying default-color cells next
+			// to the popup, which is exactly the visible "the row to
+			// the right of the popup brightened" regression.
+			out.WriteByte(c)
+			i++
+			// Only `m` ends an SGR sequence; the rest of 0x40-0x7e
+			// includes the CSI introducer `[` (0x5b), which would
+			// wrongly terminate the escape and cause the parameter
+			// bytes (`2` etc.) and the final `m` to be counted as
+			// visible content -- leaving the sliced string two
+			// columns short of the requested width and silently
+			// padded with trailing spaces.
+			if c == 'm' {
+				inEsc = false
+			}
+			continue
+		}
+		if c == 0x1b {
+			out.WriteByte(c)
+			sawEsc = true
+			inEsc = true
+			i++
+			continue
+		}
+		r, size := utf8.DecodeRuneInString(s[i:])
+		if r == utf8.RuneError && size == 0 {
+			break
+		}
+		rw := runeDisplayWidth(r)
+		next := col + rw
+		if next > start && col < end {
+			if col >= start && next <= end {
+				out.WriteString(s[i : i+size])
+			} else {
+				out.WriteString(strings.Repeat(" ", min(rw, end-start)))
+			}
+		}
+		col = next
+		i += size
+		if col >= end {
+			break
+		}
+	}
+	if got := visualWidth(out.String()); got < end-start {
+		out.WriteString(strings.Repeat(" ", end-start-got))
+	}
+	// Close any open SGR state so the trailing cells (and the next
+	// line, via the terminal's persistent SGR) render in default
+	// attributes.
+	if sawEsc {
+		out.WriteString(ansi.Reset)
+	}
+	return out.String()
 }
 
 // splitColumnsWidth divides a full-width row into left/right
@@ -1002,12 +1267,20 @@ func renderDashboard(cfg *config.Config, jobs []*jobs.Record, tunnelNames []stri
 func splitColumnsWidth(total int) (left, right, gap int) {
 	gap = 1
 	left = (total - gap) / 2
-	if left < 32 {
-		left = 32
-	}
 	right = total - left - gap
-	if right < 28 {
-		right = 28
+	if left < dashboardColumnMinWidth {
+		left = dashboardColumnMinWidth
+		right = total - left - gap
+	}
+	if right < dashboardColumnMinWidth {
+		right = dashboardColumnMinWidth
+		left = total - right - gap
+	}
+	if left < 20 {
+		left = 20
+	}
+	if right < 20 {
+		right = 20
 	}
 	return left, right, gap
 }
@@ -1034,7 +1307,9 @@ func withDashboardWidth(w int, fn func()) {
 // writeSideBySide zips two pre-rendered column blocks line-by-line,
 // padding the shorter side with blanks so the result stays
 // grid-aligned. visualWidth handles ANSI sequences so a coloured row
-// of N visible chars still occupies N cells.
+// of N visible chars still occupies N cells. Padding rows on either
+// side are plain spaces so a column whose box has already closed with
+// `╰─╯` is not visually reopened with floating `│ │` walls below it.
 func writeSideBySide(sb *strings.Builder, left, right string, leftWidth, rightWidth, gap int) {
 	lLines := splitDashboardLines(left)
 	rLines := splitDashboardLines(right)
@@ -1044,7 +1319,7 @@ func writeSideBySide(sb *strings.Builder, left, right string, leftWidth, rightWi
 	}
 	gapStr := strings.Repeat(" ", gap)
 	blankLeft := strings.Repeat(" ", leftWidth)
-	blankRight := blankBoxLine(rightWidth)
+	blankRight := strings.Repeat(" ", rightWidth)
 	for i := 0; i < n; i++ {
 		var l, r string
 		if i < len(lLines) {
@@ -1069,32 +1344,33 @@ func writeSideBySide(sb *strings.Builder, left, right string, leftWidth, rightWi
 	}
 }
 
-func blankBoxLine(width int) string {
-	if width < 4 {
-		return strings.Repeat(" ", max(0, width))
-	}
-	border := boxColor(false)
-	return fmt.Sprintf("%s│%s %s %s│%s",
-		border, ansi.Reset, strings.Repeat(" ", width-4), border, ansi.Reset)
-}
-
-// renderStretchedDetail draws panelDetail and pads its inner area
-// with blank bordered lines so the box's ╰─╯ bottom lands on the same
-// row as the left column's last line. Without this, the left's
-// tunnels/jobs/mcp stack visibly extends past the right column's
-// shorter detail box and the screen looks like the right side is
-// missing borders for those bottom rows.
+// renderStretchedDetail draws panelDetail at exactly `targetHeight`
+// rows (excluding the trailing blank). The box's `╭─╮` top sits on
+// row 0 and its `╰─╯` bottom on row targetHeight-1, so the closing
+// border is guaranteed to land within the dashboard's visible frame
+// regardless of how tall the natural detail content is.
+//
+// Three regimes:
+//
+//   - Natural height == targetHeight: emit unchanged.
+//   - Natural height <  targetHeight: keep the top + body, insert
+//     blank `│ │` rows between the last body row and the bottom, and
+//     drop the bottom in place. This is the common case in a 2-column
+//     layout where the left column is taller than the detail panel.
+//   - Natural height >  targetHeight: keep the top, the first
+//     (targetHeight-2) body rows, then the bottom -- trailing content
+//     is truncated rather than spilling past the visible frame and
+//     hiding the closing border.
 //
 // Caller must invoke this inside withDashboardWidth(rightW, …) so the
 // padding boxLine emits at the right column's width.
 func renderStretchedDetail(sb *strings.Builder, cfg *config.Config, jobs []*jobs.Record, tunnelNames []string, mcp mcplog.Status, st *uiState, targetHeight int) {
+	if targetHeight < 3 {
+		targetHeight = 3
+	}
 	var buf strings.Builder
 	panelDetail(&buf, cfg, jobs, tunnelNames, mcp, st)
 	lines := splitDashboardLines(buf.String())
-	if len(lines) >= targetHeight {
-		sb.WriteString(buf.String())
-		return
-	}
 	bottomIdx := -1
 	for i := len(lines) - 1; i >= 0; i-- {
 		if strings.Contains(lines[i], "╰") {
@@ -1106,11 +1382,22 @@ func renderStretchedDetail(sb *strings.Builder, cfg *config.Config, jobs []*jobs
 		sb.WriteString(buf.String())
 		return
 	}
-	for i := 0; i < bottomIdx; i++ {
-		sb.WriteString(lines[i])
+	// Body rows live between lines[0] (top) and lines[bottomIdx] (bot).
+	bodyMax := targetHeight - 2
+	if bodyMax < 0 {
+		bodyMax = 0
+	}
+	body := lines[1:bottomIdx]
+	if len(body) > bodyMax {
+		body = body[:bodyMax]
+	}
+	sb.WriteString(lines[0])
+	sb.WriteByte('\n')
+	for _, line := range body {
+		sb.WriteString(line)
 		sb.WriteByte('\n')
 	}
-	for i := 0; i < targetHeight-len(lines); i++ {
+	for pad := bodyMax - len(body); pad > 0; pad-- {
 		boxLine(sb, "")
 	}
 	sb.WriteString(lines[bottomIdx])
@@ -1281,13 +1568,30 @@ func padAnsiRight(s string, width int) string {
 }
 
 func fitPlain(s string, width int) string {
-	if width <= 0 || len(s) <= width {
+	if width <= 0 || visualWidth(s) <= width {
 		return s
 	}
 	if width <= 3 {
-		return s[:width]
+		return truncatePlainDisplay(s, width)
 	}
-	return s[:width-3] + "..."
+	return truncatePlainDisplay(s, width-3) + "..."
+}
+
+func truncatePlainDisplay(s string, width int) string {
+	if width <= 0 {
+		return ""
+	}
+	var out strings.Builder
+	used := 0
+	for _, r := range s {
+		rw := runeDisplayWidth(r)
+		if used+rw > width {
+			break
+		}
+		out.WriteRune(r)
+		used += rw
+	}
+	return out.String()
 }
 
 func kvLine(key, value string) string {
@@ -1306,15 +1610,21 @@ func kvPair(leftLabel, leftValue, rightLabel, rightValue string) string {
 
 func panelHeader(sb *strings.Builder, st *uiState) {
 	boxTop(sb, "srv")
-	boxLine(sb, ansi.Bold+ansi.Magenta+"SRV UI"+ansi.Reset+"  "+ansi.Dim+"windowed control dashboard"+ansi.Reset)
+	boxLine(sb, fitInlineParts(
+		[]string{
+			ansi.Bold + ansi.Magenta + "SRV UI" + ansi.Reset,
+			ansi.Dim + "remote control dashboard" + ansi.Reset,
+		},
+		ansi.Dim+"live terminal view"+ansi.Reset,
+		dashboardContentWidth,
+	))
 	if st == nil {
 		boxLine(sb, ansi.Dim+"snapshot mode (no tty)"+ansi.Reset)
 		boxBottom(sb)
 		fmt.Fprintln(sb)
 		return
 	}
-	boxLine(sb, fmt.Sprintf("keys: %sq%s quit  %sr%s redraw  %stab/h/l%s window  %s↑/↓%s row  %sk%s kill",
-		ansi.Yellow+ansi.Bold, ansi.Reset,
+	boxLine(sb, fmt.Sprintf("keys  %stab/h/l%s pane   %s↑/↓%s row   %sr%s refresh   %sq%s quit",
 		ansi.Yellow+ansi.Bold, ansi.Reset,
 		ansi.Yellow+ansi.Bold, ansi.Reset,
 		ansi.Yellow+ansi.Bold, ansi.Reset,
@@ -1351,9 +1661,10 @@ func panelProfiles(sb *strings.Builder, cfg *config.Config, st *uiState) {
 		}
 	}
 
-	title := fmt.Sprintf("profiles %d", len(names))
-	suffix := fmt.Sprintf("● %d active · ○ %d idle", activeCount, len(names)-activeCount)
-	boxTopWithDimSuffix(sb, title, suffix)
+	boxTop(sb, fmt.Sprintf("profiles %d", len(names)))
+	boxLine(sb, fmt.Sprintf("%sactive%s %d    %sidle%s %d",
+		ansi.Dim, ansi.Reset, activeCount,
+		ansi.Dim, ansi.Reset, len(names)-activeCount))
 
 	maxName := 0
 	for _, n := range names {
@@ -1470,11 +1781,19 @@ func ellipsisAnsiRight(s string, w int) string {
 	seen := 0
 	inEscape := false
 	target := w - 3
-	for i := 0; i < len(s); i++ {
+	for i := 0; i < len(s); {
 		c := s[i]
 		if inEscape {
 			out.WriteByte(c)
-			if (c >= 0x40 && c <= 0x7e) || c == 'm' {
+			i++
+			// Only `m` ends an SGR sequence -- see the matching note
+			// in ansiSlice. Treating the CSI introducer `[` (0x5b) as
+			// an escape terminator here would make the parameter
+			// bytes and the final `m` count toward the cell budget,
+			// causing the truncation to fire two cells too early and
+			// chop a `\x1b[0m` reset in half (the user-visible symptom
+			// is the selected TUNNEL row's SPEC shrinking to "...").
+			if c == 'm' {
 				inEscape = false
 			}
 			continue
@@ -1482,13 +1801,20 @@ func ellipsisAnsiRight(s string, w int) string {
 		if c == 0x1b {
 			out.WriteByte(c)
 			inEscape = true
+			i++
 			continue
 		}
-		if seen >= target {
+		r, size := utf8.DecodeRuneInString(s[i:])
+		if r == utf8.RuneError && size == 0 {
 			break
 		}
-		out.WriteByte(c)
-		seen++
+		rw := runeDisplayWidth(r)
+		if seen+rw > target {
+			break
+		}
+		out.WriteString(s[i : i+size])
+		seen += rw
+		i += size
 	}
 	out.WriteString("...")
 	out.WriteString(ansi.Reset)
@@ -1525,6 +1851,56 @@ func panelDaemon(sb *strings.Builder, st *uiState) {
 	boxLine(sb, fitInlineParts(parts, "", dashboardContentWidth))
 	boxBottom(sb)
 	fmt.Fprintln(sb)
+}
+
+func panelOverview(sb *strings.Builder, cfg *config.Config, jobs []*jobs.Record, tunnelNames []string, mcp mcplog.Status, st *uiState) {
+	profiles := 0
+	defaultProfile := ""
+	groups := 0
+	if cfg != nil {
+		profiles = len(cfg.Profiles)
+		defaultProfile = cfg.DefaultProfile
+		groups = len(cfg.Groups)
+	}
+	if defaultProfile == "" {
+		defaultProfile = "-"
+	}
+	focus := "snapshot"
+	if st != nil {
+		focus = st.focusPane
+		if focus == "" {
+			focus = "none"
+		}
+	}
+	hidden := 0
+	if st != nil {
+		hidden = st.hiddenJobs
+	}
+	boxTopWithDimSuffix(sb, "overview", fmt.Sprintf("focus %s", strings.ToUpper(focus)))
+	boxLine(sb, compactOverviewLine(
+		overviewItem("profiles", strconv.Itoa(profiles)),
+		overviewItem("default", defaultProfile),
+	))
+	boxLine(sb, compactOverviewLine(
+		overviewItem("groups", strconv.Itoa(groups)),
+		overviewItem("tunnels", strconv.Itoa(len(tunnelNames))),
+		overviewItem("jobs", fmt.Sprintf("%d visible / %d hidden", len(jobs), hidden)),
+	))
+	if mcp.LogExists {
+		boxLine(sb, overviewItem("mcp", fmt.Sprintf("%d recent", len(mcp.RecentTools))))
+	} else {
+		boxLine(sb, overviewItem("mcp", dashMeta("no log yet")))
+	}
+	boxBottom(sb)
+	fmt.Fprintln(sb)
+}
+
+func overviewItem(label, value string) string {
+	return ansi.Dim + strings.ToUpper(label) + ":" + ansi.Reset + " " + value
+}
+
+func compactOverviewLine(parts ...string) string {
+	return strings.Join(parts, "    ")
 }
 
 // fetchDaemonStatusForUI does a single status RPC and returns the
@@ -1578,8 +1954,17 @@ func panelTunnels(sb *strings.Builder, cfg *config.Config, names []string, st *u
 		active, errs = tunnel.LoadStatuses()
 	}
 	title := fmt.Sprintf("tunnels %d", len(names))
-	boxTopFocused(sb, title, focused)
-	boxLineFocused(sb, ansi.Dim+"  NAME          TYPE     SPEC / STATE"+ansi.Reset, focused)
+	boxTopWithHint(sb, title, "space toggle  x remove", focused)
+	nameW := 12
+	typeW := 7
+	specW := dashboardContentWidth - nameW - typeW - 22
+	if specW < 10 {
+		specW = 10
+	}
+	if specW > 44 {
+		specW = 44
+	}
+	boxLineFocused(sb, ansi.Dim+"  "+padAnsiRight("NAME", nameW)+"  "+padAnsiRight("TYPE", typeW)+"  SPEC / STATE"+ansi.Reset, focused)
 	boxLineFocused(sb, ansi.Dim+strings.Repeat("-", dashboardContentWidth)+ansi.Reset, focused)
 	for i, n := range names {
 		def := cfg.Tunnels[n]
@@ -1597,16 +1982,22 @@ func panelTunnels(sb *strings.Builder, cfg *config.Config, names []string, st *u
 		if def.Autostart {
 			flag = " " + dashStatus("autostart", ansi.Cyan)
 		}
-		marker := "  "
-		row := fmt.Sprintf("%s%-12s  %-7s  %s  %s%s%s",
-			marker, dashName(n), ansi.Magenta+def.Type+ansi.Reset, dashPath(fitPlain(def.Spec, 32)), status, ansi.Dim+extra+ansi.Reset, flag)
-		selected := st != nil && st.isSelected("tunnel", i)
-		if selected {
-			row = ansi.Yellow + ansi.Bold + "> " + ansi.Reset + ansi.Reverse + row[2:] + ansi.Reset
+		row := "  " +
+			padAnsiRight(dashName(fitPlain(n, nameW)), nameW) + "  " +
+			padAnsiRight(ansi.Magenta+fitPlain(def.Type, typeW)+ansi.Reset, typeW) + "  " +
+			dashPath(fitPlain(def.Spec, specW)) + "  " +
+			status + ansi.Dim + extra + ansi.Reset + flag
+		// Selection only swaps the leading "  " gutter for a yellow
+		// `> ` cursor. We intentionally do NOT wrap the rest of the
+		// row in `ansi.Reverse` -- the columns carry their own colour
+		// coding (magenta type, cyan spec, green/red state) and
+		// inverting them turns the row into an unreadable rainbow.
+		if st != nil && st.isSelected("tunnel", i) {
+			row = ansi.Yellow + ansi.Bold + "> " + ansi.Reset + row[2:]
 		}
 		boxLineFocused(sb, row, focused)
 		if errMsg != "" {
-			boxLineFocused(sb, "    "+ansi.Red+fitPlain(errMsg, 76)+ansi.Reset, focused)
+			boxLineFocused(sb, "    "+ansi.Red+fitPlain(errMsg, max(8, dashboardContentWidth-4))+ansi.Reset, focused)
 		}
 	}
 	boxBottomFocused(sb, focused)
@@ -1626,23 +2017,33 @@ func panelJobs(sb *strings.Builder, jobs []*jobs.Record, st *uiState) {
 	if hidden > 0 {
 		title = fmt.Sprintf("jobs %d + %d hidden", len(jobs), hidden)
 	}
-	boxTopFocused(sb, title, focused)
+	start, end := 0, len(jobs)
+	if st != nil {
+		start, end = visibleListRange(len(jobs), st.jobCursor, dashboardListRows)
+		if end-start < len(jobs) {
+			title += fmt.Sprintf("  showing %d-%d/%d", start+1, end, len(jobs))
+		}
+	}
+	boxTopWithHint(sb, title, "k kill", focused)
 	if len(jobs) == 0 {
 		boxLineFocused(sb, ansi.Dim+"nothing running; `srv jobs` lists completed entries"+ansi.Reset, focused)
 		boxBottomFocused(sb, focused)
 		fmt.Fprintln(sb)
 		return
 	}
-	boxLineFocused(sb, ansi.Dim+"  ID            PROFILE     PID       AGE       COMMAND"+ansi.Reset, focused)
+	boxLineFocused(sb, ansi.Dim+"  ID            PROFILE       PID       AGE"+ansi.Reset, focused)
 	boxLineFocused(sb, ansi.Dim+strings.Repeat("-", dashboardContentWidth)+ansi.Reset, focused)
-	for i, j := range jobs {
-		cmd := fitPlain(j.Cmd, 42)
+	for i := start; i < end; i++ {
+		j := jobs[i]
 		started := j.Started
 		if t, ok := parseISOLike(j.Started); ok {
 			started = fmtDuration(time.Since(t)) + " ago"
 		}
-		row := fmt.Sprintf("  %-12s  %-10s  %-8d  %-8s  %s",
-			dashName(truncID(j.ID)), ansi.Cyan+j.Profile+ansi.Reset, j.Pid, dashMeta(started), cmd)
+		row := "  " +
+			padAnsiRight(dashName(truncID(j.ID)), 12) + "  " +
+			padAnsiRight(ansi.Cyan+fitPlain(j.Profile, 12)+ansi.Reset, 12) + "  " +
+			padAnsiRight(strconv.Itoa(j.Pid), 8) + "  " +
+			padAnsiRight(dashMeta(started), 8)
 		if st != nil && st.isSelected("job", i) {
 			row = ansi.Yellow + ansi.Bold + "> " + ansi.Reset + ansi.Reverse + row[2:] + ansi.Reset
 		}
@@ -1805,7 +2206,7 @@ func panelMCP(sb *strings.Builder, mcp mcplog.Status, st *uiState) {
 		return
 	}
 	focused := st != nil && st.focusPane == "mcp"
-	boxTopFocused(sb, fmt.Sprintf("mcp %d", len(mcp.RecentTools)), focused)
+	boxTopWithHint(sb, fmt.Sprintf("mcp %d", len(mcp.RecentTools)), "read-only", focused)
 	if len(mcp.ActivePIDs) == 0 {
 		boxLineFocused(sb, kvPair("state", dashStatus("idle", ansi.Dim), "last", fmtDuration(time.Since(mcp.LastActive))+" ago"), focused)
 	} else {
@@ -1818,14 +2219,31 @@ func panelMCP(sb *strings.Builder, mcp mcplog.Status, st *uiState) {
 	if len(mcp.RecentTools) > 0 {
 		boxLineFocused(sb, ansi.Dim+"  TOOL                  DUR      STATE    AGE"+ansi.Reset, focused)
 		boxLineFocused(sb, ansi.Dim+strings.Repeat("-", dashboardContentWidth)+ansi.Reset, focused)
-		for i, tc := range mcp.RecentTools {
+		toolW := dashboardContentWidth - 30
+		if toolW < 10 {
+			toolW = 10
+		}
+		if toolW > 20 {
+			toolW = 20
+		}
+		start, end := 0, len(mcp.RecentTools)
+		if st != nil {
+			start, end = visibleListRange(len(mcp.RecentTools), st.mcpCursor, dashboardListRows)
+			if end-start < len(mcp.RecentTools) {
+				boxLineFocused(sb, dashMeta(fmt.Sprintf("showing %d-%d/%d", start+1, end, len(mcp.RecentTools))), focused)
+			}
+		}
+		for i := start; i < end; i++ {
+			tc := mcp.RecentTools[i]
 			status := dashStatus("ok", ansi.Green)
 			if !tc.OK {
 				status = dashStatus("err", ansi.Red)
 			}
-			row := fmt.Sprintf("  %-20s  %-7s  %-7s  %s",
-				ansi.Yellow+tc.Name+ansi.Reset, ansi.Magenta+tc.Dur+ansi.Reset, status,
-				dashMeta(fmtDuration(time.Since(tc.When))+" ago"))
+			row := "  " +
+				padAnsiRight(ansi.Yellow+fitPlain(tc.Name, toolW)+ansi.Reset, toolW) + "  " +
+				padAnsiRight(ansi.Magenta+tc.Dur+ansi.Reset, 7) + "  " +
+				padAnsiRight(status, 7) + "  " +
+				dashMeta(fmtDuration(time.Since(tc.When))+" ago")
 			if st != nil && st.isSelected("mcp", i) {
 				row = ansi.Yellow + ansi.Bold + "> " + ansi.Reset + ansi.Reverse + row[2:] + ansi.Reset
 			}
@@ -1836,8 +2254,31 @@ func panelMCP(sb *strings.Builder, mcp mcplog.Status, st *uiState) {
 	fmt.Fprintln(sb)
 }
 
+func visibleListRange(total, cursor, limit int) (start, end int) {
+	if total <= 0 {
+		return 0, 0
+	}
+	if limit <= 0 || limit >= total {
+		return 0, total
+	}
+	if cursor < 0 {
+		cursor = 0
+	}
+	if cursor >= total {
+		cursor = total - 1
+	}
+	start = cursor - limit/2
+	if start < 0 {
+		start = 0
+	}
+	if start+limit > total {
+		start = total - limit
+	}
+	return start, start + limit
+}
+
 func panelFooter(sb *strings.Builder, st *uiState) {
-	boxTop(sb, "help")
+	boxTop(sb, "keys")
 	if st == nil {
 		boxLine(sb, ansi.Dim+"snapshot complete"+ansi.Reset)
 	} else if st.statusMsg != "" {
@@ -1847,27 +2288,49 @@ func panelFooter(sb *strings.Builder, st *uiState) {
 		if focus == "" {
 			focus = "none"
 		}
-		boxLine(sb, kvPair("focus", ansi.Yellow+ansi.Bold+strings.ToUpper(focus)+ansi.Reset, "mode", "window navigation"))
+		boxLine(sb, kvPair("focus", ansi.Yellow+ansi.Bold+strings.ToUpper(focus)+ansi.Reset, "mode", "live dashboard"))
 		switch focus {
 		case "tunnel":
-			boxLine(sb, "actions: "+ansi.Yellow+"↑/↓"+ansi.Reset+" move  "+ansi.Yellow+"space"+ansi.Reset+" up/down  "+ansi.Yellow+"x"+ansi.Reset+" remove  "+ansi.Yellow+"tab"+ansi.Reset+" next window  "+ansi.Yellow+"q"+ansi.Reset+" quit")
+			boxLine(sb, keyHelp("↑/↓ move", "space up/down", "x remove", "tab next", "r refresh", "q quit"))
 		case "job":
-			boxLine(sb, "actions: "+ansi.Yellow+"↑/↓"+ansi.Reset+" move  "+ansi.Yellow+"k"+ansi.Reset+" kill  "+ansi.Yellow+"tab"+ansi.Reset+" next window  "+ansi.Yellow+"q"+ansi.Reset+" quit")
+			boxLine(sb, keyHelp("↑/↓ move", "k kill", "tab next", "r refresh", "q quit"))
 		case "mcp":
-			boxLine(sb, "actions: "+ansi.Yellow+"↑/↓"+ansi.Reset+" move  "+ansi.Dim+"(read-only)"+ansi.Reset+"  "+ansi.Yellow+"tab"+ansi.Reset+" next window  "+ansi.Yellow+"q"+ansi.Reset+" quit")
+			boxLine(sb, keyHelp("↑/↓ move", "read-only", "tab next", "r refresh", "q quit"))
 		default:
-			boxLine(sb, "actions: "+ansi.Yellow+"tab"+ansi.Reset+" choose window  "+ansi.Yellow+"r"+ansi.Reset+" refresh  "+ansi.Yellow+"q"+ansi.Reset+" quit")
+			boxLine(sb, keyHelp("tab choose pane", "r refresh", "q quit"))
 		}
 	}
 	boxBottom(sb)
 }
 
-// renderConfirmPopup draws a centered box at the bottom of the
-// dashboard with the action title and explanatory body lines. The
-// Y/N choice is anchored at the box's last row so the user's eye
-// lands on it after reading the body.
+func keyHelp(parts ...string) string {
+	out := make([]string, 0, len(parts))
+	for _, p := range parts {
+		fields := strings.Fields(p)
+		if len(fields) == 0 {
+			continue
+		}
+		key := fields[0]
+		desc := strings.TrimSpace(strings.TrimPrefix(p, key))
+		if key == "read-only" {
+			out = append(out, ansi.Dim+"read-only"+ansi.Reset)
+		} else if desc == "" {
+			out = append(out, ansi.Yellow+ansi.Bold+key+ansi.Reset)
+		} else {
+			out = append(out, ansi.Yellow+ansi.Bold+key+ansi.Reset+" "+desc)
+		}
+	}
+	return strings.Join(out, ansi.Dim+"  ·  "+ansi.Reset)
+}
+
+// renderConfirmPopup draws the action title and explanatory body
+// lines; overlayConfirmPopup places the resulting box over the
+// already-rendered dashboard. Every emitted line starts directly with
+// the red border glyph so the overlay only overwrites cells *inside*
+// the red box -- anything to the left / right of the popup remains
+// the underlying dashboard content.
 func renderConfirmPopup(sb *strings.Builder, c *uiConfirm) {
-	width := 64
+	width := min(64, max(28, dashboardWidth))
 	for _, line := range c.body {
 		if w := visualWidth(line) + 4; w > width {
 			width = w
@@ -1876,42 +2339,52 @@ func renderConfirmPopup(sb *strings.Builder, c *uiConfirm) {
 	if w := visualWidth(c.title) + 6; w > width {
 		width = w
 	}
-	if width > 78 {
-		width = 78
+	if width > dashboardWidth {
+		width = dashboardWidth
 	}
-	indent := "  "
-	top := indent + "┌" + strings.Repeat("─", width-2) + "┐"
-	bot := indent + "└" + strings.Repeat("─", width-2) + "┘"
-	fmt.Fprintln(sb)
-	fmt.Fprintf(sb, "%s%s%s\n", ansi.Bold+ansi.Red, top, ansi.Reset)
-	fmt.Fprintf(sb, "%s│%s %s%s%s%s%s│%s\n",
-		ansi.Bold+ansi.Red, ansi.Reset,
-		ansi.Bold+ansi.Red, c.title, ansi.Reset,
-		strings.Repeat(" ", max(0, width-3-visualWidth(c.title))),
-		ansi.Bold+ansi.Red, ansi.Reset)
+	if width < 28 {
+		width = 28
+	}
+	top := "┌" + strings.Repeat("─", width-2) + "┐"
+	bot := "└" + strings.Repeat("─", width-2) + "┘"
+	red := ansi.Bold + ansi.Red
+	title := fitPlain(c.title, max(8, width-4))
+	fmt.Fprintf(sb, "%s%s%s\n", red, top, ansi.Reset)
+	titleCell := centerAnsiContent(red+title+ansi.Reset, width-2)
 	fmt.Fprintf(sb, "%s│%s%s%s│%s\n",
-		ansi.Bold+ansi.Red, ansi.Reset,
+		red, ansi.Reset,
+		titleCell,
+		red, ansi.Reset)
+	fmt.Fprintf(sb, "%s│%s%s%s│%s\n",
+		red, ansi.Reset,
 		strings.Repeat(" ", width-2),
-		ansi.Bold+ansi.Red, ansi.Reset)
+		red, ansi.Reset)
 	for _, line := range c.body {
-		pad := max(0, width-3-visualWidth(line))
-		fmt.Fprintf(sb, "%s│%s %s%s%s│%s\n",
-			ansi.Bold+ansi.Red, ansi.Reset,
-			line, strings.Repeat(" ", pad),
-			ansi.Bold+ansi.Red, ansi.Reset)
+		line = fitPlain(line, max(8, width-4))
+		lineCell := centerAnsiContent(line, width-2)
+		fmt.Fprintf(sb, "%s│%s%s%s│%s\n",
+			red, ansi.Reset,
+			lineCell,
+			red, ansi.Reset)
 	}
 	fmt.Fprintf(sb, "%s│%s%s%s│%s\n",
-		ansi.Bold+ansi.Red, ansi.Reset,
+		red, ansi.Reset,
 		strings.Repeat(" ", width-2),
-		ansi.Bold+ansi.Red, ansi.Reset)
+		red, ansi.Reset)
 	choice := ansi.Yellow + ansi.Bold + "[Y]" + ansi.Reset + " confirm    " +
 		ansi.Yellow + ansi.Bold + "[N/Esc]" + ansi.Reset + " cancel"
-	pad := max(0, width-3-visualWidth("[Y] confirm    [N/Esc] cancel"))
-	fmt.Fprintf(sb, "%s│%s %s%s%s│%s\n",
-		ansi.Bold+ansi.Red, ansi.Reset,
-		choice, strings.Repeat(" ", pad),
-		ansi.Bold+ansi.Red, ansi.Reset)
-	fmt.Fprintf(sb, "%s%s%s\n", ansi.Bold+ansi.Red, bot, ansi.Reset)
+	choiceWidth := visualWidth("[Y] confirm    [N/Esc] cancel")
+	if choiceWidth > width-3 {
+		choice = ansi.Yellow + ansi.Bold + "[Y]" + ansi.Reset + " ok  " +
+			ansi.Yellow + ansi.Bold + "[N]" + ansi.Reset + " cancel"
+		choiceWidth = visualWidth("[Y] ok  [N] cancel")
+	}
+	choiceCell := centerAnsiContent(choice, width-2)
+	fmt.Fprintf(sb, "%s│%s%s%s│%s\n",
+		red, ansi.Reset,
+		choiceCell,
+		red, ansi.Reset)
+	fmt.Fprintf(sb, "%s%s%s\n", red, bot, ansi.Reset)
 }
 
 // visualWidth returns the *visible* column count of s with ANSI
@@ -1931,13 +2404,48 @@ func visualWidth(s string) int {
 			}
 			continue
 		}
-		w++
+		w += runeDisplayWidth(r)
 	}
 	return w
 }
 
+func runeDisplayWidth(r rune) int {
+	if r == 0 {
+		return 0
+	}
+	if r < 32 || (r >= 0x7f && r < 0xa0) {
+		return 0
+	}
+	if isWideRune(r) {
+		return 2
+	}
+	return 1
+}
+
+func isWideRune(r rune) bool {
+	return (r >= 0x1100 && r <= 0x115f) ||
+		(r >= 0x2329 && r <= 0x232a) ||
+		(r >= 0x2e80 && r <= 0xa4cf) ||
+		(r >= 0xac00 && r <= 0xd7a3) ||
+		(r >= 0xf900 && r <= 0xfaff) ||
+		(r >= 0xfe10 && r <= 0xfe19) ||
+		(r >= 0xfe30 && r <= 0xfe6f) ||
+		(r >= 0xff00 && r <= 0xff60) ||
+		(r >= 0xffe0 && r <= 0xffe6) ||
+		(r >= 0x1f300 && r <= 0x1f64f) ||
+		(r >= 0x1f900 && r <= 0x1f9ff) ||
+		(r >= 0x20000 && r <= 0x3fffd)
+}
+
 func max(a, b int) int {
 	if a > b {
+		return a
+	}
+	return b
+}
+
+func min(a, b int) int {
+	if a < b {
 		return a
 	}
 	return b
@@ -2098,8 +2606,11 @@ const (
 // content collide; above the maximum, lines get embarrassingly
 // sparse on ultra-wide monitors.
 const (
-	dashboardMinWidth = 60
-	dashboardMaxWidth = 200
+	dashboardMinWidth          = 60
+	dashboardMaxWidth          = 200
+	dashboardTwoColumnMinWidth = 96
+	dashboardColumnMinWidth    = 44
+	dashboardListRows          = 5
 )
 
 // updateDashboardWidth re-reads srvtty.Size() and updates the

@@ -1,7 +1,10 @@
 package ui
 
 import (
+	"srv/internal/config"
+	"srv/internal/daemon"
 	"srv/internal/jobs"
+	"srv/internal/mcplog"
 	"strings"
 	"testing"
 	"time"
@@ -125,6 +128,8 @@ func TestVisualWidth_StripsAnsi(t *testing.T) {
 		{"hello", 5},
 		{"\x1b[31mhello\x1b[0m", 5},
 		{"\x1b[1;33mYES\x1b[0m   no", 8}, // YES + 3 spaces + no = 8 visible cols
+		{"美国备用", 8},
+		{"\x1b[2m美国\x1b[0m svc", 8},
 	}
 	for _, c := range cases {
 		if got := visualWidth(c.in); got != c.want {
@@ -133,7 +138,303 @@ func TestVisualWidth_StripsAnsi(t *testing.T) {
 	}
 }
 
-func TestWriteSideBySidePadsMissingRightBorder(t *testing.T) {
+func TestFitPlainUsesDisplayWidth(t *testing.T) {
+	got := fitPlain("美国备用服务", 7)
+	if visualWidth(got) > 7 {
+		t.Fatalf("fitPlain width=%d, want <= 7: %q", visualWidth(got), got)
+	}
+	if !strings.HasSuffix(got, "...") {
+		t.Fatalf("fitPlain should add ellipsis, got %q", got)
+	}
+}
+
+func TestVisibleListRangeTracksCursor(t *testing.T) {
+	cases := []struct {
+		total, cursor, limit int
+		wantStart, wantEnd   int
+	}{
+		{3, 0, 5, 0, 3},
+		{10, 0, 5, 0, 5},
+		{10, 4, 5, 2, 7},
+		{10, 9, 5, 5, 10},
+		{10, -1, 5, 0, 5},
+		{10, 99, 5, 5, 10},
+	}
+	for _, c := range cases {
+		start, end := visibleListRange(c.total, c.cursor, c.limit)
+		if start != c.wantStart || end != c.wantEnd {
+			t.Errorf("visibleListRange(%d,%d,%d)=(%d,%d), want (%d,%d)",
+				c.total, c.cursor, c.limit, start, end, c.wantStart, c.wantEnd)
+		}
+	}
+}
+
+func TestPanelJobsShowsScrollableWindow(t *testing.T) {
+	js := make([]*jobs.Record, 9)
+	for i := range js {
+		js[i] = &jobs.Record{
+			ID:      "job-000" + string(rune('0'+i)),
+			Profile: "prod",
+			Pid:     1000 + i,
+			Started: "2026-05-13T10:00:00",
+			Cmd:     "cmd-" + string(rune('0'+i)),
+		}
+	}
+	st := &uiState{
+		rows:      buildSelectableRows(nil, js, nil),
+		focusPane: "job",
+		jobCursor: 7,
+	}
+	clampCursor(st)
+
+	withDashboardWidth(96, func() {
+		var sb strings.Builder
+		panelJobs(&sb, js, st)
+		out := sb.String()
+		assertDashboardLineWidths(t, out, 96)
+		if !strings.Contains(out, "SHOWING 5-9/9") {
+			t.Fatalf("jobs panel missing range hint: %q", out)
+		}
+		if strings.Contains(out, "COMMAND") || strings.Contains(out, "cmd-") {
+			t.Fatalf("jobs panel should not render command column: %q", out)
+		}
+		for _, want := range []string{"job-0004", "job-0005", "job-0006", "job-0007", "job-0008"} {
+			if !strings.Contains(out, want) {
+				t.Fatalf("jobs panel missing visible row %q: %q", want, out)
+			}
+		}
+		for _, hidden := range []string{"job-0000", "job-0001", "job-0002", "job-0003"} {
+			if strings.Contains(out, hidden) {
+				t.Fatalf("jobs panel included hidden row %q: %q", hidden, out)
+			}
+		}
+	})
+}
+
+func TestMoveFocusedRowWrapsWithinPane(t *testing.T) {
+	rows := buildSelectableRows([]string{"tun"}, []*jobs.Record{{ID: "job-a"}, {ID: "job-b"}}, []mcplog.ToolCall{{Name: "tool-a"}})
+	st := &uiState{rows: rows, focusPane: "job", jobCursor: 1}
+	clampCursor(st)
+
+	moveFocusedRow(st, 1)
+	if st.focusPane != "job" || st.jobCursor != 0 {
+		t.Fatalf("down should wrap inside jobs pane, got focus=%q jobCursor=%d", st.focusPane, st.jobCursor)
+	}
+	moveFocusedRow(st, -1)
+	if st.focusPane != "job" || st.jobCursor != 1 {
+		t.Fatalf("up should wrap inside jobs pane, got focus=%q jobCursor=%d", st.focusPane, st.jobCursor)
+	}
+}
+
+func TestTunnelActionsArmConfirmationsInUI(t *testing.T) {
+	cfg := &config.Config{
+		Tunnels: map[string]*config.TunnelDef{
+			"db": {Type: "local", Spec: "15432:localhost:5432"},
+		},
+	}
+	st := &uiState{
+		rows:         buildSelectableRows([]string{"db"}, nil, nil),
+		focusPane:    "tunnel",
+		tunnelCursor: 0,
+	}
+	clampCursor(st)
+	row := st.currentRow()
+
+	armConfirmFor(st, row, nil, []string{"db"}, cfg, ' ')
+	if st.confirm != nil {
+		if !strings.Contains(st.confirm.title, "tunnel ") || !strings.Contains(st.confirm.title, " db") {
+			t.Fatalf("space should arm tunnel up/down confirmation, got %q", st.confirm.title)
+		}
+	} else {
+		t.Fatalf("space should arm tunnel up/down confirmation")
+	}
+
+	st.confirm = nil
+	armConfirmFor(st, row, nil, []string{"db"}, cfg, 'x')
+	if st.confirm == nil {
+		t.Fatalf("x should arm tunnel remove confirmation")
+	}
+	if !strings.Contains(st.confirm.title, "remove tunnel db") {
+		t.Fatalf("x should arm tunnel remove confirmation, got %q", st.confirm.title)
+	}
+}
+
+func TestDemoActionsArmAndAcknowledgeWithoutRealSideEffects(t *testing.T) {
+	cfg, js, mcp := demoDashboardData(nil)
+	tunnelNames := sortedTunnelNames(cfg)
+	st := &uiState{
+		rows:             buildSelectableRows(tunnelNames, js, mcp.RecentTools),
+		focusPane:        "tunnel",
+		tunnelCursor:     0,
+		demoMode:         true,
+		snapTunnelActive: map[string]daemon.TunnelInfo{},
+	}
+	clampCursor(st)
+
+	armConfirmFor(st, st.currentRow(), js, tunnelNames, cfg, ' ')
+	if st.confirm == nil {
+		t.Fatalf("demo space should arm tunnel confirmation")
+	}
+	msg, err := st.confirm.action()
+	if err != nil {
+		t.Fatalf("demo tunnel action should not touch real daemon: %v", err)
+	}
+	if !strings.Contains(msg, "demo tunnel") {
+		t.Fatalf("demo tunnel action returned %q", msg)
+	}
+
+	st.confirm = nil
+	st.focusPane = "job"
+	st.jobCursor = 0
+	clampCursor(st)
+	armConfirmFor(st, st.currentRow(), js, tunnelNames, cfg, 'k')
+	if st.confirm == nil {
+		t.Fatalf("demo k should arm job confirmation")
+	}
+	msg, err = st.confirm.action()
+	if err != nil {
+		t.Fatalf("demo job action should not touch real remote process: %v", err)
+	}
+	if !strings.Contains(msg, "demo kill") {
+		t.Fatalf("demo job action returned %q", msg)
+	}
+}
+
+func TestConfirmPopupIsVisibleInClippedDashboard(t *testing.T) {
+	cfg, js, mcp := demoDashboardData(nil)
+	tunnelNames := sortedTunnelNames(cfg)
+	st := &uiState{
+		rows:      buildSelectableRows(tunnelNames, js, mcp.RecentTools),
+		focusPane: "job",
+		jobCursor: 0,
+		confirm: &uiConfirm{
+			title: "kill demo-job-0001",
+			body:  []string{"demo confirmation"},
+		},
+		snapMCP: mcp,
+	}
+	clampCursor(st)
+
+	withDashboardWidth(96, func() {
+		out := renderDashboardWithMCP(cfg, js, tunnelNames, st, mcp)
+		frame := altScreenFrame(out, 16)
+		if !strings.Contains(frame, "kill demo-job-0001") || !strings.Contains(frame, "[Y]") {
+			t.Fatalf("clipped frame should include confirmation popup: %q", frame)
+		}
+	})
+}
+
+func TestPanelMCPShowsScrollableWindow(t *testing.T) {
+	now := time.Now()
+	tools := make([]mcplog.ToolCall, 9)
+	for i := range tools {
+		tools[i] = mcplog.ToolCall{
+			When: now.Add(-time.Duration(i) * time.Minute),
+			Name: "tool-" + string(rune('0'+i)),
+			Dur:  "1.0s",
+			OK:   true,
+			PID:  4242,
+		}
+	}
+	st := &uiState{
+		rows:      buildSelectableRows(nil, nil, tools),
+		focusPane: "mcp",
+		mcpCursor: 7,
+	}
+	clampCursor(st)
+	mcp := mcplog.Status{
+		LogExists:   true,
+		ActivePIDs:  []int{4242},
+		LastActive:  now,
+		RecentTools: tools,
+	}
+
+	withDashboardWidth(96, func() {
+		var sb strings.Builder
+		panelMCP(&sb, mcp, st)
+		out := sb.String()
+		assertDashboardLineWidths(t, out, 96)
+		if !strings.Contains(out, "showing 5-9/9") {
+			t.Fatalf("mcp panel missing range hint: %q", out)
+		}
+		for _, want := range []string{"tool-4", "tool-5", "tool-6", "tool-7", "tool-8"} {
+			if !strings.Contains(out, want) {
+				t.Fatalf("mcp panel missing visible row %q: %q", want, out)
+			}
+		}
+		for _, hidden := range []string{"tool-0", "tool-1", "tool-2", "tool-3"} {
+			if strings.Contains(out, hidden) {
+				t.Fatalf("mcp panel included hidden row %q: %q", hidden, out)
+			}
+		}
+	})
+}
+
+func TestDemoDashboardDataIncludesJobsAndMCP(t *testing.T) {
+	cfg, js, mcp := demoDashboardData(nil)
+	if cfg == nil || len(cfg.Profiles) == 0 {
+		t.Fatal("demo config should include profiles")
+	}
+	if len(js) < dashboardListRows+1 {
+		t.Fatalf("demo jobs=%d, want more than visible list rows", len(js))
+	}
+	if len(mcp.RecentTools) < dashboardListRows+1 {
+		t.Fatalf("demo mcp tools=%d, want more than visible list rows", len(mcp.RecentTools))
+	}
+	if !mcp.LogExists || len(mcp.ActivePIDs) == 0 {
+		t.Fatalf("demo mcp should look active: %+v", mcp)
+	}
+}
+
+func TestRenderDashboardWidthsMixedLocale(t *testing.T) {
+	cfg := &config.Config{
+		DefaultProfile: "美国备用",
+		Profiles: map[string]*config.Profile{
+			"美国备用":  {Host: "backup.example"},
+			"美国服务":  {Host: "svc.example"},
+			"tokyo": {Host: "tokyo.example"},
+		},
+		Groups: map[string][]string{
+			"亚洲组": {"美国备用", "tokyo"},
+		},
+		Tunnels: map[string]*config.TunnelDef{
+			"数据库": {Type: "local", Spec: "15432:数据库.internal:5432", Profile: "美国备用"},
+		},
+	}
+	js := []*jobs.Record{
+		{ID: "202605130001", Profile: "美国备用", Pid: 1234, Started: "2026-05-13T10:00:00", Cmd: "echo hello && sleep 30"},
+	}
+	st := &uiState{
+		cursor:    0,
+		rows:      buildSelectableRows(sortedTunnelNames(cfg), js, nil),
+		focusPane: "job",
+	}
+	for _, width := range []int{60, 72, 96, 120} {
+		withDashboardWidth(width, func() {
+			out := renderDashboard(cfg, js, sortedTunnelNames(cfg), st)
+			assertDashboardLineWidths(t, out, width)
+			frame := altScreenFrame(out, 12)
+			if strings.HasSuffix(frame, "\n") {
+				t.Fatalf("altScreenFrame(%d) ended with newline", width)
+			}
+			if got := len(splitDashboardLines(frame)); got > 12 {
+				t.Fatalf("altScreenFrame(%d) lines=%d, want <= 12", width, got)
+			}
+		})
+	}
+}
+
+func assertDashboardLineWidths(t *testing.T, out string, width int) {
+	t.Helper()
+	for i, line := range splitDashboardLines(out) {
+		got := visualWidth(line)
+		if got > width {
+			t.Fatalf("line %d width=%d exceeds %d: %q", i, got, width, line)
+		}
+	}
+}
+
+func TestWriteSideBySidePadsMissingRightWithSpaces(t *testing.T) {
 	var sb strings.Builder
 	writeSideBySide(&sb, "left\nleft\n", "", 4, 8, 1)
 
@@ -145,8 +446,11 @@ func TestWriteSideBySidePadsMissingRightBorder(t *testing.T) {
 		if got := visualWidth(line); got != 13 {
 			t.Errorf("line %d width=%d, want 13: %q", i, got, line)
 		}
-		if got := strings.Count(line, "│"); got != 2 {
-			t.Errorf("line %d right border count=%d, want 2: %q", i, got, line)
+		// A column whose box already closed with `╰─╯` (or, in this test,
+		// a column that produced no content at all) should not be padded
+		// with floating `│ │` walls below it. Plain spaces only.
+		if got := strings.Count(line, "│"); got != 0 {
+			t.Errorf("line %d should pad missing right with plain spaces, got %d │: %q", i, got, line)
 		}
 	}
 }

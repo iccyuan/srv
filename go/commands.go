@@ -158,7 +158,7 @@ var subcommands = []subcommand{
 	{name: "project", noConfig: true, handler: func(c cmdCtx) error { return project.Cmd(c.args) }},
 	{name: "group", handler: func(c cmdCtx) error { return group.Cmd(c.args, c.cfg) }},
 	{name: "sudo", handler: func(c cmdCtx) error { return sudo.Cmd(c.args, c.cfg, c.profileOverride) }},
-	{name: "ui", handler: func(c cmdCtx) error { return ui.Cmd(c.cfg) }},
+	{name: "ui", handler: func(c cmdCtx) error { return ui.Cmd(c.args, c.cfg) }},
 	{name: "tail", handler: func(c cmdCtx) error { return streams.Tail(c.args, c.cfg, c.profileOverride) }},
 	{name: "watch", handler: func(c cmdCtx) error { return streams.Watch(c.args, c.cfg, c.profileOverride) }},
 	{name: "journal", handler: func(c cmdCtx) error { return streams.Journal(c.args, c.cfg, c.profileOverride) }},
