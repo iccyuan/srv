@@ -12,6 +12,7 @@ import (
 	"srv/internal/config"
 	"srv/internal/group"
 	"srv/internal/hints"
+	"srv/internal/jobcli"
 
 	"srv/internal/i18n"
 )
@@ -204,7 +205,7 @@ func run(args []string) int {
 		return translateExit(group.RunCmd(rest, ctx.cfg, opts.group))
 	}
 	if opts.detach {
-		return translateExit(cmdDetach(rest, ctx.cfg, opts.profile))
+		return translateExit(jobcli.CmdDetach(rest, ctx.cfg, opts.profile))
 	}
 	return translateExit(cmdRunWithHints(rest, ctx.cfg, opts))
 }

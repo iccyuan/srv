@@ -8,6 +8,7 @@ import (
 	"sort"
 	"srv/internal/check"
 	"srv/internal/config"
+	"srv/internal/editcmd"
 	"srv/internal/i18n"
 	"srv/internal/picker"
 	"srv/internal/remote"
@@ -229,7 +230,7 @@ func cmdConfig(args []string, cfg *config.Config) error {
 		if !ok {
 			return exitErr(1, "%s", i18n.T("err.profile_not_found", target))
 		}
-		edited, err := editJSONValue(p, "srv-profile-*.json")
+		edited, err := editcmd.EditJSON(p, "srv-profile-*.json")
 		if err != nil {
 			return exitErr(1, "error: %v", err)
 		}

@@ -8,10 +8,13 @@ import (
 	"srv/internal/daemon"
 	"srv/internal/diff"
 	"srv/internal/doctor"
+	"srv/internal/editcmd"
 	"srv/internal/group"
 	"srv/internal/guard"
 	"srv/internal/hints"
 	"srv/internal/install"
+	"srv/internal/jobcli"
+	"srv/internal/launcher"
 	"srv/internal/mcp"
 	"srv/internal/project"
 	"srv/internal/streams"
@@ -117,16 +120,16 @@ var subcommands = []subcommand{
 	{name: "push", handler: func(c cmdCtx) error { return cmdPush(c.args, c.cfg, c.profileOverride) }},
 	{name: "pull", handler: func(c cmdCtx) error { return cmdPull(c.args, c.cfg, c.profileOverride) }},
 	{name: "sync", handler: func(c cmdCtx) error { return syncx.Cmd(c.args, c.cfg, c.profileOverride) }},
-	{name: "edit", handler: func(c cmdCtx) error { return cmdEdit(c.args, c.cfg, c.profileOverride) }},
-	{name: "open", handler: func(c cmdCtx) error { return cmdOpen(c.args, c.cfg, c.profileOverride) }},
-	{name: "code", handler: func(c cmdCtx) error { return cmdCode(c.args, c.cfg, c.profileOverride) }},
+	{name: "edit", handler: func(c cmdCtx) error { return editcmd.Cmd(c.args, c.cfg, c.profileOverride) }},
+	{name: "open", handler: func(c cmdCtx) error { return launcher.Open(c.args, c.cfg, c.profileOverride) }},
+	{name: "code", handler: func(c cmdCtx) error { return launcher.Code(c.args, c.cfg, c.profileOverride) }},
 	{name: "diff", handler: func(c cmdCtx) error { return diff.Cmd(c.args, c.cfg, c.profileOverride) }},
 
 	// Tunnel / jobs / sessions.
 	{name: "tunnel", handler: func(c cmdCtx) error { return tunnel.Cmd(c.args, c.cfg, c.profileOverride) }},
-	{name: "jobs", handler: func(c cmdCtx) error { return cmdJobs(c.cfg, c.profileOverride) }},
-	{name: "logs", handler: func(c cmdCtx) error { return cmdLogs(c.args, c.cfg, c.profileOverride) }},
-	{name: "kill", handler: func(c cmdCtx) error { return cmdKill(c.args, c.cfg, c.profileOverride) }},
+	{name: "jobs", handler: func(c cmdCtx) error { return jobcli.CmdJobs(c.cfg, c.profileOverride) }},
+	{name: "logs", handler: func(c cmdCtx) error { return jobcli.CmdLogs(c.args, c.cfg, c.profileOverride) }},
+	{name: "kill", handler: func(c cmdCtx) error { return jobcli.CmdKill(c.args, c.cfg, c.profileOverride) }},
 	{name: "sessions", handler: func(c cmdCtx) error { return cmdSessions(c.args) }},
 
 	// Integrations / settings.
@@ -153,7 +156,7 @@ var subcommands = []subcommand{
 			return group.RunCmd(c.args, c.cfg, c.group)
 		}
 		if c.detach {
-			return cmdDetach(c.args, c.cfg, c.profileOverride)
+			return jobcli.CmdDetach(c.args, c.cfg, c.profileOverride)
 		}
 		return cmdRunWithHints(c.args, c.cfg, globalOpts{
 			profile: c.profileOverride,
