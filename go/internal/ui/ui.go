@@ -69,13 +69,8 @@ type uiState struct {
 	// so we never hide a job whose status we couldn't probe.
 	liveness      map[string]bool
 	livenessFresh time.Time
-	hiddenJobs    int // filtered-out exited-jobs count for the title hint
-	// selectedProfile is the dashboard's notion of "which profile am I
-	// looking at right now". Independent of sessions.json so a dashboard
-	// open in one shell isn't yanked around by another shell's `srv use`.
-	// Persists across runs via ui-state.json; press `p` to cycle.
-	selectedProfile string
-	statusSetAt     time.Time // wall-clock when statusMsg was last set
+	hiddenJobs    int       // filtered-out exited-jobs count for the title hint
+	statusSetAt   time.Time // wall-clock when statusMsg was last set
 	// Snapshot of disk-backed and daemon-backed state. Refreshed on
 	// tick or after a destructive action; every other iteration of
 	// the render loop reads from these fields instead of re-doing
@@ -95,7 +90,6 @@ type uiState struct {
 	snapDaemonResp   *daemon.Response
 	snapTunnelActive map[string]daemon.TunnelInfo
 	snapTunnelErrs   map[string]string
-	snapProject      *project.File
 	snapAt           time.Time
 }
 
@@ -181,8 +175,6 @@ func countUIRows(rows []uiRow) (tunnels, jobs, mcp int) {
 //	r             force a redraw
 //	↑ / ↓         move cursor within the focused window
 //	tab / h / l   switch between windows
-//	p / P         cycle the active profile forward / backward
-//	                (independent of the shell's `srv use` choice)
 //	k             kill the selected job (arms a Y/N confirm)
 func Cmd(cfg *config.Config) error {
 	if !srvtty.IsStdinTTY() {
@@ -216,10 +208,9 @@ func Cmd(cfg *config.Config) error {
 
 	kr := srvtty.NewKeyReader()
 	st := &uiState{
-		forceRedraw:     true,
-		cursor:          0,
-		liveness:        map[string]bool{},
-		selectedProfile: pickInitialUIProfile(cfg),
+		forceRedraw: true,
+		cursor:      0,
+		liveness:    map[string]bool{},
 	}
 	const refreshEvery = 2 * time.Second
 	// pollEvery is how often the loop wakes when no key is pressed.
@@ -275,26 +266,22 @@ func Cmd(cfg *config.Config) error {
 			}
 			st.snapDaemonResp = fetchDaemonStatusForUI()
 			st.snapTunnelActive, st.snapTunnelErrs = tunnel.LoadStatuses()
-			st.snapProject = project.Resolve()
 			st.snapAt = time.Now()
 		}
 		fresh := st.snapCfg
 		if fresh == nil {
 			fresh = cfg
 		}
-		// Keep selectedProfile valid against the freshest config: a
-		// profile rename / removal elsewhere shouldn't leave the
-		// dashboard pointing at a ghost.
-		if st.selectedProfile == "" || fresh.Profiles[st.selectedProfile] == nil {
-			st.selectedProfile = pickInitialUIProfile(fresh)
-		}
 		allJobs := st.snapJobs
 
-		// Liveness: refresh from the remote whenever it's gone stale
-		// (or whenever a forced redraw signals the user wants fresh
-		// data). One SSH per profile, batched, so the cost is
-		// bounded even with many jobs.
-		if time.Since(st.livenessFresh) > livenessTTL || st.forceRedraw {
+		// Liveness: refresh from the remote whenever it's gone stale.
+		// One SSH per profile, batched, so the cost is bounded even
+		// with many jobs. Manual `r` zeroes livenessFresh below so the
+		// probe re-runs; resize-triggered forceRedraw deliberately does
+		// NOT re-probe — otherwise a window resize would block the
+		// repaint on SSH round-trips and the dashboard would freeze on
+		// the old (clipped) frame for seconds.
+		if time.Since(st.livenessFresh) > livenessTTL {
 			// Wrap remoteExitMarkers as an ExitMarkerLister so the
 			// jobs package stays decoupled from Config / SSH client.
 			lister := func(profName string) (map[string]bool, bool) {
@@ -693,17 +680,8 @@ func handleUIKey(b byte, st *uiState, jobs []*jobs.Record, tunnelNames []string,
 		return false
 	case 'r':
 		st.forceRedraw = true
-		st.snapAt = time.Time{} // manual refresh -- bypass snapTTL
-	case 'p', 'P':
-		dir := 1
-		if b == 'P' {
-			dir = -1
-		}
-		if next := cycleProfile(cfg, st.selectedProfile, dir); next != "" && next != st.selectedProfile {
-			st.selectedProfile = next
-			_ = saveUIPersistedState(&uiPersistedState{LastProfile: next})
-			st.forceRedraw = true
-		}
+		st.snapAt = time.Time{}        // manual refresh -- bypass snapTTL
+		st.livenessFresh = time.Time{} // also re-probe SSH liveness
 	case '\t', 'l':
 		focusNextPane(st)
 	case 'h':
@@ -975,7 +953,7 @@ func redrawDashboard(content string, prevLines int) {
 func renderDashboard(cfg *config.Config, jobs []*jobs.Record, tunnelNames []string, st *uiState) string {
 	var sb strings.Builder
 	panelHeader(&sb, st)
-	panelActive(&sb, cfg, st)
+	panelProfiles(&sb, cfg, st)
 	panelDaemon(&sb, st)
 
 	// Reuse the snapshot the main loop already tailed -- one disk
@@ -1001,11 +979,12 @@ func renderDashboard(cfg *config.Config, jobs []*jobs.Record, tunnelNames []stri
 			panelJobs(&leftBuf, jobs, st)
 			panelMCP(&leftBuf, mcpSnapshot, st)
 		})
+		leftLines := splitDashboardLines(leftBuf.String())
 		var rightBuf strings.Builder
 		withDashboardWidth(rightW, func() {
-			panelDetail(&rightBuf, cfg, jobs, tunnelNames, mcpSnapshot, st)
+			renderStretchedDetail(&rightBuf, cfg, jobs, tunnelNames, mcpSnapshot, st, len(leftLines))
 		})
-		writeSideBySide(&sb, leftBuf.String(), rightBuf.String(), leftW, gap)
+		writeSideBySide(&sb, leftBuf.String(), rightBuf.String(), leftW, rightW, gap)
 	}
 
 	panelGroups(&sb, cfg)
@@ -1056,7 +1035,7 @@ func withDashboardWidth(w int, fn func()) {
 // padding the shorter side with blanks so the result stays
 // grid-aligned. visualWidth handles ANSI sequences so a coloured row
 // of N visible chars still occupies N cells.
-func writeSideBySide(sb *strings.Builder, left, right string, leftWidth, gap int) {
+func writeSideBySide(sb *strings.Builder, left, right string, leftWidth, rightWidth, gap int) {
 	lLines := splitDashboardLines(left)
 	rLines := splitDashboardLines(right)
 	n := len(lLines)
@@ -1065,6 +1044,7 @@ func writeSideBySide(sb *strings.Builder, left, right string, leftWidth, gap int
 	}
 	gapStr := strings.Repeat(" ", gap)
 	blankLeft := strings.Repeat(" ", leftWidth)
+	blankRight := blankBoxLine(rightWidth)
 	for i := 0; i < n; i++ {
 		var l, r string
 		if i < len(lLines) {
@@ -1078,9 +1058,63 @@ func writeSideBySide(sb *strings.Builder, left, right string, leftWidth, gap int
 		}
 		if i < len(rLines) {
 			r = rLines[i]
+			pad := rightWidth - visualWidth(r)
+			if pad > 0 {
+				r += strings.Repeat(" ", pad)
+			}
+		} else {
+			r = blankRight
 		}
 		fmt.Fprintf(sb, "%s%s%s\n", l, gapStr, r)
 	}
+}
+
+func blankBoxLine(width int) string {
+	if width < 4 {
+		return strings.Repeat(" ", max(0, width))
+	}
+	border := boxColor(false)
+	return fmt.Sprintf("%s│%s %s %s│%s",
+		border, ansi.Reset, strings.Repeat(" ", width-4), border, ansi.Reset)
+}
+
+// renderStretchedDetail draws panelDetail and pads its inner area
+// with blank bordered lines so the box's ╰─╯ bottom lands on the same
+// row as the left column's last line. Without this, the left's
+// tunnels/jobs/mcp stack visibly extends past the right column's
+// shorter detail box and the screen looks like the right side is
+// missing borders for those bottom rows.
+//
+// Caller must invoke this inside withDashboardWidth(rightW, …) so the
+// padding boxLine emits at the right column's width.
+func renderStretchedDetail(sb *strings.Builder, cfg *config.Config, jobs []*jobs.Record, tunnelNames []string, mcp mcplog.Status, st *uiState, targetHeight int) {
+	var buf strings.Builder
+	panelDetail(&buf, cfg, jobs, tunnelNames, mcp, st)
+	lines := splitDashboardLines(buf.String())
+	if len(lines) >= targetHeight {
+		sb.WriteString(buf.String())
+		return
+	}
+	bottomIdx := -1
+	for i := len(lines) - 1; i >= 0; i-- {
+		if strings.Contains(lines[i], "╰") {
+			bottomIdx = i
+			break
+		}
+	}
+	if bottomIdx < 0 {
+		sb.WriteString(buf.String())
+		return
+	}
+	for i := 0; i < bottomIdx; i++ {
+		sb.WriteString(lines[i])
+		sb.WriteByte('\n')
+	}
+	for i := 0; i < targetHeight-len(lines); i++ {
+		boxLine(sb, "")
+	}
+	sb.WriteString(lines[bottomIdx])
+	sb.WriteString("\n\n")
 }
 
 // splitDashboardLines splits panel output and drops the trailing
@@ -1114,6 +1148,37 @@ func boxColor(focused bool) string {
 func boxTop(sb *strings.Builder, title string)    { boxTopFocused(sb, title, false) }
 func boxBottom(sb *strings.Builder)               { boxBottomFocused(sb, false) }
 func boxLine(sb *strings.Builder, content string) { boxLineFocused(sb, content, false) }
+
+// boxTopWithDimSuffix renders a panel header where a dim suffix is
+// appended directly after the bright title (e.g. "PROFILES 2  ● 1
+// active · ○ 1 idle" with the second half dim). Going through boxTop
+// would not work: boxTop applies strings.ToUpper to its whole title,
+// which would mangle the ANSI escape bytes that carry the dim
+// formatting. So the uppercasing and styling happen here instead.
+func boxTopWithDimSuffix(sb *strings.Builder, title, suffix string) {
+	border := boxColor(false)
+	label := " " + ansi.Reset + ansi.Bold + ansi.Cyan + strings.ToUpper(title) + ansi.Reset
+	if suffix != "" {
+		label += "  " + ansi.Dim + strings.ToUpper(suffix) + ansi.Reset
+	}
+	label += border + " "
+	labelVis := visualWidth(label)
+	remain := dashboardWidth - 2 - labelVis
+	if remain < 0 {
+		remain = 0
+	}
+	left := 2
+	if remain < left {
+		left = remain
+	}
+	right := remain - left
+	fmt.Fprintf(sb, "%s╭%s%s%s%s╮%s\n",
+		border,
+		strings.Repeat("─", left),
+		label,
+		strings.Repeat("─", right),
+		border, ansi.Reset)
+}
 
 // boxTopWithHint draws the same panel header as boxTop but also
 // embeds a dim right-aligned hint in the top border (typically
@@ -1195,6 +1260,14 @@ func boxBottomFocused(sb *strings.Builder, focused bool) {
 
 func boxLineFocused(sb *strings.Builder, content string, focused bool) {
 	border := boxColor(focused)
+	// Truncate overflowing content so the closing │ lands exactly at
+	// dashboardWidth. Without this, a long header in the narrow
+	// split-column layout would push past the box's right edge,
+	// terminal would wrap the line, and the right column on the next
+	// row would visually lose its border.
+	if visualWidth(content) > dashboardContentWidth {
+		content = ellipsisAnsiRight(content, dashboardContentWidth)
+	}
 	fmt.Fprintf(sb, "%s│%s %s %s│%s\n",
 		border, ansi.Reset, padAnsiRight(content, dashboardContentWidth), border, ansi.Reset)
 }
@@ -1240,8 +1313,7 @@ func panelHeader(sb *strings.Builder, st *uiState) {
 		fmt.Fprintln(sb)
 		return
 	}
-	boxLine(sb, fmt.Sprintf("keys: %sq%s quit  %sr%s redraw  %stab/h/l%s window  %s↑/↓%s row  %sp%s profile  %sk%s kill",
-		ansi.Yellow+ansi.Bold, ansi.Reset,
+	boxLine(sb, fmt.Sprintf("keys: %sq%s quit  %sr%s redraw  %stab/h/l%s window  %s↑/↓%s row  %sk%s kill",
 		ansi.Yellow+ansi.Bold, ansi.Reset,
 		ansi.Yellow+ansi.Bold, ansi.Reset,
 		ansi.Yellow+ansi.Bold, ansi.Reset,
@@ -1251,90 +1323,110 @@ func panelHeader(sb *strings.Builder, st *uiState) {
 	fmt.Fprintln(sb)
 }
 
-// panelActive renders the "what am I looking at" header as a single
-// inline row: profile · target · cwd · pinned. Compact form so a
-// long hostname or project path doesn't push us onto a second line
-// that the terminal then visually wraps; each section truncates
-// inline when the running total approaches dashboardContentWidth.
-// The "p switch" key hint lives in the box title so the content row
-// stays free for the actual data.
-func panelActive(sb *strings.Builder, cfg *config.Config, st *uiState) {
-	boxTopWithHint(sb, "active", "p switch", false)
-	name, prof := lookupSelectedProfile(cfg, st)
-	if prof == nil {
-		boxLine(sb, ansi.Dim+"no profile selected"+ansi.Reset)
+// panelProfiles lists every configured profile and marks each one as
+// active (●, daemon currently has a pooled SSH connection) or idle
+// (○, no live connection). Multi-column grid so even a wallet of 30+
+// profiles stays within ~6 rows; overflow collapses to a "... N more"
+// footer so the dashboard's height stays bounded.
+func panelProfiles(sb *strings.Builder, cfg *config.Config, st *uiState) {
+	names := profileNamesSorted(cfg)
+	if len(names) == 0 {
+		boxTop(sb, "profiles")
+		boxLine(sb, ansi.Dim+"no profiles configured"+ansi.Reset)
 		boxBottom(sb)
 		fmt.Fprintln(sb)
 		return
 	}
-	target := prof.Host
-	if prof.User != "" {
-		target = prof.User + "@" + prof.Host
+
+	active := map[string]bool{}
+	if st != nil && st.snapDaemonResp != nil {
+		for _, p := range st.snapDaemonResp.Profiles {
+			active[p] = true
+		}
 	}
-	if prof.GetPort() != 22 {
-		target += ":" + strconv.Itoa(prof.GetPort())
+	activeCount := 0
+	for _, n := range names {
+		if active[n] {
+			activeCount++
+		}
 	}
-	var pf *project.File
-	if st != nil {
-		pf = st.snapProject
-	} else {
-		pf = project.Resolve()
+
+	title := fmt.Sprintf("profiles %d", len(names))
+	suffix := fmt.Sprintf("● %d active · ○ %d idle", activeCount, len(names)-activeCount)
+	boxTopWithDimSuffix(sb, title, suffix)
+
+	maxName := 0
+	for _, n := range names {
+		if w := visualWidth(n); w > maxName {
+			maxName = w
+		}
 	}
-	cwd := uiCwd(prof, pf)
-	parts := []string{
-		ansi.Yellow + ansi.Bold + name + ansi.Reset,
-		ansi.Cyan + target + ansi.Reset,
+	const marker = 2 // "● " / "○ "
+	const gap = 2
+	cellW := marker + maxName + gap
+	if cellW < 14 {
+		cellW = 14
 	}
-	if cwd != "" {
-		parts = append(parts, dashPath(cwd))
+	cols := dashboardContentWidth / cellW
+	if cols < 1 {
+		cols = 1
 	}
-	if pf != nil {
-		parts = append(parts, ansi.Dim+"pinned "+ansi.Reset+dashPath(pf.Path))
+
+	// Cap visible rows so a wallet of 50 profiles can't push the rest
+	// of the dashboard off-screen. 4 rows × cols cells is usually
+	// plenty; anything past that collapses to a "... N more" line.
+	const maxRows = 4
+	totalRows := (len(names) + cols - 1) / cols
+	rows := totalRows
+	if rows > maxRows {
+		rows = maxRows
 	}
-	boxLine(sb, fitInlineParts(parts, "", dashboardContentWidth))
+	visible := rows * cols
+	if visible > len(names) {
+		visible = len(names)
+	}
+
+	for r := 0; r < rows; r++ {
+		var line strings.Builder
+		for c := 0; c < cols; c++ {
+			idx := r*cols + c
+			if idx >= visible {
+				break
+			}
+			n := names[idx]
+			var dot, label string
+			if active[n] {
+				dot = ansi.Green + ansi.Bold + "● " + ansi.Reset
+				label = ansi.Yellow + ansi.Bold + n + ansi.Reset
+			} else {
+				dot = ansi.Dim + "○ " + ansi.Reset
+				label = ansi.Dim + n + ansi.Reset
+			}
+			cell := dot + padAnsiRight(label, cellW-marker)
+			line.WriteString(cell)
+		}
+		boxLine(sb, strings.TrimRight(line.String(), " "))
+	}
+	if visible < len(names) {
+		boxLine(sb, ansi.Dim+fmt.Sprintf("... %d more (use `srv ls` to view all)", len(names)-visible)+ansi.Reset)
+	}
 	boxBottom(sb)
 	fmt.Fprintln(sb)
 }
 
-// uiCwd is the dashboard's cwd resolver. Deliberately does NOT
-// consult sessions.json -- the UI is decoupled from the shell that
-// launched it (per "ui 不和 shell 绑定"). session.Touch's read+write
-// also dominated the per-render cost, so skipping it makes profile
-// switches feel instant. Order of precedence: $SRV_CWD env > pinned
-// project file > profile.default_cwd.
-func uiCwd(prof *config.Profile, pf *project.File) string {
-	if env := os.Getenv("SRV_CWD"); env != "" {
-		return env
-	}
-	if pf != nil && pf.Cwd != "" {
-		return pf.Cwd
-	}
-	if prof != nil {
-		return prof.GetDefaultCwd()
-	}
-	return ""
-}
-
-// lookupSelectedProfile reads the dashboard's chosen profile from
-// st.selectedProfile (preferred) and falls back to the first
-// available cfg profile -- the dashboard is no longer pegged to
-// sessions.json so we never call config.Resolve here.
-func lookupSelectedProfile(cfg *config.Config, st *uiState) (string, *config.Profile) {
+// profileNamesSorted returns the cfg.Profiles keys alphabetically.
+// Kept local to ui.go so the dashboard has a stable enumeration
+// independent of any caller's iteration order.
+func profileNamesSorted(cfg *config.Config) []string {
 	if cfg == nil {
-		return "", nil
+		return nil
 	}
-	if st != nil && st.selectedProfile != "" {
-		if p, ok := cfg.Profiles[st.selectedProfile]; ok {
-			p.Name = st.selectedProfile
-			return st.selectedProfile, p
-		}
+	out := make([]string, 0, len(cfg.Profiles))
+	for n := range cfg.Profiles {
+		out = append(out, n)
 	}
-	for _, n := range sortedProfileNames(cfg) {
-		p := cfg.Profiles[n]
-		p.Name = n
-		return n, p
-	}
-	return "", nil
+	sort.Strings(out)
+	return out
 }
 
 // fitInlineParts joins `parts` with a dim middot separator, appends
@@ -1987,7 +2079,7 @@ func wrapText(s string, width int) []string {
 // actual column count once Cmd starts (set by updateDashboardWidth
 // each redraw). The hard-coded defaults take over only in non-TTY
 // snapshot mode where no terminal size is reported.
-var dashboardWidth = 88
+var dashboardWidth = 87
 var dashboardContentWidth = dashboardWidth - 4
 var dashboardHeight = 24
 
@@ -2020,6 +2112,14 @@ func updateDashboardWidth() bool {
 	w, h := srvtty.Size()
 	if w <= 0 {
 		return false
+	}
+	// Keep the frame one cell away from the terminal's hard right edge.
+	// Several terminals auto-wrap immediately after a glyph is written in
+	// the last column; our per-line erase then lands on the next row and
+	// makes the right border look missing. A one-cell gutter keeps the
+	// closing vertical rule visible.
+	if w > dashboardMinWidth {
+		w--
 	}
 	if w < dashboardMinWidth {
 		w = dashboardMinWidth

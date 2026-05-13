@@ -2,6 +2,7 @@ package ui
 
 import (
 	"srv/internal/jobs"
+	"strings"
 	"testing"
 	"time"
 )
@@ -128,6 +129,24 @@ func TestVisualWidth_StripsAnsi(t *testing.T) {
 	for _, c := range cases {
 		if got := visualWidth(c.in); got != c.want {
 			t.Errorf("visualWidth(%q) = %d, want %d", c.in, got, c.want)
+		}
+	}
+}
+
+func TestWriteSideBySidePadsMissingRightBorder(t *testing.T) {
+	var sb strings.Builder
+	writeSideBySide(&sb, "left\nleft\n", "", 4, 8, 1)
+
+	lines := splitDashboardLines(sb.String())
+	if len(lines) != 2 {
+		t.Fatalf("line count=%d, want 2: %q", len(lines), sb.String())
+	}
+	for i, line := range lines {
+		if got := visualWidth(line); got != 13 {
+			t.Errorf("line %d width=%d, want 13: %q", i, got, line)
+		}
+		if got := strings.Count(line, "│"); got != 2 {
+			t.Errorf("line %d right border count=%d, want 2: %q", i, got, line)
 		}
 	}
 }
