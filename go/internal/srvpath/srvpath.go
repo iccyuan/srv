@@ -38,10 +38,6 @@ func Jobs() string { return filepath.Join(Dir(), "jobs.json") }
 // MCPLog returns the path to mcp.log (the MCP server's lifecycle log).
 func MCPLog() string { return filepath.Join(Dir(), "mcp.log") }
 
-// UIState returns the path to ui-state.json (the dashboard's
-// persistence file: selected profile, etc.).
-func UIState() string { return filepath.Join(Dir(), "ui-state.json") }
-
 // ColorPresetsDir returns ~/.srv/init/, the directory the user drops
 // custom shell snippets into. Each *.sh file is one preset; the
 // filename without extension is what `srv color use <name>` accepts.
