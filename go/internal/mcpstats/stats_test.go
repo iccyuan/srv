@@ -1,9 +1,147 @@
 package mcpstats
 
 import (
+	"os"
+	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
+
+// withTempPath redirects pathFn to a path under t.TempDir for the
+// duration of the test. Restores the original on cleanup so other
+// tests aren't affected.
+func withTempPath(t *testing.T) (statsPath string) {
+	t.Helper()
+	dir := t.TempDir()
+	statsPath = filepath.Join(dir, "stats.jsonl")
+	prev := pathFn
+	pathFn = func() string { return statsPath }
+	t.Cleanup(func() { pathFn = prev })
+	return statsPath
+}
+
+func TestAppendCallLoadCallsRoundTrip(t *testing.T) {
+	withTempPath(t)
+	t0 := time.Now().Add(-2 * time.Hour).Truncate(time.Second)
+	want := []Call{
+		{TS: t0, Tool: "run", DurMs: 100, InBytes: 30, OutBytes: 500, OK: true},
+		{TS: t0.Add(time.Minute), Tool: "tail", DurMs: 5000, InBytes: 40, OutBytes: 2000, ProgressBytes: 10000, OK: true},
+		{TS: t0.Add(2 * time.Minute), Tool: "run", DurMs: 200, InBytes: 35, OutBytes: 800, OK: false},
+	}
+	for _, c := range want {
+		if err := AppendCall(c); err != nil {
+			t.Fatalf("AppendCall: %v", err)
+		}
+	}
+	got, err := LoadCalls(time.Time{})
+	if err != nil {
+		t.Fatalf("LoadCalls: %v", err)
+	}
+	if len(got) != len(want) {
+		t.Fatalf("got %d records, want %d", len(got), len(want))
+	}
+	for i := range want {
+		if got[i].Tool != want[i].Tool || got[i].OutBytes != want[i].OutBytes || got[i].OK != want[i].OK {
+			t.Errorf("record %d mismatch: got %+v, want %+v", i, got[i], want[i])
+		}
+		if !got[i].TS.Equal(want[i].TS) {
+			t.Errorf("record %d TS mismatch: got %v, want %v", i, got[i].TS, want[i].TS)
+		}
+	}
+}
+
+func TestLoadCallsFiltersBySince(t *testing.T) {
+	withTempPath(t)
+	now := time.Now()
+	old := Call{TS: now.Add(-2 * time.Hour), Tool: "x", OutBytes: 1, OK: true}
+	new := Call{TS: now.Add(-10 * time.Minute), Tool: "x", OutBytes: 2, OK: true}
+	if err := AppendCall(old); err != nil {
+		t.Fatal(err)
+	}
+	if err := AppendCall(new); err != nil {
+		t.Fatal(err)
+	}
+	got, err := LoadCalls(now.Add(-time.Hour))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 1 || got[0].OutBytes != 2 {
+		t.Errorf("since-filter wrong: got %+v", got)
+	}
+}
+
+func TestClearWipesAllFiles(t *testing.T) {
+	statsPath := withTempPath(t)
+	if err := AppendCall(Call{Tool: "x", OK: true}); err != nil {
+		t.Fatal(err)
+	}
+	if err := SaveCheckpoint(time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	// Manually create a rotation sibling so Clear has all three to chew on.
+	if err := os.WriteFile(statsPath+".1", []byte("{}\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := Clear(); err != nil {
+		t.Fatalf("Clear: %v", err)
+	}
+	for _, p := range []string{statsPath, statsPath + ".1", checkpointPath()} {
+		if _, err := os.Stat(p); !os.IsNotExist(err) {
+			t.Errorf("%s should be gone after Clear, got err=%v", p, err)
+		}
+	}
+}
+
+func TestRotationOnLargeFile(t *testing.T) {
+	statsPath := withTempPath(t)
+	// Pre-seed the stats file past the rotation threshold so the
+	// next AppendCall trips rotation. Padding lines are valid JSONL
+	// (won't break LoadCalls if we ever inspect them).
+	padding := strings.Repeat(`{"ts":"2026-01-01T00:00:00Z","tool":"pad","ok":true}`+"\n", 1)
+	chunks := int(maxFileBytes / int64(len(padding)))
+	f, err := os.Create(statsPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < chunks+10; i++ {
+		f.WriteString(padding)
+	}
+	f.Close()
+
+	// Append should trigger rotation: file becomes .1, new file
+	// starts with just the new record.
+	if err := AppendCall(Call{Tool: "fresh", OK: true}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(statsPath + ".1"); err != nil {
+		t.Errorf("expected rotated file at %s.1, got err=%v", statsPath, err)
+	}
+	got, err := LoadCalls(time.Time{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// LoadCalls reads only the live file, so we should see just our
+	// one fresh record.
+	if len(got) != 1 || got[0].Tool != "fresh" {
+		t.Errorf("after rotation, live file should hold only fresh record; got %+v", got)
+	}
+}
+
+func TestCheckpointRoundTrip(t *testing.T) {
+	withTempPath(t)
+	if cp := LoadCheckpoint(); !cp.IsZero() {
+		t.Errorf("no checkpoint yet, got %v", cp)
+	}
+	want := time.Now().Truncate(time.Microsecond)
+	if err := SaveCheckpoint(want); err != nil {
+		t.Fatal(err)
+	}
+	got := LoadCheckpoint()
+	if !got.Equal(want) {
+		t.Errorf("checkpoint mismatch: got %v, want %v", got, want)
+	}
+}
 
 func TestAggregateByTool(t *testing.T) {
 	now := time.Now()

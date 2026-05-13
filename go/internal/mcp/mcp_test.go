@@ -91,6 +91,34 @@ func TestRiskyMatch_RealCommandWithQuotedNoise(t *testing.T) {
 	}
 }
 
+// Command substitution inside double quotes still executes -- the
+// guard must trip on the inner risky pattern even though the outer
+// argument is double-quoted. Was a false-negative until codePositions
+// learned to track $(...) and backticks.
+func TestRiskyMatch_CmdSubstitutionInQuotes(t *testing.T) {
+	cases := []struct {
+		cmd  string
+		want string
+	}{
+		// $(...) inside double quotes: shell evaluates, so trip.
+		{`echo "$(rm -rf /tmp/foo)"`, "rm -rf"},
+		{`x="$(mkfs.ext4 /dev/sdb)"; echo done`, "mkfs"},
+		// Backticks inside double quotes: same story.
+		{"echo \"`rm -rf /tmp/foo`\"", "rm -rf"},
+		// Backticks at command position.
+		{"x=`shutdown -h now`", "shutdown"},
+		// Single quotes ARE literal, even with $(...) inside.
+		{`echo '$(rm -rf foo)'`, ""},
+		// Nested $() depth -- innermost trips the gate.
+		{`echo $(echo $(reboot))`, "reboot"},
+	}
+	for _, c := range cases {
+		if got := riskyMatch(c.cmd); got != c.want {
+			t.Errorf("riskyMatch(%q) = %q, want %q", c.cmd, got, c.want)
+		}
+	}
+}
+
 func TestIsInsideQuotes(t *testing.T) {
 	cases := []struct {
 		s    string

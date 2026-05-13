@@ -116,8 +116,19 @@ func ID() string {
 // Touch ensures the current session record exists, bumps last_seen,
 // and persists. Caller can mutate the returned *Record and call
 // SaveWith.
+//
+// Locks sessions.json for the duration of the read-modify-write so
+// two shells doing `srv use` / `srv cd` at the same moment don't
+// lose one update. Lock acquisition has a 1 s budget; on timeout
+// we fall back to the un-locked path (last-writer-wins) rather
+// than refusing the operation -- the user's cwd update is more
+// important than perfect concurrency.
 func Touch() (string, *Record) {
 	sid := ID()
+	release, _ := srvio.FileLock(srvpath.Sessions())
+	if release != nil {
+		defer release()
+	}
 	s := loadFile()
 	rec, ok := s.Sessions[sid]
 	now := time.Now().Format("2006-01-02T15:04:05")
@@ -139,9 +150,13 @@ func Touch() (string, *Record) {
 }
 
 // SaveWith reloads from disk, replaces the rec for sid, and writes.
-// This avoids losing concurrent updates from other srv invocations
-// between Touch() and the save.
+// Same locking story as Touch -- the read-modify-write needs a
+// mutex to avoid losing concurrent updates from sibling shells.
 func SaveWith(sid string, rec *Record) error {
+	release, _ := srvio.FileLock(srvpath.Sessions())
+	if release != nil {
+		defer release()
+	}
 	s := loadFile()
 	s.Sessions[sid] = rec
 	return writeFile(s)

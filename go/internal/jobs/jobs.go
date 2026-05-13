@@ -14,6 +14,7 @@ import (
 	"fmt"
 	"os"
 	"strings"
+	"sync"
 
 	"srv/internal/srvio"
 	"srv/internal/srvpath"
@@ -99,10 +100,17 @@ func Find(j *File, idOrPrefix string) *Record {
 // profile" -- callers should treat its jobs as alive (= don't hide).
 type ExitMarkerLister func(profileName string) (markers map[string]bool, ok bool)
 
-// CheckLiveness returns a map jobID -> alive built from one probe per
-// profile (the caller batches the SSH ls). Jobs in profiles the probe
-// couldn't reach are omitted from the result; callers should treat
-// "not in map" as alive.
+// CheckLiveness returns a map jobID -> alive built from one probe
+// per profile. Probes run concurrently across profiles -- a single
+// slow / unreachable host no longer blocks the rest of the table.
+//
+// The lister must therefore be safe to call from multiple
+// goroutines simultaneously (it typically just opens an SSH conn
+// to the named profile, so this is automatic).
+//
+// Jobs in profiles the probe couldn't reach are omitted from the
+// result; callers should treat "not in map" as alive (= don't hide
+// the row in `srv ui`).
 func CheckLiveness(rs []*Record, list ExitMarkerLister) map[string]bool {
 	out := map[string]bool{}
 	if len(rs) == 0 {
@@ -112,13 +120,32 @@ func CheckLiveness(rs []*Record, list ExitMarkerLister) map[string]bool {
 	for _, j := range rs {
 		byProfile[j.Profile] = append(byProfile[j.Profile], j)
 	}
+
+	type probeResult struct {
+		prof    string
+		markers map[string]bool
+		ok      bool
+	}
+	results := make(chan probeResult, len(byProfile))
+	var wg sync.WaitGroup
 	for prof, profJobs := range byProfile {
-		markers, ok := list(prof)
-		if !ok {
+		_ = profJobs // captured per-iteration below
+		wg.Add(1)
+		go func(p string) {
+			defer wg.Done()
+			markers, ok := list(p)
+			results <- probeResult{prof: p, markers: markers, ok: ok}
+		}(prof)
+	}
+	wg.Wait()
+	close(results)
+
+	for r := range results {
+		if !r.ok {
 			continue
 		}
-		for _, j := range profJobs {
-			out[j.ID] = !markers[j.ID]
+		for _, j := range byProfile[r.prof] {
+			out[j.ID] = !r.markers[j.ID]
 		}
 	}
 	return out

@@ -49,17 +49,23 @@ var riskyPatterns = []riskyPattern{
 }
 
 // riskyMatch reports the name of the first risky pattern present in
-// `command`, or "" if none. Matches inside single- or double-quoted
-// strings (e.g. `echo "rm -rf foo"`) are skipped -- they're operands,
-// not commands. Quote tracking is best-effort: it handles common
-// shell quoting but doesn't try to mirror full POSIX rules.
+// `command`, or "" if none. A match counts only when its first byte
+// is in "code position" -- i.e. the shell would execute that byte
+// as a command word, not consume it as a literal string fragment.
+// See codePositions for the exact classification.
+//
+// The fancy classification is mostly to catch the false-negative
+// shape `echo "$(rm -rf foo)"`: a naive "is this inside quotes?"
+// check would say yes and let it through, but real shells execute
+// $(...) contents regardless of surrounding double quotes.
 func riskyMatch(command string) string {
 	if command == "" {
 		return ""
 	}
+	code := codePositions(command)
 	for _, p := range riskyPatterns {
 		for _, loc := range p.re.FindAllStringIndex(command, -1) {
-			if !isInsideQuotes(command, loc[0]) {
+			if loc[0] < len(code) && code[loc[0]] {
 				return p.name
 			}
 		}
@@ -67,31 +73,96 @@ func riskyMatch(command string) string {
 	return ""
 }
 
-// isInsideQuotes reports whether byte offset `pos` in `s` falls
-// inside a `"..."` or `'...'` quoted region. Tracks backslash escapes
-// inside double quotes (POSIX rule); single quotes are literal.
-// Heredocs and $'...' are not modeled -- treating their contents as
-// "real command" favors safety (catch the risky token) over
-// precision.
-func isInsideQuotes(s string, pos int) bool {
-	inDouble, inSingle, escape := false, false, false
-	for i := 0; i < pos && i < len(s); i++ {
+// codePositions returns a per-byte classifier: out[i] is true when
+// shell would execute byte i as command-position content, false
+// when it's literal-string content.
+//
+// Classification rules (best-effort POSIX subset):
+//
+//	'...'        single-quoted, every byte literal
+//	"..."        double-quoted, bytes literal EXCEPT $(...) / `...`
+//	             nested inside (those expand)
+//	$(...)       command substitution; contents are code, regardless
+//	             of any surrounding quote
+//	`...`        backtick command substitution; same as $()
+//	\<char>      inside double quotes, escapes treat next byte as
+//	             literal (skipped past in classifier state)
+//
+// Heredocs, $'...' (ANSI-C quoting), and $((...)) arithmetic
+// expansion are not modeled. We err on the side of "code position"
+// for unrecognized shapes so risky patterns inside exotic syntax
+// trip the guard rather than slipping through.
+func codePositions(s string) []bool {
+	out := make([]bool, len(s))
+	inSingle, inDouble, escape := false, false, false
+	// cmdSubDepth counts unclosed $(...) and `...` regions. >0 forces
+	// "code position" regardless of surrounding quotes.
+	cmdSubDepth := 0
+	for i := 0; i < len(s); i++ {
+		// Decide what THIS byte is, then advance state for next iter.
+		inLiteral := false
+		if cmdSubDepth == 0 {
+			inLiteral = inSingle || inDouble
+		}
+		out[i] = !inLiteral
+
 		c := s[i]
 		if escape {
 			escape = false
 			continue
 		}
-		if c == '\\' && inDouble {
+		if c == '\\' && inDouble && cmdSubDepth == 0 {
 			escape = true
 			continue
 		}
-		if c == '"' && !inSingle {
-			inDouble = !inDouble
-		} else if c == '\'' && !inDouble {
-			inSingle = !inSingle
+
+		// $( opens a command-substitution scope. Allowed inside
+		// double quotes (real shells expand it there) but not
+		// inside single quotes (those are literal).
+		if c == '$' && i+1 < len(s) && s[i+1] == '(' && !inSingle {
+			cmdSubDepth++
+			i++ // step past '(' so the next loop iteration sees what
+			// followed it.
+			continue
+		}
+		if cmdSubDepth > 0 && c == ')' {
+			cmdSubDepth--
+			continue
+		}
+
+		// Backtick toggles: open or close a command-substitution
+		// scope. Single quotes still suppress (literal everywhere).
+		if c == '`' && !inSingle {
+			if cmdSubDepth > 0 {
+				cmdSubDepth--
+			} else {
+				cmdSubDepth++
+			}
+			continue
+		}
+
+		// Quote toggles only meaningful at the top level (cmd-sub
+		// scopes have their own quote bookkeeping in real shells;
+		// we lump them as "code" and accept the imprecision).
+		if cmdSubDepth == 0 {
+			if c == '"' && !inSingle {
+				inDouble = !inDouble
+			} else if c == '\'' && !inDouble {
+				inSingle = !inSingle
+			}
 		}
 	}
-	return inDouble || inSingle
+	return out
+}
+
+// isInsideQuotes is the legacy classifier kept only for the unit
+// test that locks down its byte-position semantics; production code
+// goes through codePositions.
+func isInsideQuotes(s string, pos int) bool {
+	if pos < 0 || pos >= len(s) {
+		return false
+	}
+	return !codePositions(s)[pos]
 }
 
 // guardCheckRisky returns a blocking toolResult when the session

@@ -15,6 +15,70 @@ import (
 	"time"
 )
 
+// boundedStreamResult is what runBoundedStream returns to its
+// caller. Plain struct so callers can append their own summary
+// lines / pick out fields for the structuredContent payload.
+type boundedStreamResult struct {
+	Text   string // text accumulated up to runTextMax
+	Bytes  int    // total bytes captured (post-filter)
+	Capped bool   // true if more output was dropped past runTextMax
+	RunErr error  // RunStream's error -- typically os.ErrClosed when the timer ended the stream
+}
+
+// runBoundedStream is the shared body of follow-mode `tail` and
+// `journal`: dial-time SSH client + remote command + follow_seconds
+// budget + optional grep filter. Streams chunks to the client as
+// notifications/progress, accumulates a capped text buffer for the
+// final tool result, returns once the timer fires (and c.Close
+// makes RunStream return) or the remote command ends on its own.
+//
+// Caller owns dialing and closing the *sshx.Client. The timer
+// goroutine closes the client to unblock RunStream; that close
+// races with the caller's own defer c.Close() and Go's sync.Once
+// keeps it safe.
+//
+// filter == nil means "accept every chunk"; otherwise only chunks
+// matching the regex are accumulated AND emitted via progress
+// (filtering at the source is what keeps grep mandatory for
+// follow-mode in the first place).
+func runBoundedStream(c *sshx.Client, remoteCmd, cwd string, followSeconds int, filter *regexp.Regexp) boundedStreamResult {
+	token := progressToken()
+	timer := time.NewTimer(time.Duration(followSeconds) * time.Second)
+	defer timer.Stop()
+	stopOnce := sync.Once{}
+	stop := func() { stopOnce.Do(func() { _ = c.Close() }) }
+	go func() {
+		<-timer.C
+		stop()
+	}()
+
+	var capturedBytes int
+	var capped bool
+	var buf strings.Builder
+	onChunk := func(_ sshx.StreamChunkKind, line string) {
+		if filter != nil && !filter.MatchString(line) {
+			return
+		}
+		// Accumulate up to the run-text cap; further chunks still
+		// stream via progress (model sees them in real time) but
+		// the final result text gets a truncation marker.
+		if capturedBytes+len(line) <= runTextMax {
+			buf.WriteString(line)
+			capturedBytes += len(line)
+		} else {
+			capped = true
+		}
+		emitProgress(token, capturedBytes, line)
+	}
+	_, _, _, runErr := c.RunStream(remoteCmd, cwd, onChunk)
+	return boundedStreamResult{
+		Text:   buf.String(),
+		Bytes:  capturedBytes,
+		Capped: capped,
+		RunErr: runErr,
+	}
+}
+
 // handleTail follows a remote file for a bounded duration and
 // streams new lines to the client via `notifications/progress`. The
 // final tools/call response returns the full accumulated output
@@ -93,59 +157,26 @@ func handleTail(args map[string]any, cfg *config.Config, profileOverride string)
 	defer c.Close()
 
 	remoteCmd := fmt.Sprintf("tail -F -n %d %s", lines, srvtty.ShQuotePath(path))
-	token := progressToken()
 
-	// Bound the call: close the SSH client after follow_seconds so
-	// RunStream returns. The model sees a stream that politely ends
-	// instead of one that runs until the MCP timeout hits.
-	timer := time.NewTimer(time.Duration(follow) * time.Second)
-	defer timer.Stop()
-	stopOnce := sync.Once{}
-	stop := func() { stopOnce.Do(func() { _ = c.Close() }) }
-	go func() {
-		<-timer.C
-		stop()
-	}()
-
-	var capturedBytes int
-	var capped bool
-	var buf strings.Builder
-	onChunk := func(_ sshx.StreamChunkKind, line string) {
-		if re != nil && !re.MatchString(line) {
-			return
-		}
-		// Accumulate up to the run-text cap; further chunks still
-		// stream via progress (model sees them in real time) but the
-		// final result text gets a truncation marker.
-		if capturedBytes+len(line) <= runTextMax {
-			buf.WriteString(line)
-			capturedBytes += len(line)
-		} else {
-			capped = true
-		}
-		emitProgress(token, capturedBytes, line)
-	}
-
-	_, _, _, runErr := c.RunStream(remoteCmd, "", onChunk)
-	// runErr is expected when we close the client to end the
-	// follow; that's the normal exit path. Surface only as info,
-	// never as IsError.
-
-	text := buf.String()
-	if capped {
+	res := runBoundedStream(c, remoteCmd, "", follow, re)
+	// res.RunErr is expected when the timer-close ends the stream;
+	// that's the normal exit path. Only surface as transport_error
+	// when it's a different failure.
+	text := res.Text
+	if res.Capped {
 		text += fmt.Sprintf("\n[output cap %d bytes; further lines streamed via progress only]\n", runTextMax)
 	}
-	text += fmt.Sprintf("\n[followed %s for %ds, %d bytes captured]", path, follow, capturedBytes)
+	text += fmt.Sprintf("\n[followed %s for %ds, %d bytes captured]", path, follow, res.Bytes)
 	structured := map[string]any{
 		"path":           path,
 		"follow_seconds": follow,
-		"bytes_captured": capturedBytes,
-		"capped":         capped,
+		"bytes_captured": res.Bytes,
+		"capped":         res.Capped,
 		"lines_clamped":  linesClamped,
 		"end_reason":     "timer",
 	}
-	if runErr != nil && !errors.Is(runErr, os.ErrClosed) {
-		structured["transport_error"] = runErr.Error()
+	if res.RunErr != nil && !errors.Is(res.RunErr, os.ErrClosed) {
+		structured["transport_error"] = res.RunErr.Error()
 	}
 	return toolResult{
 		Content:           []toolContent{{Type: "text", Text: text}},
@@ -233,40 +264,24 @@ func handleJournal(args map[string]any, cfg *config.Config, profileOverride stri
 	}
 	defer c.Close()
 
-	token := progressToken()
-	timer := time.NewTimer(time.Duration(follow) * time.Second)
-	defer timer.Stop()
-	go func() {
-		<-timer.C
-		_ = c.Close()
-	}()
+	// journalctl's `-g` flag already applies grep server-side, so
+	// the follow-mode chunk filter is nil here; the same gate that
+	// requires SOME filter argument has already passed by this
+	// point (unit / since / priority / grep).
+	res := runBoundedStream(c, remoteCmd, cwd, follow, nil)
 
-	var buf strings.Builder
-	var captured int
-	var capped bool
-	onChunk := func(_ sshx.StreamChunkKind, line string) {
-		if captured+len(line) <= runTextMax {
-			buf.WriteString(line)
-			captured += len(line)
-		} else {
-			capped = true
-		}
-		emitProgress(token, captured, line)
-	}
-	_, _, _, _ = c.RunStream(remoteCmd, cwd, onChunk)
-
-	text := buf.String()
-	if capped {
+	text := res.Text
+	if res.Capped {
 		text += fmt.Sprintf("\n[output cap %d bytes; further lines streamed via progress only]\n", runTextMax)
 	}
-	text += fmt.Sprintf("\n[followed journal on %s for %ds, %d bytes captured]", profName, follow, captured)
+	text += fmt.Sprintf("\n[followed journal on %s for %ds, %d bytes captured]", profName, follow, res.Bytes)
 	return toolResult{
 		Content: []toolContent{{Type: "text", Text: text}},
 		StructuredContent: map[string]any{
 			"unit":           unit,
 			"follow_seconds": follow,
-			"bytes_captured": captured,
-			"capped":         capped,
+			"bytes_captured": res.Bytes,
+			"capped":         res.Capped,
 			"lines_clamped":  linesClamped,
 		},
 	}

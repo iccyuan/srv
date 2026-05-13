@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"sort"
+	"srv/internal/ansi"
 	"srv/internal/clierr"
 	"strings"
 	"time"
@@ -30,6 +31,7 @@ func Cmd(args []string) error {
 		since      = 7 * 24 * time.Hour
 		jsonOut    bool
 		clearFlag  bool
+		sinceLast  bool
 		topLimit   = 20
 		callsLimit = 20
 	)
@@ -40,6 +42,8 @@ func Cmd(args []string) error {
 			jsonOut = true
 		case a == "--clear":
 			clearFlag = true
+		case a == "--since-last":
+			sinceLast = true
 		case a == "--since" && i+1 < len(args):
 			d, err := time.ParseDuration(args[i+1])
 			if err != nil {
@@ -85,7 +89,22 @@ func Cmd(args []string) error {
 		return nil
 	}
 
-	cutoff := time.Now().Add(-since)
+	now := time.Now()
+	cutoff := now.Add(-since)
+	windowLabel := fmtDuration(since)
+	if sinceLast {
+		cp := LoadCheckpoint()
+		if cp.IsZero() {
+			// Treat first-ever --since-last as "everything", since
+			// we have nothing to compare against. The user will get
+			// a baseline; subsequent calls show the delta.
+			cutoff = time.Time{}
+			windowLabel = "all time (first --since-last)"
+		} else {
+			cutoff = cp
+			windowLabel = "since " + cp.Format("2006-01-02 15:04:05")
+		}
+	}
 	calls, err := LoadCalls(cutoff)
 	if err != nil {
 		return clierr.Errf(1, "load: %v", err)
@@ -94,17 +113,26 @@ func Cmd(args []string) error {
 		if jsonOut {
 			fmt.Println("[]")
 		} else {
-			fmt.Printf("(no MCP calls recorded in the last %s)\n", fmtDuration(since))
+			fmt.Printf("(no MCP calls recorded in %s)\n", windowLabel)
 			fmt.Println("the stats file is written by the MCP server; if you've never run")
 			fmt.Println("`srv mcp` (i.e. never used srv from Claude Code), nothing is logged yet.")
+		}
+		if sinceLast {
+			_ = SaveCheckpoint(now)
 		}
 		return nil
 	}
 
+	var renderErr error
 	if toolFilter != "" {
-		return renderTool(toolFilter, calls, since, callsLimit, jsonOut)
+		renderErr = renderTool(toolFilter, calls, windowLabel, callsLimit, jsonOut)
+	} else {
+		renderErr = renderAggregate(calls, windowLabel, topLimit, jsonOut)
 	}
-	return renderAggregate(calls, since, topLimit, jsonOut)
+	if renderErr == nil && sinceLast {
+		_ = SaveCheckpoint(now)
+	}
+	return renderErr
 }
 
 const helpText = `srv mcp stats -- inspect MCP token-budget telemetry
@@ -122,16 +150,18 @@ EXAMPLES:
 
 FLAGS:
   --since DURATION   time window (e.g. 1h, 30m, 7d). default 7d (168h).
+  --since-last       only calls since the last --since-last view
+                     (writes a checkpoint on success).
   --top N            number of aggregate rows. default 20.
   --calls N          number of per-tool drill rows. default 20.
   --json             JSON output.
-  --clear            delete the stats file.
+  --clear            delete the stats file (and rotated history).
 
 The "out" columns are the bytes the model has to read; "progress" is
 streamed during the call and is NOT capped by the result-text truncation.
 EST TOKENS is bytes/4 -- approximate, useful for relative comparisons.`
 
-func renderAggregate(calls []Call, since time.Duration, topLimit int, jsonOut bool) error {
+func renderAggregate(calls []Call, windowLabel string, topLimit int, jsonOut bool) error {
 	aggs := AggregateByTool(calls)
 	sort.Slice(aggs, func(i, j int) bool {
 		return aggs[i].TotalOutBytes+aggs[i].TotalProgress >
@@ -145,13 +175,13 @@ func renderAggregate(calls []Call, since time.Duration, topLimit int, jsonOut bo
 		fmt.Println(string(b))
 		return nil
 	}
-	fmt.Printf("MCP token stats -- last %s, %d calls across %d tools\n\n",
-		fmtDuration(since), len(calls), len(aggs))
+	fmt.Printf("MCP token stats -- %s, %d calls across %d tools\n\n",
+		windowLabel, len(calls), len(aggs))
 	fmt.Printf("%-18s %6s %10s %10s %10s %10s %12s %6s\n",
 		"TOOL", "CALLS", "AVG OUT", "P95 OUT", "MAX OUT", "TOTAL OUT", "EST TOKENS", "ERRS")
 	fmt.Println(strings.Repeat("-", 100))
 	for _, a := range aggs {
-		fmt.Printf("%-18s %6d %10s %10s %10s %10s %12s %6d\n",
+		line := fmt.Sprintf("%-18s %6d %10s %10s %10s %10s %12s %6d",
 			truncateRight(a.Tool, 18),
 			a.Calls,
 			fmtBytes(int64(a.AvgOutBytes)),
@@ -161,6 +191,14 @@ func renderAggregate(calls []Call, since time.Duration, topLimit int, jsonOut bo
 			fmtCount(int64(a.EstTotalTokens)),
 			a.Errors,
 		)
+		// Highlight outlier-shaped tools: Max >> P95 means a typical
+		// call is small but a few are huge -- the worst kind of
+		// hidden token spend. 3x is the boundary where "noisy"
+		// becomes "investigate now".
+		if a.P95OutBytes > 0 && a.MaxOutBytes > a.P95OutBytes*3 {
+			line = ansi.Red + line + ansi.Reset
+		}
+		fmt.Println(line)
 	}
 	// Progress bytes get a separate summary line below the table --
 	// they're often zero for non-streaming tools so a dedicated
@@ -174,10 +212,22 @@ func renderAggregate(calls []Call, since time.Duration, topLimit int, jsonOut bo
 		fmt.Printf("streaming progress notifications: %s across all tools (uncapped by out_bytes)\n",
 			fmtBytes(totalProgress))
 	}
+	// Footer legend so the red rows make sense without consulting docs.
+	hasOutlier := false
+	for _, a := range aggs {
+		if a.P95OutBytes > 0 && a.MaxOutBytes > a.P95OutBytes*3 {
+			hasOutlier = true
+			break
+		}
+	}
+	if hasOutlier {
+		fmt.Println()
+		fmt.Println(ansi.Dim + "red rows: MAX OUT > 3x P95 OUT -- the average call is fine but a few are pathological; check `srv mcp stats <tool>` to find them." + ansi.Reset)
+	}
 	return nil
 }
 
-func renderTool(tool string, calls []Call, since time.Duration, callsLimit int, jsonOut bool) error {
+func renderTool(tool string, calls []Call, windowLabel string, callsLimit int, jsonOut bool) error {
 	filtered := calls[:0]
 	for _, c := range calls {
 		if c.Tool == tool {
@@ -188,7 +238,7 @@ func renderTool(tool string, calls []Call, since time.Duration, callsLimit int, 
 		if jsonOut {
 			fmt.Println("[]")
 		} else {
-			fmt.Printf("(no calls to %q in the last %s)\n", tool, fmtDuration(since))
+			fmt.Printf("(no calls to %q in %s)\n", tool, windowLabel)
 		}
 		return nil
 	}
@@ -205,8 +255,8 @@ func renderTool(tool string, calls []Call, since time.Duration, callsLimit int, 
 		fmt.Println(string(b))
 		return nil
 	}
-	fmt.Printf("recent calls to %q -- last %s, %d total (showing %d)\n\n",
-		tool, fmtDuration(since), len(filtered), len(display))
+	fmt.Printf("recent calls to %q -- %s, %d total (showing %d)\n\n",
+		tool, windowLabel, len(filtered), len(display))
 	fmt.Printf("%-19s %8s %10s %10s %10s %4s\n",
 		"WHEN", "DUR", "IN", "OUT", "PROGRESS", "OK")
 	fmt.Println(strings.Repeat("-", 70))

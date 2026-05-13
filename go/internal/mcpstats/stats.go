@@ -58,6 +58,19 @@ func (c Call) EstTokens() int {
 // don't interleave partial lines.
 var appendMu sync.Mutex
 
+// pathFn returns the stats-file path. Overridable in tests so the
+// round-trip suite can write to t.TempDir without touching the
+// user's actual ~/.srv/mcp-stats.jsonl.
+var pathFn = func() string { return srvpath.MCPStats() }
+
+// maxFileBytes is the soft cap before AppendCall rotates. Picked at
+// 10 MiB: at ~200 B/record that's roughly 50k calls -- a deeply
+// active Claude Code user might hit this every few weeks. Rotation
+// keeps one historical generation as `<path>.1`; older history is
+// dropped. Users wanting full history can pre-copy the file before
+// rotation fires.
+const maxFileBytes int64 = 10 * 1024 * 1024
+
 // AppendCall writes one Call as a JSON line to the stats file. The
 // MCP loop calls this synchronously after each tools/call returns;
 // the write is small (~200 bytes) and rare (per-call) so the disk
@@ -78,10 +91,11 @@ func AppendCall(c Call) error {
 
 	appendMu.Lock()
 	defer appendMu.Unlock()
-	path := srvpath.MCPStats()
+	path := pathFn()
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return err
 	}
+	rotateIfLarge(path)
 	f, err := os.OpenFile(path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o600)
 	if err != nil {
 		return err
@@ -91,6 +105,21 @@ func AppendCall(c Call) error {
 	return err
 }
 
+// rotateIfLarge renames `path` to `path.1` (overwriting any prior
+// `.1`) when the current file has grown past maxFileBytes. Caller
+// must hold appendMu. Best-effort -- a failed rename leaves the
+// file in place and the next AppendCall just keeps writing past
+// the cap. No multi-generation rotation: one historical slot is
+// enough for "I just want to see what I had before the rotation."
+func rotateIfLarge(path string) {
+	st, err := os.Stat(path)
+	if err != nil || st.Size() < maxFileBytes {
+		return
+	}
+	_ = os.Remove(path + ".1")
+	_ = os.Rename(path, path+".1")
+}
+
 // LoadCalls reads the stats file and returns every Call whose TS
 // is >= `since`. Pass time.Time{} to include all records.
 //
@@ -98,7 +127,7 @@ func AppendCall(c Call) error {
 // telemetry -- one bad record shouldn't tank the report). Missing
 // file returns (nil, nil).
 func LoadCalls(since time.Time) ([]Call, error) {
-	f, err := os.Open(srvpath.MCPStats())
+	f, err := os.Open(pathFn())
 	if err != nil {
 		if os.IsNotExist(err) {
 			return nil, nil
@@ -127,13 +156,43 @@ func LoadCalls(since time.Time) ([]Call, error) {
 	return out, sc.Err()
 }
 
-// Clear deletes the stats file. Idempotent on missing file.
+// Clear deletes the stats file (and its rotated `.1` sibling +
+// the checkpoint file). Idempotent on missing files.
 func Clear() error {
-	err := os.Remove(srvpath.MCPStats())
-	if err != nil && !os.IsNotExist(err) {
-		return err
+	path := pathFn()
+	for _, p := range []string{path, path + ".1", checkpointPath()} {
+		if err := os.Remove(p); err != nil && !os.IsNotExist(err) {
+			return err
+		}
 	}
 	return nil
+}
+
+// checkpointPath returns the location of the "last viewed at"
+// marker that drives `--since-last`. Lives next to the stats file
+// so a single `--clear` resets both.
+func checkpointPath() string { return pathFn() + ".checkpoint" }
+
+// LoadCheckpoint returns the timestamp the user last viewed stats
+// (via `srv mcp stats --since-last`). Zero time when no checkpoint
+// has been written yet.
+func LoadCheckpoint() time.Time {
+	data, err := os.ReadFile(checkpointPath())
+	if err != nil {
+		return time.Time{}
+	}
+	t, err := time.Parse(time.RFC3339Nano, string(data))
+	if err != nil {
+		return time.Time{}
+	}
+	return t
+}
+
+// SaveCheckpoint stamps `now` as the new "last viewed at" anchor.
+// Called by `srv mcp stats --since-last` on success so the next
+// invocation shows the delta since this one.
+func SaveCheckpoint(now time.Time) error {
+	return os.WriteFile(checkpointPath(), []byte(now.Format(time.RFC3339Nano)), 0o600)
 }
 
 // Aggregate is the per-tool rollup produced by Aggregate(). Sorted
