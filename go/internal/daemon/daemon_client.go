@@ -7,10 +7,7 @@ import (
 	"fmt"
 	"net"
 	"os"
-	"path/filepath"
-	"srv/internal/srvpath"
 	"srv/internal/sshx"
-	"strings"
 	"time"
 )
 
@@ -286,17 +283,6 @@ func daemonClientLogs() int {
 		return 1
 	}
 	fmt.Print(string(data))
-	return 0
-}
-
-func daemonClientPruneCache() int {
-	dir := filepath.Join(srvpath.Dir(), "cache")
-	if err := os.RemoveAll(dir); err != nil {
-		fmt.Fprintln(os.Stderr, "daemon prune-cache:", err)
-		return 1
-	}
-	_ = os.MkdirAll(dir, 0o755)
-	fmt.Println("cache pruned:", strings.TrimSpace(dir))
 	return 0
 }
 

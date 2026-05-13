@@ -104,7 +104,6 @@ Integrations:
   srv daemon stop                        stop the running daemon
   srv daemon restart                     restart background daemon
   srv daemon logs                        print auto-spawn daemon log
-  srv daemon prune-cache                 drop the remote-completion (_ls) cache
 
 Profile resolution (highest first):
   -P/--profile flag  >  session pin (` + "`" + `srv use` + "`" + `)  >  $SRV_PROFILE  >  default
@@ -212,7 +211,6 @@ const helpZH = `srv - 跨平台 SSH 远端命令工具,持久 cwd / 连接复用
   srv daemon stop                        停 daemon
   srv daemon restart                     重启后台 daemon
   srv daemon logs                        cat 自动 spawn 的 daemon 日志
-  srv daemon prune-cache                 清远端补全 (_ls) 缓存
 
 Profile 解析优先级(高 → 低):
   -P/--profile flag  >  session pin (` + "`" + `srv use` + "`" + `)  >  $SRV_PROFILE  >  全局默认

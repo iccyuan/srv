@@ -80,7 +80,7 @@ var compSpecs = map[string]compSpec{
 	// over for anything not matching an enum value).
 	"tunnel": {positions: []argSlot{{typ: argEnum, choices: []string{"add", "remove", "list", "show", "up", "down"}}}},
 	"guard":  {positions: []argSlot{{typ: argEnum, choices: []string{"on", "off", "status"}}}},
-	"daemon": {positions: []argSlot{{typ: argEnum, choices: []string{"status", "stop", "restart", "logs", "prune-cache"}}}},
+	"daemon": {positions: []argSlot{{typ: argEnum, choices: []string{"status", "stop", "restart", "logs"}}}},
 	"color":  {positions: []argSlot{{typ: argEnum, choices: []string{"on", "off", "auto", "use", "list", "status"}}}},
 	"env":    {positions: []argSlot{{typ: argEnum, choices: []string{"list", "set", "unset", "clear"}}}},
 

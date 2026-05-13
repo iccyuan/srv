@@ -238,8 +238,6 @@ func Cmd(args []string) error {
 			return fmt.Errorf("daemon: restart failed")
 		case "logs":
 			return clierr.Code(daemonClientLogs())
-		case "prune-cache":
-			return clierr.Code(daemonClientPruneCache())
 		}
 	}
 	sockPath := daemonSocketPath()
