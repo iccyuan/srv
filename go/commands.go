@@ -3,6 +3,7 @@ package main
 import (
 	"fmt"
 	"srv/internal/check"
+	"srv/internal/clierr"
 	"srv/internal/completion"
 	"srv/internal/config"
 	"srv/internal/daemon"
@@ -135,10 +136,21 @@ var subcommands = []subcommand{
 
 	// Integrations / settings.
 	{name: "mcp", handler: func(c cmdCtx) error {
-		mcpMode = true
-		return mcp.Run(c.cfg, Version)
+		// `srv mcp` with no args is the stdio MCP server entry that
+		// Claude Code launches; subcommands are inspection helpers
+		// that run locally and exit. `serve` is accepted as an
+		// explicit alias for the no-args form so scripts that want
+		// to be unambiguous can write it.
+		if len(c.args) == 0 || c.args[0] == "serve" {
+			mcpMode = true
+			return mcp.Run(c.cfg, Version)
+		}
+		switch c.args[0] {
+		case "stats":
+			return mcpstats.Cmd(c.args[1:])
+		}
+		return clierr.Errf(2, "unknown mcp subcommand %q (try: serve, stats)", c.args[0])
 	}},
-	{name: "stats", noConfig: true, handler: func(c cmdCtx) error { return mcpstats.Cmd(c.args) }},
 	{name: "guard", handler: func(c cmdCtx) error { return guard.Cmd(c.args) }},
 	{name: "color", handler: func(c cmdCtx) error { return theme.Cmd(c.args) }},
 	{name: "daemon", handler: func(c cmdCtx) error { return daemon.Cmd(c.args) }},

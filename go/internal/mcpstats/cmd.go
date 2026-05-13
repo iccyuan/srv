@@ -9,15 +9,15 @@ import (
 	"time"
 )
 
-// Cmd implements `srv stats [tool] [flags]`.
+// Cmd implements `srv mcp stats [tool] [flags]`.
 //
-//	srv stats                      top tools by total out bytes (7d default)
-//	srv stats <tool>               drill into one tool's recent calls
-//	srv stats --since 24h          adjust time window
-//	srv stats --json               JSON output (for scripts)
-//	srv stats --clear              wipe ~/.srv/mcp-stats.jsonl
-//	srv stats --top N              limit aggregate rows (default 20)
-//	srv stats --calls N            limit per-tool drill rows (default 20)
+//	srv mcp stats                      top tools by total out bytes (7d default)
+//	srv mcp stats <tool>               drill into one tool's recent calls
+//	srv mcp stats --since 24h          adjust time window
+//	srv mcp stats --json               JSON output (for scripts)
+//	srv mcp stats --clear              wipe ~/.srv/mcp-stats.jsonl
+//	srv mcp stats --top N              limit aggregate rows (default 20)
+//	srv mcp stats --calls N            limit per-tool drill rows (default 20)
 //
 // The default view is the aggregate table: one row per MCP tool,
 // sorted by total output bytes (descending) so the biggest token
@@ -107,18 +107,18 @@ func Cmd(args []string) error {
 	return renderAggregate(calls, since, topLimit, jsonOut)
 }
 
-const helpText = `srv stats -- inspect MCP token-budget telemetry
+const helpText = `srv mcp stats -- inspect MCP token-budget telemetry
 
 USAGE:
-  srv stats [tool] [flags]
+  srv mcp stats [tool] [flags]
 
 EXAMPLES:
-  srv stats                      top tools by total output bytes (last 7d)
-  srv stats --since 24h          last 24 hours
-  srv stats journal              recent calls to the 'journal' tool
-  srv stats journal --calls 50   last 50 'journal' calls
-  srv stats --json               machine-readable output
-  srv stats --clear              wipe ~/.srv/mcp-stats.jsonl
+  srv mcp stats                      top tools by total output bytes (last 7d)
+  srv mcp stats --since 24h          last 24 hours
+  srv mcp stats journal              recent calls to the 'journal' tool
+  srv mcp stats journal --calls 50   last 50 'journal' calls
+  srv mcp stats --json               machine-readable output
+  srv mcp stats --clear              wipe ~/.srv/mcp-stats.jsonl
 
 FLAGS:
   --since DURATION   time window (e.g. 1h, 30m, 7d). default 7d (168h).
