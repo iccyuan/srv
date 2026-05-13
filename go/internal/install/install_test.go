@@ -46,3 +46,23 @@ sandbox = "elevated"
 		t.Fatalf("command = %q, want %q", got, want)
 	}
 }
+
+func TestInstallHTMLKeepsFunctionalHooks(t *testing.T) {
+	html := string(installHTML)
+	for _, want := range []string{
+		"/api/status",
+		"/api/apply",
+		"/api/quit",
+		"add_to_path",
+		"remove_from_path",
+		"register_claude_mcp",
+		"unregister_claude_mcp",
+		"register_codex_mcp",
+		"unregister_codex_mcp",
+		"init_profile",
+	} {
+		if !strings.Contains(html, want) {
+			t.Fatalf("install HTML missing functional hook %q", want)
+		}
+	}
+}
