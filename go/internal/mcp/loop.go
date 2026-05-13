@@ -8,6 +8,7 @@ import (
 	"srv/internal/config"
 	"srv/internal/i18n"
 	"srv/internal/mcplog"
+	"srv/internal/mcpstats"
 	"srv/internal/progress"
 	"srv/internal/project"
 	"strings"
@@ -109,18 +110,38 @@ func Run(cfg *config.Config, versionStr string) error {
 			}
 			// Stash the progress token before dispatch and clear it
 			// after, so streaming tools can read it via progressToken().
-			// Loop is serial so the global is race-free; per-handler
-			// goroutines that outlive the call must snapshot the value
-			// themselves.
+			// Reset progressBytesCounter at the same boundary so the
+			// per-call stats record captures only this call's stream.
+			// Loop is serial so these globals are race-free; per-
+			// handler goroutines that outlive the call must snapshot
+			// the values themselves.
 			currentProgressToken = p.Meta.ProgressToken
+			progressBytesCounter = 0
 			start := time.Now()
 			res := safeHandle(p.Name, args, cfg2)
 			currentProgressToken = nil
+			dur := time.Since(start)
 			ok := "ok"
 			if res.IsError {
 				ok = "err"
 			}
-			mcplog.Logf("tool=%s dur=%.2fs %s", p.Name, time.Since(start).Seconds(), ok)
+			mcplog.Logf("tool=%s dur=%.2fs %s", p.Name, dur.Seconds(), ok)
+			// Best-effort stats record. Sizes are JSON-marshaled to
+			// match what actually went over the wire; bytes/4 is the
+			// rough token estimate the CLI surfaces. Errors writing
+			// the JSONL line are ignored -- stats are observability,
+			// not authoritative state.
+			argsJSON, _ := json.Marshal(args)
+			resJSON, _ := json.Marshal(res)
+			_ = mcpstats.AppendCall(mcpstats.Call{
+				TS:            start,
+				Tool:          p.Name,
+				DurMs:         dur.Milliseconds(),
+				InBytes:       len(argsJSON),
+				OutBytes:      len(resJSON),
+				ProgressBytes: progressBytesCounter,
+				OK:            !res.IsError,
+			})
 			send(response(req.ID, res, nil))
 		default:
 			if req.ID != nil {

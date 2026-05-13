@@ -1,0 +1,219 @@
+// Package mcpstats records and queries per-call MCP token-budget
+// telemetry. Every tools/call the stdio MCP server handles appends
+// one JSON line to ~/.srv/mcp-stats.jsonl with:
+//
+//	ts             ISO-8601 timestamp when the call started
+//	tool           tool name (e.g. "run", "journal", "tail")
+//	dur_ms         wall-clock duration
+//	in_bytes       size of the args JSON the client sent
+//	out_bytes      size of the result JSON the server sent back
+//	                  (the model spends tokens to read all of this)
+//	progress_bytes total bytes streamed as notifications/progress
+//	                  during the call -- NOT capped by the
+//	                  out_bytes truncation marker
+//	ok             whether the tool returned IsError=false
+//
+// "Bytes" not "tokens" is the honest unit -- we don't tokenize
+// here. The CLI reports both bytes (authoritative) and an estimated
+// token count (bytes/4, useful for spot-comparing against Claude's
+// context budget).
+//
+// File is JSON-Lines (one record per line), append-only. A typical
+// session writes ~50-200 lines; a long-running deployment can
+// accumulate thousands. `srv stats --clear` wipes it.
+package mcpstats
+
+import (
+	"bufio"
+	"encoding/json"
+	"os"
+	"path/filepath"
+	"srv/internal/srvpath"
+	"sync"
+	"time"
+)
+
+// Call is one row in the stats log: a single tools/call invocation.
+type Call struct {
+	TS            time.Time `json:"ts"`
+	Tool          string    `json:"tool"`
+	DurMs         int64     `json:"dur_ms"`
+	InBytes       int       `json:"in_bytes"`
+	OutBytes      int       `json:"out_bytes"`
+	ProgressBytes int       `json:"progress_bytes,omitempty"`
+	OK            bool      `json:"ok"`
+}
+
+// EstTokens is a coarse byte→token estimate. The real tokenizer
+// (tiktoken-like) varies with content; bytes/4 is a serviceable
+// proxy for English-ish output and JSON-ish results. Useful for
+// "this tool's calls cost roughly N tokens" comparisons, NOT for
+// billing.
+func (c Call) EstTokens() int {
+	return (c.InBytes + c.OutBytes + c.ProgressBytes) / 4
+}
+
+// appendMu serializes JSONL writes so concurrent MCP servers (a
+// rarity but not impossible -- one Claude Code window per project)
+// don't interleave partial lines.
+var appendMu sync.Mutex
+
+// AppendCall writes one Call as a JSON line to the stats file. The
+// MCP loop calls this synchronously after each tools/call returns;
+// the write is small (~200 bytes) and rare (per-call) so the disk
+// cost is invisible compared to the call itself.
+//
+// Best-effort: errors (read-only home, full disk, etc.) are
+// returned but the loop's caller ignores them -- stats are
+// observability, not authoritative state.
+func AppendCall(c Call) error {
+	if c.TS.IsZero() {
+		c.TS = time.Now()
+	}
+	line, err := json.Marshal(c)
+	if err != nil {
+		return err
+	}
+	line = append(line, '\n')
+
+	appendMu.Lock()
+	defer appendMu.Unlock()
+	path := srvpath.MCPStats()
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return err
+	}
+	f, err := os.OpenFile(path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o600)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	_, err = f.Write(line)
+	return err
+}
+
+// LoadCalls reads the stats file and returns every Call whose TS
+// is >= `since`. Pass time.Time{} to include all records.
+//
+// Malformed lines are skipped silently (the file is best-effort
+// telemetry -- one bad record shouldn't tank the report). Missing
+// file returns (nil, nil).
+func LoadCalls(since time.Time) ([]Call, error) {
+	f, err := os.Open(srvpath.MCPStats())
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	defer f.Close()
+
+	var out []Call
+	sc := bufio.NewScanner(f)
+	// Long-line buffer: a single Call line should be <1KB but a
+	// pathological tool returning a giant structuredContent could
+	// push higher. 1 MiB is generous; anything larger hits the
+	// JSONL-corruption path and we skip it.
+	sc.Buffer(make([]byte, 64*1024), 1024*1024)
+	for sc.Scan() {
+		var c Call
+		if err := json.Unmarshal(sc.Bytes(), &c); err != nil {
+			continue
+		}
+		if !since.IsZero() && c.TS.Before(since) {
+			continue
+		}
+		out = append(out, c)
+	}
+	return out, sc.Err()
+}
+
+// Clear deletes the stats file. Idempotent on missing file.
+func Clear() error {
+	err := os.Remove(srvpath.MCPStats())
+	if err != nil && !os.IsNotExist(err) {
+		return err
+	}
+	return nil
+}
+
+// Aggregate is the per-tool rollup produced by Aggregate(). Sorted
+// by TotalOutBytes descending so the largest token-consumers float
+// to the top of `srv stats`.
+type Aggregate struct {
+	Tool           string
+	Calls          int
+	TotalInBytes   int64
+	TotalOutBytes  int64
+	TotalProgress  int64
+	AvgOutBytes    int
+	MaxOutBytes    int
+	P50OutBytes    int
+	P95OutBytes    int
+	AvgDurMs       float64
+	Errors         int
+	EstTotalTokens int
+}
+
+// AggregateByTool rolls a slice of Calls up to one Aggregate per
+// tool. Percentiles are computed off OutBytes (the field that maps
+// to tokens spent reading the result -- the most actionable signal
+// for "this tool needs tighter truncation").
+func AggregateByTool(calls []Call) []Aggregate {
+	byTool := map[string]*Aggregate{}
+	outsByTool := map[string][]int{}
+	for _, c := range calls {
+		a, ok := byTool[c.Tool]
+		if !ok {
+			a = &Aggregate{Tool: c.Tool}
+			byTool[c.Tool] = a
+		}
+		a.Calls++
+		a.TotalInBytes += int64(c.InBytes)
+		a.TotalOutBytes += int64(c.OutBytes)
+		a.TotalProgress += int64(c.ProgressBytes)
+		a.AvgDurMs += float64(c.DurMs)
+		if c.OutBytes > a.MaxOutBytes {
+			a.MaxOutBytes = c.OutBytes
+		}
+		if !c.OK {
+			a.Errors++
+		}
+		outsByTool[c.Tool] = append(outsByTool[c.Tool], c.OutBytes)
+	}
+	out := make([]Aggregate, 0, len(byTool))
+	for tool, a := range byTool {
+		if a.Calls > 0 {
+			a.AvgOutBytes = int(a.TotalOutBytes / int64(a.Calls))
+			a.AvgDurMs /= float64(a.Calls)
+		}
+		a.P50OutBytes = percentile(outsByTool[tool], 50)
+		a.P95OutBytes = percentile(outsByTool[tool], 95)
+		a.EstTotalTokens = int((a.TotalInBytes + a.TotalOutBytes + a.TotalProgress) / 4)
+		out = append(out, *a)
+	}
+	return out
+}
+
+// percentile picks the p-th percentile from `xs` (0 ≤ p ≤ 100).
+// Nearest-rank method; returns 0 on empty input. Mutates xs (sorts
+// in-place) -- callers that need the input intact must pass a copy.
+func percentile(xs []int, p int) int {
+	if len(xs) == 0 {
+		return 0
+	}
+	// Sort ascending. insertion sort is fast enough; per-tool
+	// vectors are typically < 200 entries.
+	for i := 1; i < len(xs); i++ {
+		for j := i; j > 0 && xs[j-1] > xs[j]; j-- {
+			xs[j-1], xs[j] = xs[j], xs[j-1]
+		}
+	}
+	idx := (p * (len(xs) - 1)) / 100
+	if idx < 0 {
+		idx = 0
+	}
+	if idx >= len(xs) {
+		idx = len(xs) - 1
+	}
+	return xs[idx]
+}

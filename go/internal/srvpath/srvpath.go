@@ -38,6 +38,11 @@ func Jobs() string { return filepath.Join(Dir(), "jobs.json") }
 // MCPLog returns the path to mcp.log (the MCP server's lifecycle log).
 func MCPLog() string { return filepath.Join(Dir(), "mcp.log") }
 
+// MCPStats returns the path to mcp-stats.jsonl (one record per
+// MCP tools/call: tool name, duration, in/out/progress bytes, ok).
+// Append-only; rotated manually via `srv stats --clear`.
+func MCPStats() string { return filepath.Join(Dir(), "mcp-stats.jsonl") }
+
 // ColorPresetsDir returns ~/.srv/init/, the directory the user drops
 // custom shell snippets into. Each *.sh file is one preset; the
 // filename without extension is what `srv color use <name>` accepts.

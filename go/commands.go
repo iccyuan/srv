@@ -16,6 +16,7 @@ import (
 	"srv/internal/jobcli"
 	"srv/internal/launcher"
 	"srv/internal/mcp"
+	"srv/internal/mcpstats"
 	"srv/internal/project"
 	"srv/internal/streams"
 	"srv/internal/sudo"
@@ -137,6 +138,7 @@ var subcommands = []subcommand{
 		mcpMode = true
 		return mcp.Run(c.cfg, Version)
 	}},
+	{name: "stats", noConfig: true, handler: func(c cmdCtx) error { return mcpstats.Cmd(c.args) }},
 	{name: "guard", handler: func(c cmdCtx) error { return guard.Cmd(c.args) }},
 	{name: "color", handler: func(c cmdCtx) error { return theme.Cmd(c.args) }},
 	{name: "daemon", handler: func(c cmdCtx) error { return daemon.Cmd(c.args) }},

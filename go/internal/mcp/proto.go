@@ -92,6 +92,15 @@ type progressParams struct {
 	Message       string `json:"message,omitempty"`
 }
 
+// progressBytesCounter accumulates the byte length of every progress
+// message emitted during the current tools/call. Loop is strictly
+// serial so a plain global is race-free; loop.go resets it on entry
+// and snapshots it on exit to populate the per-call stats record.
+// Tracking this is the only honest way to attribute "tail streamed
+// 4 MiB during a call whose final result was 60 KiB" -- the result-
+// text cap doesn't apply to progress notifications.
+var progressBytesCounter int
+
 // emitProgress emits one `notifications/progress` to the client.
 // Caller is responsible for monotonic `progress` -- we don't auto-
 // increment. When token is nil (caller didn't pass _meta.progressToken)
@@ -101,6 +110,7 @@ func emitProgress(token any, progress int, message string) {
 	if token == nil {
 		return
 	}
+	progressBytesCounter += len(message)
 	send(notification{
 		JSONRPC: "2.0",
 		Method:  "notifications/progress",
