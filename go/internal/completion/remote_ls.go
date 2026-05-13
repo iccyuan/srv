@@ -1,15 +1,10 @@
 package completion
 
 import (
-	"crypto/sha1"
-	"encoding/hex"
 	"fmt"
 	"os"
-	"path/filepath"
 	"srv/internal/config"
 	"srv/internal/daemon"
-	"srv/internal/srvio"
-	"srv/internal/srvpath"
 	"srv/internal/srvtty"
 	"srv/internal/sshx"
 	"strings"
@@ -18,10 +13,20 @@ import (
 
 // Remote `ls`-style enumeration for tab completion and the MCP
 // list_dir tool. Resolution order:
-//   file cache (5s TTL) -> daemon (pooled SSH) -> auto-spawn daemon
-//   -> direct dial fallback.
-// Same hierarchy the internal `srv _ls` subcommand has always used;
-// the MCP path reuses it so list_dir benefits from the same cache.
+//
+//	daemon (pooled SSH + in-memory cache) -> auto-spawn daemon ->
+//	direct dial fallback.
+//
+// The daemon owns the only cache layer (s.lsCache, 5 s TTL, defensive
+// copies, and a background sub-dir prefetcher). Clients always go
+// through it: a previous srv invocation's tab-completion warms the
+// daemon's memory, and every subsequent client benefits without any
+// file-system round-trip. The only on-disk traffic in this path is
+// the unix-socket call itself.
+//
+// Direct-dial fallback only fires when the daemon refuses to spawn
+// (broken environment, permission issue) -- a cold SSH handshake
+// (~2.7 s) is the user-visible cost. Acceptable for the rare path.
 
 // LsCmd is the `srv _ls <prefix>` internal subcommand used by tab
 // completion to enumerate remote entries. Output: one entry per
@@ -60,28 +65,21 @@ func LsCmd(args []string, cfg *config.Config, profileOverride string) error {
 // resolve against the active session's cwd, dirs carry a trailing
 // "/".
 //
-// Also called from the MCP `list_dir` handler; the file cache + the
-// pooled daemon make repeat queries sub-100ms.
+// Also called from the MCP `list_dir` handler; the daemon's
+// in-memory cache + sub-dir prefetcher make repeat queries
+// sub-100ms.
 func ListEntries(prefix string, cfg *config.Config, profileOverride string) ([]string, error) {
 	name, profile, err := config.Resolve(cfg, profileOverride)
 	if err != nil {
 		return nil, err
 	}
 	cwd := config.GetCwd(name, profile)
-	dirPart, basePart := sshx.SplitRemotePrefix(prefix)
-	target := sshx.RemoteListTarget(dirPart, cwd)
 
-	// File cache (instant, ~60ms even for misses-then-hits sequences).
-	key := lsCacheKey(profile.Host, profile.User, target)
-	if cached, ok := readLsCache(key, sshx.LsCacheTTL); ok {
-		return matchLsEntries(cached, dirPart, basePart), nil
-	}
-
-	// Daemon (pooled SSH, ~500ms even when "cold" because no
-	// handshake). Auto-spawn one in the background if none is
-	// running -- next call will be warm. Send the CLI's cwd so
-	// relative prefixes resolve against the right directory (the
-	// daemon never reads its own session).
+	// Daemon (pooled SSH, ~500 ms even when "cold" because no
+	// handshake, ~10 ms when its in-memory cache holds the answer).
+	// Auto-spawn one in the background if none is running -- the
+	// retry will hit the cold-but-pooled daemon, and the next call
+	// after that hits memory.
 	if entries, ok := daemon.TryLs(name, cwd, prefix); ok {
 		return entries, nil
 	}
@@ -91,17 +89,22 @@ func ListEntries(prefix string, cfg *config.Config, profileOverride string) ([]s
 		}
 	}
 
-	// Direct dial fallback (~2.7s cold, full handshake).
+	// Direct dial fallback (~2.7 s cold, full handshake). Only
+	// reached when the daemon refuses to spawn -- a broken-env
+	// path that we'd rather make slow-but-correct than wrong-fast
+	// via a stale cache.
+	dirPart, basePart := sshx.SplitRemotePrefix(prefix)
+	target := sshx.RemoteListTarget(dirPart, cwd)
 	listing, err := remoteLs(profile, target, 10*time.Second)
 	if err != nil {
 		return nil, err
 	}
-	_ = writeLsCache(key, listing)
 	return matchLsEntries(listing, dirPart, basePart), nil
 }
 
 // matchLsEntries filters entries by basePart prefix, prepends
-// dirPart, returns.
+// dirPart, returns. Used only on the direct-dial fallback path;
+// daemon-side filtering is done by the daemon itself in handleLs.
 func matchLsEntries(entries []string, dirPart, basePart string) []string {
 	out := make([]string, 0, len(entries))
 	for _, e := range entries {
@@ -143,36 +146,4 @@ func remoteLs(profile *config.Profile, target string, timeout time.Duration) ([]
 		out = append(out, line)
 	}
 	return out, nil
-}
-
-func lsCacheKey(host, user, target string) string {
-	h := sha1.Sum([]byte(host + "\x00" + user + "\x00" + target))
-	return hex.EncodeToString(h[:10])
-}
-
-func lsCacheDir() string { return filepath.Join(srvpath.Dir(), "cache") }
-
-func readLsCache(key string, ttl time.Duration) ([]string, bool) {
-	p := filepath.Join(lsCacheDir(), "ls-"+key+".txt")
-	st, err := os.Stat(p)
-	if err != nil {
-		return nil, false
-	}
-	if time.Since(st.ModTime()) > ttl {
-		return nil, false
-	}
-	data, err := os.ReadFile(p)
-	if err != nil {
-		return nil, false
-	}
-	s := strings.TrimRight(string(data), "\n")
-	if s == "" {
-		return []string{}, true
-	}
-	return strings.Split(s, "\n"), true
-}
-
-func writeLsCache(key string, lines []string) error {
-	p := filepath.Join(lsCacheDir(), "ls-"+key+".txt")
-	return srvio.WriteFileAtomic(p, []byte(strings.Join(lines, "\n")+"\n"), 0o600)
 }

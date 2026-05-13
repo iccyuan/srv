@@ -11,9 +11,7 @@ package doctor
 import (
 	"encoding/json"
 	"fmt"
-	"os"
 	"os/exec"
-	"path/filepath"
 	"srv/internal/clierr"
 	"srv/internal/config"
 	"srv/internal/daemon"
@@ -82,11 +80,6 @@ func Checks(cfg *config.Config, profileOverride, version string) ([]map[string]a
 		check("git", true, "available")
 	} else {
 		check("git", false, "needed for git-mode sync")
-	}
-	if _, err := os.Stat(filepath.Join(srvpath.Dir(), "cache")); err == nil {
-		check("completion cache", true, filepath.Join(srvpath.Dir(), "cache"))
-	} else {
-		check("completion cache", true, "will be created on demand")
 	}
 	if daemon.Ping() {
 		check("daemon", true, "running")
