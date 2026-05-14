@@ -368,32 +368,41 @@ func Cmd(args []string, cfg *config.Config) error {
 		// present" — same semantics `wait_job` uses for "completed")
 		// are hidden so the dashboard stays focused on what's
 		// running; the full list lives in `srv jobs`.
-		jobs := allJobs
+		//
+		// Local renamed from `jobs` to `visibleJobs` so the slice
+		// element type below (`*jobs.Record`) can still be parsed --
+		// the previous `jobs` local shadowed the package import.
 		hidden := 0
-		kept := allJobs[:0]
+		// Don't write back into allJobs's backing array (e.g. the
+		// previous form `kept := allJobs[:0]`). That reuses the
+		// same array, so the first poll's filter overwrites the
+		// exited record at slot 0 with the next alive one; subsequent
+		// polls within the same snapTTL window then see no exited
+		// rows and emit "jobs 7" instead of "jobs 6 + 1 hidden" --
+		// which the user was seeing as the title flicker.
+		visibleJobs := make([]*jobs.Record, 0, len(allJobs))
 		for _, j := range allJobs {
 			if alive, ok := st.liveness[j.ID]; ok && !alive {
 				hidden++
 				continue
 			}
-			kept = append(kept, j)
+			visibleJobs = append(visibleJobs, j)
 		}
-		jobs = kept
 		// `/` filter narrows the JOBS list to rows whose ID or Cmd
 		// contains the query substring (case-insensitive). Applied
 		// here so st.rows / cursor bookkeeping below see the filtered
 		// view directly -- panelJobs then renders exactly what's
 		// selectable.
-		jobs = filterJobs(jobs, st.filterQuery)
+		visibleJobs = filterJobs(visibleJobs, st.filterQuery)
 		tunnelNames := sortedTunnelNames(fresh)
 		st.hiddenJobs = hidden
-		st.rows = buildSelectableRows(tunnelNames, jobs, st.snapMCP.RecentTools)
+		st.rows = buildSelectableRows(tunnelNames, visibleJobs, st.snapMCP.RecentTools)
 		clampCursor(st)
 
 		// Detail is now part of the dashboard's right column,
 		// updated live as the cursor moves. No fullscreen modal --
 		// rendering always goes through renderDashboard.
-		out := renderDashboard(fresh, jobs, tunnelNames, st)
+		out := renderDashboard(fresh, visibleJobs, tunnelNames, st)
 		if st.forceRedraw || out != st.lastFrame {
 			// Alt-screen redraw with per-line "clear to end-of-line"
 			// (\x1b[K before each \n): each row self-wipes any chars
@@ -440,7 +449,7 @@ func Cmd(args []string, cfg *config.Config) error {
 			}
 			continue
 		}
-		if !handleUIKey(b, st, jobs, tunnelNames, fresh, kr) {
+		if !handleUIKey(b, st, visibleJobs, tunnelNames, fresh, kr) {
 			return nil
 		}
 	}
@@ -1384,7 +1393,11 @@ func isSnapshotMode(st *uiState) bool {
 func buildSnapshotState(src Source) *uiState {
 	snap := src.Snapshot()
 	live := src.Liveness(snap.Jobs)
-	visible := snap.Jobs[:0]
+	// Fresh slice -- never `snap.Jobs[:0]`, which would write back into
+	// the Source's array and mutate state the renderer cycles over
+	// later. (Same slice-aliasing trap that caused the JOBS title to
+	// oscillate in interactive mode.)
+	visible := make([]*jobs.Record, 0, len(snap.Jobs))
 	hidden := 0
 	for _, j := range snap.Jobs {
 		if alive, ok := live[j.ID]; ok && !alive {
