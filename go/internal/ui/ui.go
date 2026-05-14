@@ -70,19 +70,13 @@ type uiState struct {
 	cpuHistory []float64
 	memHistory []float64
 	statsErr   string
-	// statsHost / statsProfile = the remote the most recent sample came
-	// from. Surfaced in the STATS header so the user can confirm at a
-	// glance that the data really is from the server they configured
-	// (the "shows local not server" complaint that motivated this).
-	statsHost    string
-	statsProfile string
-	statsCh      chan StatsSample // background sampler -> main loop
-	detailMode   bool             // showing the per-row detail panel
-	confirm      *uiConfirm       // non-nil = popup is up, awaiting Y/N
-	statusMsg    string           // transient line in the STATUS panel (kill result, etc.)
-	demoMode     bool             // mirror of src.IsDemo() for renderers; the authoritative value lives on src
-	compact      bool             // short terminal: drop nonessential rows so panels fit vertically
-	src          Source           // data + action facade; demoSource or liveSource
+	statsCh    chan StatsSample // background sampler -> main loop
+	detailMode bool             // showing the per-row detail panel
+	confirm    *uiConfirm       // non-nil = popup is up, awaiting Y/N
+	statusMsg  string           // transient line in the STATUS panel (kill result, etc.)
+	demoMode   bool             // mirror of src.IsDemo() for renderers; the authoritative value lives on src
+	compact    bool             // short terminal: drop nonessential rows so panels fit vertically
+	src        Source           // data + action facade; demoSource or liveSource
 	// snapshotOnly = true when this state was built for a one-shot
 	// `srv ui | less` style render. The renderers use it to suppress
 	// interactive affordances (cursors, key hints, focus tagging) and
@@ -1528,13 +1522,6 @@ func buildSnapshotState(src Source) *uiState {
 			st.cpuHistory = appendCapped(st.cpuHistory, s.CPULoad, statsHistoryLen)
 			st.memHistory = appendCapped(st.memHistory, s.MemPercent, statsHistoryLen)
 		}
-		// Fetch one real sample to inherit Host / Profile metadata
-		// (the backdated synthetics don't carry it). Lets the STATS
-		// title show "stats · 美国备用@backup.example.com" right
-		// from the first snapshot.
-		s := src.Stats()
-		st.statsHost = s.Host
-		st.statsProfile = s.Profile
 	} else {
 		s := src.Stats()
 		pushStatsSample(st, s)
@@ -2170,34 +2157,51 @@ const statsHistoryLen = 24
 // "don't hammer the remote with one ssh call every poll".
 const statsInterval = 3 * time.Second
 
-// dotChart renders `values` as a column of `height` rows × `width`
-// chars of dots. Each sample becomes one point: column position is
-// time (newest at the right edge), row position is magnitude
-// (highest value at the top, lowest at the bottom).
+// brailleChart renders `values` as a continuous Braille line chart of
+// `height` rows × `width` chars. Each Braille glyph is a 2×4 sub-cell
+// pixel grid (U+2800..U+28FF), so effective resolution is 2*width
+// pixel columns × 4*height pixel rows -- about 8× the density of a
+// one-glyph-per-cell scatter, which is what makes the trace look
+// continuous instead of like isolated dots.
 //
-// The newest sample uses `●` (filled) so the user's eye lands on the
-// current value; older samples use `·` (mid dot). Empty cells stay
-// blank.
+// Consecutive samples are joined with a Bresenham line so vertical
+// jumps fill in -- a sample at pixel (x0,y0) and the next at (x1,y1)
+// light up every pixel along the segment, not just the endpoints.
+// The previous renderer placed one '·' per sample, which left gaps
+// whenever consecutive values landed on different terminal rows; this
+// is the fix for the "两个点距离太远了看起来不连续" complaint.
+//
+// No marker distinguishes the newest sample (the prior version drew
+// a coloured '●' at the right edge; the user asked for those to go).
 //
 // vmin / vmax pin the y-axis. When vmax <= vmin, the function
 // auto-scales 0..max(values, 0.1) so a uniformly-zero history still
 // renders a flat baseline rather than dividing by zero.
-func dotChart(values []float64, height, width int, vmin, vmax float64) []string {
+func brailleChart(values []float64, height, width int, vmin, vmax float64) []string {
 	if height < 1 {
 		height = 1
 	}
 	if width < 1 {
 		width = 1
 	}
-	grid := make([][]rune, height)
-	for i := range grid {
-		grid[i] = make([]rune, width)
-		for j := range grid[i] {
-			grid[i][j] = ' '
+	pixelW := width * 2
+	pixelH := height * 4
+	// pixels[y][x] = is this 2×4 sub-cell pixel lit?
+	pixels := make([][]bool, pixelH)
+	for i := range pixels {
+		pixels[i] = make([]bool, pixelW)
+	}
+
+	blankRows := func() []string {
+		out := make([]string, height)
+		blank := strings.Repeat(" ", width)
+		for i := range out {
+			out[i] = blank
 		}
+		return out
 	}
 	if len(values) == 0 {
-		return runesToRows(grid)
+		return blankRows()
 	}
 	if vmax <= vmin {
 		vmin = 0
@@ -2209,14 +2213,32 @@ func dotChart(values []float64, height, width int, vmin, vmax float64) []string 
 		}
 	}
 	span := vmax - vmin
+
+	// If we have more samples than pixel columns, keep only the
+	// newest pixelW. Otherwise spread the samples evenly across the
+	// full chart width so the trace fills the panel from the first
+	// sample on -- packing them all into the rightmost N chars left
+	// the bulk of the panel empty, which is what made the trace look
+	// short and discontinuous to begin with. Newest is still anchored
+	// at pixelW-1, oldest at 0.
 	start := 0
-	if len(values) > width {
-		start = len(values) - width
+	if len(values) > pixelW {
+		start = len(values) - pixelW
 	}
 	points := values[start:]
-	colOffset := width - len(points) // right-align trailing-newest
-	for i, v := range points {
-		col := colOffset + i
+	pxOf := func(i int, v float64) (int, int) {
+		var px int
+		if len(points) == 1 {
+			px = pixelW - 1
+		} else {
+			px = i * (pixelW - 1) / (len(points) - 1)
+		}
+		if px < 0 {
+			px = 0
+		}
+		if px >= pixelW {
+			px = pixelW - 1
+		}
 		norm := (v - vmin) / span
 		if norm < 0 {
 			norm = 0
@@ -2224,35 +2246,115 @@ func dotChart(values []float64, height, width int, vmin, vmax float64) []string 
 		if norm > 1 {
 			norm = 1
 		}
-		row := int(math.Round((1 - norm) * float64(height-1)))
-		if row < 0 {
-			row = 0
+		py := int(math.Round((1 - norm) * float64(pixelH-1)))
+		if py < 0 {
+			py = 0
 		}
-		if row >= height {
-			row = height - 1
+		if py >= pixelH {
+			py = pixelH - 1
 		}
-		// `·` for history, `●` for the freshest point so the eye
-		// finds "now" without scanning. Doubled by a `·` in the
-		// previous column (when we have room) -- a single-pixel dot
-		// looks lonely.
-		marker := '·'
-		if i == len(points)-1 {
-			marker = '●'
-		}
-		grid[row][col] = marker
+		return px, py
 	}
-	return runesToRows(grid)
+
+	prevX, prevY := -1, -1
+	for i, v := range points {
+		x, y := pxOf(i, v)
+		if prevX < 0 {
+			pixels[y][x] = true
+		} else {
+			drawBresenham(pixels, prevX, prevY, x, y)
+		}
+		prevX, prevY = x, y
+	}
+
+	// Braille bit layout: dots numbered 1..8 map to a 2×4 grid.
+	//   1 4
+	//   2 5
+	//   3 6
+	//   7 8
+	// Dots 1-3 = bits 0-2 (left column, rows 0-2)
+	// Dot   7  = bit 6 (left column, row 3)
+	// Dots 4-6 = bits 3-5 (right column, rows 0-2)
+	// Dot   8  = bit 7 (right column, row 3)
+	bitFor := func(dx, dy int) rune {
+		switch {
+		case dx == 0 && dy < 3:
+			return rune(1 << dy)
+		case dx == 0 && dy == 3:
+			return rune(1 << 6)
+		case dx == 1 && dy < 3:
+			return rune(1 << (3 + dy))
+		case dx == 1 && dy == 3:
+			return rune(1 << 7)
+		}
+		return 0
+	}
+
+	rows := make([]string, height)
+	for cy := 0; cy < height; cy++ {
+		var rb strings.Builder
+		for cx := 0; cx < width; cx++ {
+			var mask rune
+			for dx := 0; dx < 2; dx++ {
+				for dy := 0; dy < 4; dy++ {
+					if pixels[cy*4+dy][cx*2+dx] {
+						mask |= bitFor(dx, dy)
+					}
+				}
+			}
+			if mask == 0 {
+				rb.WriteRune(' ')
+			} else {
+				rb.WriteRune(0x2800 + mask)
+			}
+		}
+		rows[cy] = rb.String()
+	}
+	return rows
 }
 
-func runesToRows(grid [][]rune) []string {
-	out := make([]string, len(grid))
-	for i, row := range grid {
-		out[i] = string(row)
+// drawBresenham lights every pixel along the line segment between
+// (x0,y0) and (x1,y1) in a boolean 2D grid. Standard integer
+// Bresenham -- the chart values themselves are floats but we plot
+// to integer pixel coordinates, so an int implementation is exact.
+func drawBresenham(pixels [][]bool, x0, y0, x1, y1 int) {
+	dx := x1 - x0
+	if dx < 0 {
+		dx = -dx
 	}
-	return out
+	dy := y1 - y0
+	if dy > 0 {
+		dy = -dy
+	}
+	sx := -1
+	if x0 < x1 {
+		sx = 1
+	}
+	sy := -1
+	if y0 < y1 {
+		sy = 1
+	}
+	err := dx + dy
+	for {
+		if y0 >= 0 && y0 < len(pixels) && x0 >= 0 && x0 < len(pixels[0]) {
+			pixels[y0][x0] = true
+		}
+		if x0 == x1 && y0 == y1 {
+			return
+		}
+		e2 := 2 * err
+		if e2 >= dy {
+			err += dy
+			x0 += sx
+		}
+		if e2 <= dx {
+			err += dx
+			y0 += sy
+		}
+	}
 }
 
-// panelStats draws CPU + MEM dot scatter charts that share the panel
+// panelStats draws CPU + MEM Braille line charts that share the panel
 // height equally. targetHeight is the total panel rows the caller
 // wants; <=0 picks a natural default for single-column / snapshot
 // layouts. Both charts auto-scale to their own observed range so a
@@ -2261,40 +2363,27 @@ func runesToRows(grid [][]rune) []string {
 //
 // Layout (targetHeight rows total, body split 50/50):
 //
-//	╭── stats · 美国备用 ───────╮
+//	╭── stats · local ──────────╮
 //	│ CPU 0.45  range 0.12..1.26│   <- 1 header row
-//	│     ·   ●                 │   <- chart rows (half the body)
-//	│  ·   ·                    │
-//	│ ·     ·                   │
+//	│         ⡠⠊⠉⠉⠒⠤⡀          │   <- Braille chart rows
+//	│      ⡠⠊⠉      ⠉⠒⠤        │
 //	│ MEM 34.6% range 32..47%   │   <- 1 header row
-//	│       ·  ·  ●             │   <- chart rows (other half)
-//	│  ·   ·                    │
-//	│ ·                         │
+//	│   ⡰⠉⠉⠒⠤⡀                 │   <- Braille chart rows
+//	│ ⡰⠊      ⠉⠒⠤⢄_____        │
 //	╰────────────────────────────╯
 //
-// Title shows the host the most recent sample came from so the user
-// can confirm the data is from the remote they expect. No y-axis
-// labels in the body -- they ate a 7-char gutter for marginal info
-// the header already covers.
+// Title is fixed at "stats · local" -- the panel always reflects the
+// host running `srv ui`, not any remote profile. Braille rendering
+// gives 2×4 sub-cell resolution, which makes consecutive samples
+// connect visually as a continuous line instead of looking like
+// isolated dots.
 func panelStats(sb *strings.Builder, st *uiState, targetHeight int) {
 	if targetHeight <= 0 {
 		targetHeight = 12
 	}
-	title := "stats"
-	if st != nil && st.statsHost != "" {
-		// Show "stats · <host>" so the user sees at-a-glance which
-		// machine is being sampled. Without this, the previous panel
-		// had no indicator that the values were remote, which was
-		// the source of the "shows local not server" confusion.
-		host := st.statsHost
-		if st.statsProfile != "" {
-			host = st.statsProfile + "@" + host
-		}
-		title = "stats · " + host
-	}
-	boxTop(sb, title)
+	boxTop(sb, "stats · local")
 	if st == nil || (len(st.cpuHistory) == 0 && len(st.memHistory) == 0) {
-		hint := ansi.Dim + "collecting remote samples..." + ansi.Reset
+		hint := ansi.Dim + "collecting local samples..." + ansi.Reset
 		if st != nil && st.statsErr != "" {
 			hint = ansi.Red + "stats unavailable: " + st.statsErr + ansi.Reset
 		}
@@ -2324,8 +2413,8 @@ func panelStats(sb *strings.Builder, st *uiState, targetHeight int) {
 
 	// Chart width = full panel content width. No left-gutter labels
 	// (the user asked for them to be dropped -- the header already
-	// carries vmax / vmin in its "range X..Y" fragment). dotChart
-	// right-aligns its dot strip inside this width, so the freshest
+	// carries vmax / vmin in its "range X..Y" fragment). brailleChart
+	// right-aligns its trace inside this width, so the freshest
 	// sample sits flush with the right border and older history
 	// drifts leftward as the ring fills.
 	chartW := dashboardContentWidth
@@ -2338,14 +2427,14 @@ func panelStats(sb *strings.Builder, st *uiState, targetHeight int) {
 		titleAnsi: ansi.Cyan + ansi.Bold,
 		latestFmt: "%4.2f",
 		unit:      "load avg",
-		dotAnsi:   ansi.Cyan,
+		lineAnsi:  ansi.Cyan,
 	})
 	emitChart(sb, st.memHistory, memH, chartW, statsLabel{
 		title:     "MEM",
 		titleAnsi: ansi.Magenta + ansi.Bold,
 		latestFmt: "%4.1f%%",
 		unit:      "use%",
-		dotAnsi:   ansi.Magenta,
+		lineAnsi:  ansi.Magenta,
 	})
 	boxBottom(sb)
 }
@@ -2357,7 +2446,7 @@ type statsLabel struct {
 	titleAnsi string
 	latestFmt string // "%4.2f" / "%4.1f%%"
 	unit      string // "load avg" / "use%"
-	dotAnsi   string
+	lineAnsi  string // colour for the whole trace; no separate marker
 }
 
 // emitChart writes one header row + `height` chart rows. Auto-scales
@@ -2391,9 +2480,9 @@ func emitChart(sb *strings.Builder, values []float64, height, chartW int, lbl st
 		lbl.unit, ansi.Reset)
 	boxLine(sb, header)
 
-	rows := dotChart(values, height, chartW, vmin, vmax)
+	rows := brailleChart(values, height, chartW, vmin, vmax)
 	for _, r := range rows {
-		boxLine(sb, lbl.dotAnsi+r+ansi.Reset)
+		boxLine(sb, lbl.lineAnsi+r+ansi.Reset)
 	}
 }
 
@@ -2425,12 +2514,6 @@ func pushStatsSample(st *uiState, s StatsSample) {
 		// rather than skipping the slot silently.
 	} else {
 		st.statsErr = ""
-	}
-	if s.Host != "" {
-		st.statsHost = s.Host
-	}
-	if s.Profile != "" {
-		st.statsProfile = s.Profile
 	}
 	st.cpuHistory = appendCapped(st.cpuHistory, s.CPULoad, statsHistoryLen)
 	st.memHistory = appendCapped(st.memHistory, s.MemPercent, statsHistoryLen)
