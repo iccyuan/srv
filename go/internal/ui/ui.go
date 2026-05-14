@@ -2101,8 +2101,15 @@ func kvPair(leftLabel, leftValue, rightLabel, rightValue string) string {
 
 func panelHeader(sb *strings.Builder, st *uiState) {
 	boxTop(sb, "srv")
+	// Default label for the interactive case. Snapshot (st == nil)
+	// is shown below as "snapshot mode (no tty)", so the upper-right
+	// "live terminal view" tag would contradict it -- swap to a
+	// neutral label in that case.
 	mode := ansi.Dim + "live terminal view" + ansi.Reset
-	if st != nil && st.demoMode {
+	switch {
+	case st == nil:
+		mode = ansi.Dim + "one-shot snapshot" + ansi.Reset
+	case st.demoMode:
 		mode = ansi.Yellow + ansi.Bold + "DEMO" + ansi.Reset + ansi.Dim + " simulated data" + ansi.Reset
 	}
 	boxLine(sb, fitInlineParts(
@@ -2421,6 +2428,14 @@ func fetchDaemonStatusForUI() *daemon.Response {
 
 func panelGroups(sb *strings.Builder, cfg *config.Config) {
 	if len(cfg.Groups) == 0 {
+		// Empty-state card so `srv ui` keeps a stable panel set
+		// regardless of what's configured -- same reasoning as
+		// panelTunnels above. The hint points at the command that
+		// would populate this view.
+		boxTop(sb, "groups 0")
+		boxLine(sb, ansi.Dim+"no profile groups  (try: srv group set <name> <profile...>)"+ansi.Reset)
+		boxBottom(sb)
+		fmt.Fprintln(sb)
 		return
 	}
 	boxTop(sb, fmt.Sprintf("groups %d", len(cfg.Groups)))
@@ -2441,10 +2456,21 @@ func panelGroups(sb *strings.Builder, cfg *config.Config) {
 }
 
 func panelTunnels(sb *strings.Builder, cfg *config.Config, names []string, st *uiState) {
+	focused := st != nil && st.focusPane == "tunnel"
 	if len(names) == 0 {
+		// Render an empty-state card instead of vanishing. Without
+		// this, `srv ui` and `srv ui demo` produce dashboards with a
+		// different panel count -- a user with no saved tunnels
+		// sees JOBS pushed up where TUNNELS would be, which doesn't
+		// match any screenshot or demo. Keeping the box visible
+		// also gives the user a discoverability hint (`srv tunnel
+		// add ...`) right where they'd look for tunnels.
+		boxTopWithHint(sb, "tunnels 0", "space toggle  x remove", focused)
+		boxLineFocused(sb, ansi.Dim+"no saved tunnels  (try: srv tunnel add <name> <port>)"+ansi.Reset, focused)
+		boxBottomFocused(sb, focused)
+		fmt.Fprintln(sb)
 		return
 	}
-	focused := st != nil && st.focusPane == "tunnel"
 	var active map[string]daemon.TunnelInfo
 	var errs map[string]string
 	if st != nil {
@@ -2531,10 +2557,17 @@ func panelJobs(sb *strings.Builder, jobs []*jobs.Record, st *uiState) {
 	if st != nil {
 		hidden = st.hiddenJobs
 	}
+	focused := st != nil && st.focusPane == "job"
 	if len(jobs) == 0 && hidden == 0 && (st == nil || st.filterQuery == "") {
+		// Render an empty-state card so the panel layout stays
+		// stable regardless of detached-job state. The hint mirrors
+		// what `srv jobs` shows when nothing is running.
+		boxTopWithHint(sb, "jobs 0", "k kill", focused)
+		boxLineFocused(sb, ansi.Dim+"nothing running  (try: srv -d <cmd> to detach one)"+ansi.Reset, focused)
+		boxBottomFocused(sb, focused)
+		fmt.Fprintln(sb)
 		return
 	}
-	focused := st != nil && st.focusPane == "job"
 	title := fmt.Sprintf("jobs %d", len(jobs))
 	if st != nil && len(jobs) > 0 {
 		title += fmt.Sprintf("  %d/%d", st.jobCursor+1, len(jobs))
