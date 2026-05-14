@@ -229,9 +229,14 @@ func (t *Transport) sendUnreliable(kind FrameKind, body []byte) error {
 	}
 	ack := t.highestPeer
 	peer := t.peerAddr
-	t.mu.Unlock()
 	f := &Frame{Seq: 0, Ack: ack, Kind: kind, Body: body}
+	// Seal MUST happen under t.mu: Codec.Seal increments the per-
+	// direction nonce counter, and Send() also seals under t.mu --
+	// without sharing the same lock, the two paths race on
+	// sendCodec.counter and trip `go test -race`. UDP write happens
+	// outside the lock to keep blocked sockets from holding it.
 	payload, err := t.sendCodec.Seal(f)
+	t.mu.Unlock()
 	if err != nil {
 		return err
 	}
