@@ -268,6 +268,7 @@ func TestDemoActionsArmAndAcknowledgeWithoutRealSideEffects(t *testing.T) {
 		focusPane:        "tunnel",
 		tunnelCursor:     0,
 		demoMode:         true,
+		src:              NewDemoSource(nil),
 		snapTunnelActive: map[string]daemon.TunnelInfo{},
 	}
 	clampCursor(st)

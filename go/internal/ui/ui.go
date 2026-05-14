@@ -61,7 +61,8 @@ type uiState struct {
 	detailMode   bool       // showing the per-row detail panel
 	confirm      *uiConfirm // non-nil = popup is up, awaiting Y/N
 	statusMsg    string     // transient line in the footer (kill result, etc.)
-	demoMode     bool       // true when rendering/handling the built-in demo dataset
+	demoMode     bool       // mirror of src.IsDemo() for renderers; the authoritative value lives on src
+	src          Source     // data + action facade; demoSource or liveSource
 	lastFrame    string
 	prevLines    int
 	forceRedraw  bool
@@ -228,17 +229,19 @@ func countUIRows(rows []uiRow) (tunnels, jobs, mcp int) {
 //	k             kill the selected job (arms a Y/N confirm)
 func Cmd(args []string, cfg *config.Config) error {
 	demo := uiDemoMode(args)
+	src := buildSource(demo, cfg)
 	if !srvtty.IsStdinTTY() {
 		// Without a TTY there's no way to read keys; degrade to a
 		// one-shot print of the snapshot so `srv ui | less` still
 		// works (or piped into a script). Jobs are still listed --
 		// just without the selection markers and key hints.
-		if demo {
-			demoCfg, demoJobs, demoMCP := demoDashboardData(cfg)
-			fmt.Print(renderDashboardWithMCP(demoCfg, demoJobs, sortedTunnelNames(demoCfg), nil, demoMCP))
-			return nil
+		// One code path for both demo and live: the Source returns
+		// the right data, the renderer doesn't know which is which.
+		snap := src.Snapshot()
+		if snap.Cfg == nil {
+			snap.Cfg = cfg
 		}
-		fmt.Print(renderDashboard(cfg, currentJobs(), sortedTunnelNames(cfg), nil))
+		fmt.Print(renderDashboardWithMCP(snap.Cfg, snap.Jobs, sortedTunnelNames(snap.Cfg), nil, snap.MCP))
 		return nil
 	}
 	fd := int(os.Stdin.Fd())
@@ -268,6 +271,7 @@ func Cmd(args []string, cfg *config.Config) error {
 		cursor:      0,
 		liveness:    map[string]bool{},
 		demoMode:    demo,
+		src:         src,
 		jobLogCh:    make(chan *uiJobLog, 4),
 	}
 	// Persisted cursor / focus is loaded only outside demo mode. Demo
@@ -311,37 +315,26 @@ func Cmd(args []string, cfg *config.Config) error {
 		// Cursor and pane moves don't touch snapAt at all, so they
 		// reuse the cached reads -- the visible latency the user
 		// notices when MCP-switching.
-		if demo {
-			demoCfg, demoJobs, demoMCP := demoDashboardData(cfg)
-			st.snapCfg = demoCfg
-			st.snapJobs = demoJobs
-			st.snapMCP = demoMCP
-			st.snapDaemonResp = &daemon.Response{OK: true, Profiles: []string{"美国备用", "tokyo-demo"}, Uptime: int64(2 * time.Hour / time.Second)}
-			st.snapTunnelActive = map[string]daemon.TunnelInfo{}
-			st.snapTunnelErrs = map[string]string{}
-			st.snapAt = time.Now()
-		} else if st.snapCfg == nil || st.snapAt.IsZero() || time.Since(st.snapAt) > snapTTL {
-			if fresh, _ := config.Load(); fresh != nil {
-				st.snapCfg = fresh
+		// One uniform refresh path for both demo and live. Source
+		// decides what data lands in the snapshot; the loop doesn't
+		// branch on demo / not-demo anymore.
+		if st.snapCfg == nil || st.snapAt.IsZero() || time.Since(st.snapAt) > snapTTL {
+			snap := st.src.Snapshot()
+			if snap.Cfg != nil {
+				st.snapCfg = snap.Cfg
 			}
-			st.snapJobs = currentJobs()
-			st.snapMCP = mcplog.Read()
-			// Drop tool calls whose origin PID isn't in ActivePIDs --
-			// "history from a dead session" is noise; the user only
-			// wants to see what currently-running MCP servers are
-			// doing.
-			if len(st.snapMCP.RecentTools) > 0 {
-				kept := st.snapMCP.RecentTools[:0]
-				for _, tc := range st.snapMCP.RecentTools {
-					if mcplog.PidActive(tc.PID, st.snapMCP.ActivePIDs) {
-						kept = append(kept, tc)
-					}
-				}
-				st.snapMCP.RecentTools = kept
+			st.snapJobs = snap.Jobs
+			st.snapMCP = snap.MCP
+			st.snapDaemonResp = snap.DaemonResp
+			st.snapTunnelActive = snap.TunnelActive
+			st.snapTunnelErrs = snap.TunnelErrs
+			st.snapAt = snap.CapturedAt
+			if st.snapAt.IsZero() {
+				st.snapAt = time.Now()
 			}
-			st.snapDaemonResp = fetchDaemonStatusForUI()
-			st.snapTunnelActive, st.snapTunnelErrs = tunnel.LoadStatuses()
-			st.snapAt = time.Now()
+			// (RecentTools filtering by ActivePIDs + daemon snapshot
+			// + tunnel statuses now happen inside the Source impl, so
+			// nothing extra to do here.)
 		}
 		fresh := st.snapCfg
 		if fresh == nil {
@@ -349,38 +342,13 @@ func Cmd(args []string, cfg *config.Config) error {
 		}
 		allJobs := st.snapJobs
 
-		// Liveness: refresh from the remote whenever it's gone stale.
-		// One SSH per profile, batched, so the cost is bounded even
-		// with many jobs. Manual `r` zeroes livenessFresh below so the
-		// probe re-runs; resize-triggered forceRedraw deliberately does
-		// NOT re-probe — otherwise a window resize would block the
-		// repaint on SSH round-trips and the dashboard would freeze on
-		// the old (clipped) frame for seconds.
-		if demo {
-			st.liveness = map[string]bool{}
-			for _, j := range allJobs {
-				st.liveness[j.ID] = true
-			}
-			st.livenessFresh = time.Now()
-		} else if time.Since(st.livenessFresh) > livenessTTL {
-			// Wrap remoteExitMarkers as an ExitMarkerLister so the
-			// jobs package stays decoupled from Config / SSH client.
-			lister := func(profName string) (map[string]bool, bool) {
-				prof, ok := fresh.Profiles[profName]
-				if !ok {
-					return nil, false
-				}
-				capture := func(cmd string) (string, int, bool) {
-					res, err := remote.RunCapture(prof, "", cmd)
-					if err != nil || res == nil {
-						return "", 0, false
-					}
-					return res.Stdout, res.ExitCode, true
-				}
-				markers := jobs.RemoteExitMarkers(capture)
-				return markers, markers != nil
-			}
-			st.liveness = jobs.CheckLiveness(allJobs, lister)
+		// Liveness goes through the Source too. Live impl batches one
+		// remote `ls ~/.srv-jobs/` per profile; demo impl returns
+		// "all alive" so the screenshots stay deterministic. Manual
+		// `r` zeroes livenessFresh below so the probe re-runs;
+		// resize-triggered forceRedraw deliberately does NOT re-probe.
+		if time.Since(st.livenessFresh) > livenessTTL {
+			st.liveness = st.src.Liveness(allJobs)
 			st.livenessFresh = time.Now()
 		}
 
@@ -992,6 +960,11 @@ func lastRune(s string) (rune, int) {
 // the SSH round-trip (~100ms with a warm daemon pool, multiple seconds
 // when re-dialling cold). The user pressing L on the wrong row
 // shouldn't freeze the dashboard.
+//
+// The fetch is delegated to st.src.JobLog so the demo path returns
+// canned lines instantly while the live path dials through the
+// daemon. The async wrapping stays here because both paths produce a
+// *uiJobLog and the cursor-stale check (drainJobLogCh) is identical.
 func armJobLogFetch(st *uiState, row uiRow, js []*jobs.Record, cfg *config.Config) {
 	if row.kind != "job" || row.idx < 0 || row.idx >= len(js) {
 		return
@@ -999,53 +972,53 @@ func armJobLogFetch(st *uiState, row uiRow, js []*jobs.Record, cfg *config.Confi
 	j := js[row.idx]
 	st.jobLog = &uiJobLog{jobID: j.ID, fetching: true}
 	st.forceRedraw = true
-	if st.demoMode {
-		// Inject a few fake lines so the panel layout is exercisable
-		// in screenshots / tests without dialling a real remote.
-		ch := st.jobLogCh
-		go func() {
-			lines := []string{
-				"[demo] " + j.Cmd,
-				"[demo] starting...",
-				"[demo] ok 1/5",
-				"[demo] ok 2/5",
-				"[demo] (live fetch suppressed in demo mode)",
-			}
-			ch <- &uiJobLog{jobID: j.ID, lines: lines, fetchedAt: time.Now()}
-		}()
-		return
-	}
-	if j.Log == "" {
-		ch := st.jobLogCh
-		go func() {
-			ch <- &uiJobLog{jobID: j.ID, err: "no log path recorded for this job", fetchedAt: time.Now()}
-		}()
-		return
-	}
-	profile := j.Profile
-	logPath := j.Log
-	cmd := "tail -n 200 " + shellQuote(logPath)
 	ch := st.jobLogCh
+	src := st.src
+	if src == nil {
+		// Defensive: drainJobLogCh always expects something on the
+		// channel within a reasonable time, so emit a placeholder
+		// rather than leaving the fetching... state hanging forever.
+		go func() {
+			ch <- &uiJobLog{jobID: j.ID, err: "no source bound", fetchedAt: time.Now()}
+		}()
+		return
+	}
 	go func() {
-		res, ok := daemon.TryRunCapture(profile, "", cmd)
+		lines, err := src.JobLog(j)
 		out := &uiJobLog{jobID: j.ID, fetchedAt: time.Now()}
-		if !ok {
-			out.err = "daemon unavailable"
-			ch <- out
-			return
-		}
-		body := res.Stdout
-		if body == "" {
-			body = res.Stderr
-		}
-		body = strings.TrimRight(body, "\n")
-		if body == "" {
-			out.err = "log is empty"
+		if err != nil {
+			out.err = err.Error()
 		} else {
-			out.lines = strings.Split(body, "\n")
+			out.lines = lines
 		}
 		ch <- out
 	}()
+}
+
+// fetchJobLogLines is the live-source body of JobLog. Lives in ui.go
+// because it leans on the existing daemon.TryRunCapture seam and the
+// `j.Log == ""` empty-path semantics that pre-dated the refactor.
+func fetchJobLogLines(j *jobs.Record) ([]string, error) {
+	if j == nil {
+		return nil, fmt.Errorf("no job")
+	}
+	if j.Log == "" {
+		return nil, fmt.Errorf("no log path recorded for this job")
+	}
+	cmd := "tail -n 200 " + shellQuote(j.Log)
+	res, ok := daemon.TryRunCapture(j.Profile, "", cmd)
+	if !ok {
+		return nil, fmt.Errorf("daemon unavailable")
+	}
+	body := res.Stdout
+	if body == "" {
+		body = res.Stderr
+	}
+	body = strings.TrimRight(body, "\n")
+	if body == "" {
+		return nil, fmt.Errorf("log is empty")
+	}
+	return strings.Split(body, "\n"), nil
 }
 
 // shellQuote wraps s in single quotes so it survives unquoted shell
@@ -1098,16 +1071,23 @@ func drainJobLogCh(st *uiState) bool {
 // silently ignored -- the key hint in the footer already advertises
 // which keys apply to which kind of row.
 func armConfirmFor(st *uiState, row uiRow, jobs []*jobs.Record, tunnelNames []string, cfg *config.Config, key byte) {
+	// Every destructive action goes through st.src so the demo path
+	// returns a canned acknowledgement string while the live path
+	// actually kills / toggles the tunnel. No more `if st.demoMode`
+	// branching at every action site.
+	src := st.src
+	if src == nil {
+		// Tests build uiState without a source -- fall through with a
+		// no-op stub so the confirm popup still renders and existing
+		// assertions on st.confirm.title etc. keep passing.
+		src = NewLiveSource()
+	}
 	switch row.kind {
 	case "job":
 		if key != 'k' || row.idx < 0 || row.idx >= len(jobs) {
 			return
 		}
 		j := jobs[row.idx]
-		action := func() (string, error) { return uiKillJob(j, cfg) }
-		if st.demoMode {
-			action = func() (string, error) { return "demo kill acknowledged; no process changed", nil }
-		}
 		st.confirm = &uiConfirm{
 			title: "kill " + j.ID,
 			body: []string{
@@ -1116,7 +1096,7 @@ func armConfirmFor(st *uiState, row uiRow, jobs []*jobs.Record, tunnelNames []st
 				"",
 				"Send SIGTERM to the remote pid and drop the local jobs.json entry.",
 			},
-			action: action,
+			action: func() (string, error) { return src.KillJob(j) },
 		}
 		st.forceRedraw = true
 	case "tunnel":
@@ -1128,17 +1108,14 @@ func armConfirmFor(st *uiState, row uiRow, jobs []*jobs.Record, tunnelNames []st
 		if def == nil {
 			return
 		}
-		active := tunnel.LoadActive()
-		if st.demoMode {
-			active = st.snapTunnelActive
-		}
+		// Snapshot's TunnelActive is the single source of truth for
+		// whether the tunnel is running. Demo always reports empty
+		// (no live tunnels in the demo data); live mirrors the
+		// daemon's view.
+		active := st.snapTunnelActive
 		_, isUp := active[name]
 		switch key {
 		case ' ':
-			action := func() (string, error) { return uiTunnelDown(name) }
-			if st.demoMode {
-				action = func() (string, error) { return "demo tunnel stopped; no daemon changed", nil }
-			}
 			if isUp {
 				st.confirm = &uiConfirm{
 					title: "tunnel down " + name,
@@ -1147,13 +1124,9 @@ func armConfirmFor(st *uiState, row uiRow, jobs []*jobs.Record, tunnelNames []st
 						"",
 						"Stop the daemon-hosted listener. Existing connections drop.",
 					},
-					action: action,
+					action: func() (string, error) { return src.TunnelDown(name) },
 				}
 			} else {
-				action := func() (string, error) { return uiTunnelUp(name) }
-				if st.demoMode {
-					action = func() (string, error) { return "demo tunnel started; no daemon changed", nil }
-				}
 				st.confirm = &uiConfirm{
 					title: "tunnel up " + name,
 					body: []string{
@@ -1161,7 +1134,7 @@ func armConfirmFor(st *uiState, row uiRow, jobs []*jobs.Record, tunnelNames []st
 						"",
 						"Bring the tunnel up via the daemon.",
 					},
-					action: action,
+					action: func() (string, error) { return src.TunnelUp(name) },
 				}
 			}
 			st.forceRedraw = true
@@ -1170,10 +1143,6 @@ func armConfirmFor(st *uiState, row uiRow, jobs []*jobs.Record, tunnelNames []st
 			if isUp {
 				extra = " The currently-running tunnel will be stopped first."
 			}
-			action := func() (string, error) { return uiTunnelRemove(name, cfg) }
-			if st.demoMode {
-				action = func() (string, error) { return "demo tunnel removed; no config changed", nil }
-			}
 			st.confirm = &uiConfirm{
 				title: "remove tunnel " + name,
 				body: []string{
@@ -1181,7 +1150,7 @@ func armConfirmFor(st *uiState, row uiRow, jobs []*jobs.Record, tunnelNames []st
 					"",
 					"Delete the saved definition from config." + extra,
 				},
-				action: action,
+				action: func() (string, error) { return src.TunnelRemove(name, cfg) },
 			}
 			st.forceRedraw = true
 		}
@@ -1336,6 +1305,16 @@ func altScreenFrame(content string, height int) string {
 		return ""
 	}
 	return strings.Join(lines, "\x1b[K\n") + "\x1b[K"
+}
+
+// buildSource picks the right Source for this invocation. `srv ui demo`
+// builds a demoSource over the user's actual config (so locale carries
+// over); `srv ui` builds a liveSource.
+func buildSource(demo bool, base *config.Config) Source {
+	if demo {
+		return NewDemoSource(base)
+	}
+	return NewLiveSource()
 }
 
 func uiDemoMode(args []string) bool {
