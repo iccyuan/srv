@@ -373,12 +373,173 @@ func TestDemoHeaderAndStatusPanel(t *testing.T) {
 		if !strings.Contains(status.String(), "STATUS") || !strings.Contains(status.String(), "ok") {
 			t.Fatalf("status panel missing message: %q", status.String())
 		}
-		var footer strings.Builder
-		panelFooter(&footer, st)
-		if strings.Contains(footer.String(), "ok") {
-			t.Fatalf("footer should not contain transient status: %q", footer.String())
+	})
+}
+
+func TestSnapshotDemoUsesDashboardLayout(t *testing.T) {
+	cfg, js, mcp := demoDashboardData(nil)
+	tunnelNames := sortedTunnelNames(cfg)
+	st := &uiState{
+		snapshotOnly: true,
+		demoMode:     true,
+		rows:         buildSelectableRows(tunnelNames, js, nil),
+		focusPane:    "job",
+		jobCursor:    0,
+		snapMCP:      mcp,
+	}
+	clampCursor(st)
+
+	oldH := dashboardHeight
+	dashboardHeight = 40
+	defer func() { dashboardHeight = oldH }()
+	withDashboardWidth(120, func() {
+		out := renderDashboardWithMCP(cfg, js, tunnelNames, st, mcp)
+		if !strings.Contains(out, "DETAIL") {
+			t.Fatalf("snapshot demo should use the same dashboard detail layout: %q", out)
+		}
+		if strings.Contains(out, "FOCUS JOB DEMO") {
+			t.Fatalf("demo mode should not change overview layout/title: %q", out)
 		}
 	})
+}
+
+func TestDetailBottomAlignsWithLeftStackBottom(t *testing.T) {
+	cfg, js, mcp := demoDashboardData(nil)
+	tunnelNames := sortedTunnelNames(cfg)
+	st := &uiState{
+		rows:      buildSelectableRows(tunnelNames, js, nil),
+		focusPane: "job",
+		jobCursor: 0,
+		snapMCP:   mcp,
+	}
+	clampCursor(st)
+
+	oldH := dashboardHeight
+	dashboardHeight = 40
+	defer func() { dashboardHeight = oldH }()
+	withDashboardWidth(120, func() {
+		out := renderDashboardWithMCP(cfg, js, tunnelNames, st, mcp)
+		if strings.Contains(out, "KEYS") {
+			t.Fatalf("dashboard should not render the removed KEYS panel: %q", out)
+		}
+		lines := splitDashboardLines(out)
+		groupsTop := -1
+		for i, line := range lines {
+			if strings.Contains(line, "GROUPS ") {
+				groupsTop = i
+				break
+			}
+		}
+		if groupsTop < 0 {
+			t.Fatalf("rendered dashboard missing GROUPS panel: %q", out)
+		}
+		for i := groupsTop - 1; i >= 0; i-- {
+			if strings.TrimSpace(lines[i]) == "" {
+				continue
+			}
+			if strings.Count(lines[i], "╰") < 2 {
+				t.Fatalf("DETAIL bottom should share a row with left stack bottom: %q\n%s", lines[i], out)
+			}
+			return
+		}
+		t.Fatalf("rendered dashboard missing bottom line before GROUPS: %q", out)
+	})
+}
+
+func TestDashboardAdaptsListRowsToHeight(t *testing.T) {
+	cfg, js, mcp := demoDashboardData(nil)
+	for i := 0; i < 6; i++ {
+		name := "extra-tunnel-" + string(rune('a'+i))
+		cfg.Tunnels[name] = &config.TunnelDef{Type: "local", Spec: "1000:localhost:1000"}
+	}
+	for i := 0; i < 8; i++ {
+		js = append(js, &jobs.Record{
+			ID:      "extra-job-" + string(rune('a'+i)),
+			Profile: "prod",
+			Pid:     5000 + i,
+			Started: "2026-05-13T10:00:00",
+			Cmd:     "sleep 100",
+		})
+	}
+	st := &uiState{
+		rows:      buildSelectableRows(sortedTunnelNames(cfg), js, nil),
+		focusPane: "job",
+		jobCursor: len(js) - 1,
+		snapMCP:   mcp,
+	}
+	clampCursor(st)
+
+	oldH := dashboardHeight
+	dashboardHeight = 28
+	defer func() { dashboardHeight = oldH }()
+	withDashboardWidth(120, func() {
+		out := renderDashboardWithMCP(cfg, js, sortedTunnelNames(cfg), st, mcp)
+		if got := len(splitDashboardLines(out)); got > dashboardHeight {
+			t.Fatalf("dashboard should fit current height, got lines=%d height=%d\n%s", got, dashboardHeight, out)
+		}
+		if st.jobRows >= dashboardListRows && st.tunnelRows >= dashboardListRows {
+			t.Fatalf("expected adaptive list rows to shrink, got jobs=%d tunnels=%d\n%s", st.jobRows, st.tunnelRows, out)
+		}
+		if !strings.Contains(strings.ToLower(out), "showing") {
+			t.Fatalf("adapted dashboard should show visible range hints: %q", out)
+		}
+	})
+}
+
+func TestDashboardListRowsShrinkToOneOnShortScreens(t *testing.T) {
+	cfg, js, mcp := demoDashboardData(nil)
+	for i := 0; i < 8; i++ {
+		name := "tiny-tunnel-" + string(rune('a'+i))
+		cfg.Tunnels[name] = &config.TunnelDef{Type: "local", Spec: "1000:localhost:1000"}
+		js = append(js, &jobs.Record{
+			ID:      "tiny-job-" + string(rune('a'+i)),
+			Profile: "prod",
+			Pid:     6000 + i,
+			Started: "2026-05-13T10:00:00",
+			Cmd:     "sleep 100",
+		})
+	}
+	st := &uiState{
+		rows:      buildSelectableRows(sortedTunnelNames(cfg), js, nil),
+		focusPane: "job",
+		jobCursor: len(js) - 1,
+		snapMCP:   mcp,
+	}
+	clampCursor(st)
+
+	oldH := dashboardHeight
+	dashboardHeight = 18
+	defer func() { dashboardHeight = oldH }()
+	withDashboardWidth(120, func() {
+		out := renderDashboardWithMCP(cfg, js, sortedTunnelNames(cfg), st, mcp)
+		if st.jobRows < 1 || st.tunnelRows < 1 {
+			t.Fatalf("list rows should never shrink below 1, got jobs=%d tunnels=%d\n%s", st.jobRows, st.tunnelRows, out)
+		}
+		if st.jobRows != 1 || st.tunnelRows != 1 {
+			t.Fatalf("short screen should shrink both lists to 1 row, got jobs=%d tunnels=%d\n%s", st.jobRows, st.tunnelRows, out)
+		}
+	})
+}
+
+func TestProfilesDoNotRenderAgentForwardingMarker(t *testing.T) {
+	cfg, _, _ := demoDashboardData(nil)
+	withDashboardWidth(96, func() {
+		var sb strings.Builder
+		panelProfiles(&sb, cfg, &uiState{})
+		if strings.Contains(sb.String(), "↺") {
+			t.Fatalf("profiles panel should not render agent-forwarding marker: %q", sb.String())
+		}
+	})
+}
+
+func TestAltScreenPatchOnlyWritesChangedLines(t *testing.T) {
+	patch := altScreenPatch("a\nb\nc", "a\nB\nc", 10)
+	if !strings.Contains(patch, "\x1b[2;1HB\x1b[K") {
+		t.Fatalf("patch should update changed row only: %q", patch)
+	}
+	if strings.Contains(patch, "\x1b[1;1H") || strings.Contains(patch, "\x1b[3;1H") {
+		t.Fatalf("patch should not rewrite unchanged rows: %q", patch)
+	}
 }
 
 func TestConfirmColorReflectsAction(t *testing.T) {

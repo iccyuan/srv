@@ -70,13 +70,19 @@ type uiState struct {
 	cpuHistory []float64
 	memHistory []float64
 	statsErr   string
-	statsCh    chan StatsSample // background sampler -> main loop
-	detailMode bool             // showing the per-row detail panel
-	confirm    *uiConfirm       // non-nil = popup is up, awaiting Y/N
-	statusMsg  string           // transient line in the STATUS panel (kill result, etc.)
-	demoMode   bool             // mirror of src.IsDemo() for renderers; the authoritative value lives on src
-	compact    bool             // short terminal: drop nonessential rows so panels fit vertically
-	src        Source           // data + action facade; demoSource or liveSource
+	// statsHost / statsProfile = the remote the most recent sample came
+	// from. Surfaced in the STATS header so the user can confirm at a
+	// glance that the data really is from the server they configured
+	// (the "shows local not server" complaint that motivated this).
+	statsHost    string
+	statsProfile string
+	statsCh      chan StatsSample // background sampler -> main loop
+	detailMode   bool             // showing the per-row detail panel
+	confirm      *uiConfirm       // non-nil = popup is up, awaiting Y/N
+	statusMsg    string           // transient line in the STATUS panel (kill result, etc.)
+	demoMode     bool             // mirror of src.IsDemo() for renderers; the authoritative value lives on src
+	compact      bool             // short terminal: drop nonessential rows so panels fit vertically
+	src          Source           // data + action facade; demoSource or liveSource
 	// snapshotOnly = true when this state was built for a one-shot
 	// `srv ui | less` style render. The renderers use it to suppress
 	// interactive affordances (cursors, key hints, focus tagging) and
@@ -248,9 +254,9 @@ func countUIRows(rows []uiRow) (tunnels, jobs, mcp int) {
 //	↑ / ↓         move cursor within the focused window
 //	tab / h / l   switch between windows
 //	k             kill the selected job (arms a Y/N confirm)
-func Cmd(args []string, cfg *config.Config) error {
+func Cmd(args []string, cfg *config.Config, profileOverride string) error {
 	demo := uiDemoMode(args)
-	src := buildSource(demo, cfg)
+	src := buildSource(demo, cfg, profileOverride)
 	if !srvtty.IsStdinTTY() {
 		// Without a TTY there's no way to read keys; degrade to a
 		// one-shot print so `srv ui | less` still works. We build a
@@ -1451,12 +1457,14 @@ func altScreenPatch(prev, next string, height int) string {
 
 // buildSource picks the right Source for this invocation. `srv ui demo`
 // builds a demoSource over the user's actual config (so locale carries
-// over); `srv ui` builds a liveSource.
-func buildSource(demo bool, base *config.Config) Source {
+// over); `srv ui` builds a liveSource that honours -P. The override
+// flows through Source.Stats() so the per-tick CPU/MEM sample targets
+// the same host the dashboard's other panels do.
+func buildSource(demo bool, base *config.Config, profileOverride string) Source {
 	if demo {
 		return NewDemoSource(base)
 	}
-	return NewLiveSource()
+	return NewLiveSourceForProfile(profileOverride)
 }
 
 // isSnapshotMode reports whether we're rendering a one-shot snapshot
@@ -1520,6 +1528,13 @@ func buildSnapshotState(src Source) *uiState {
 			st.cpuHistory = appendCapped(st.cpuHistory, s.CPULoad, statsHistoryLen)
 			st.memHistory = appendCapped(st.memHistory, s.MemPercent, statsHistoryLen)
 		}
+		// Fetch one real sample to inherit Host / Profile metadata
+		// (the backdated synthetics don't carry it). Lets the STATS
+		// title show "stats · 美国备用@backup.example.com" right
+		// from the first snapshot.
+		s := src.Stats()
+		st.statsHost = s.Host
+		st.statsProfile = s.Profile
 	} else {
 		s := src.Stats()
 		pushStatsSample(st, s)
@@ -2246,24 +2261,38 @@ func runesToRows(grid [][]rune) []string {
 //
 // Layout (targetHeight rows total, body split 50/50):
 //
-//	╭── stats ──────────────────╮
+//	╭── stats · 美国备用 ───────╮
 //	│ CPU 0.45  range 0.12..1.26│   <- 1 header row
-//	│ 1.26┊     ·   ●           │   <- chart rows (half the body)
-//	│     ┊  ·   ·              │
-//	│ 0.12┊·     ·               │
+//	│     ·   ●                 │   <- chart rows (half the body)
+//	│  ·   ·                    │
+//	│ ·     ·                   │
 //	│ MEM 34.6% range 32..47%   │   <- 1 header row
-//	│ 47.0┊       ·  ·  ●       │   <- chart rows (other half)
-//	│     ┊  ·   ·               │
-//	│ 32.0┊·                    │
+//	│       ·  ·  ●             │   <- chart rows (other half)
+//	│  ·   ·                    │
+//	│ ·                         │
 //	╰────────────────────────────╯
 //
-// On very short panels (<8 rows) the chart bodies collapse to one row
-// each; on <6 rows we fall back to the empty-state hint plus padding.
+// Title shows the host the most recent sample came from so the user
+// can confirm the data is from the remote they expect. No y-axis
+// labels in the body -- they ate a 7-char gutter for marginal info
+// the header already covers.
 func panelStats(sb *strings.Builder, st *uiState, targetHeight int) {
 	if targetHeight <= 0 {
 		targetHeight = 12
 	}
-	boxTop(sb, "stats")
+	title := "stats"
+	if st != nil && st.statsHost != "" {
+		// Show "stats · <host>" so the user sees at-a-glance which
+		// machine is being sampled. Without this, the previous panel
+		// had no indicator that the values were remote, which was
+		// the source of the "shows local not server" confusion.
+		host := st.statsHost
+		if st.statsProfile != "" {
+			host = st.statsProfile + "@" + host
+		}
+		title = "stats · " + host
+	}
+	boxTop(sb, title)
 	if st == nil || (len(st.cpuHistory) == 0 && len(st.memHistory) == 0) {
 		hint := ansi.Dim + "collecting remote samples..." + ansi.Reset
 		if st != nil && st.statsErr != "" {
@@ -2293,13 +2322,13 @@ func panelStats(sb *strings.Builder, st *uiState, targetHeight int) {
 		memH = 1
 	}
 
-	// y-axis gutter for the per-row min/max labels. Width here has to
-	// be stable across rows so dots align vertically.
-	const gutter = 7                             // "1234.5 " or "1234.5%"
-	chartW := dashboardContentWidth - gutter - 1 // -1 for the "┊" tick
-	if chartW > statsHistoryLen {
-		chartW = statsHistoryLen
-	}
+	// Chart width = full panel content width. No left-gutter labels
+	// (the user asked for them to be dropped -- the header already
+	// carries vmax / vmin in its "range X..Y" fragment). dotChart
+	// right-aligns its dot strip inside this width, so the freshest
+	// sample sits flush with the right border and older history
+	// drifts leftward as the ring fills.
+	chartW := dashboardContentWidth
 	if chartW < 8 {
 		chartW = 8
 	}
@@ -2310,7 +2339,6 @@ func panelStats(sb *strings.Builder, st *uiState, targetHeight int) {
 		latestFmt: "%4.2f",
 		unit:      "load avg",
 		dotAnsi:   ansi.Cyan,
-		gutter:    gutter,
 	})
 	emitChart(sb, st.memHistory, memH, chartW, statsLabel{
 		title:     "MEM",
@@ -2318,7 +2346,6 @@ func panelStats(sb *strings.Builder, st *uiState, targetHeight int) {
 		latestFmt: "%4.1f%%",
 		unit:      "use%",
 		dotAnsi:   ansi.Magenta,
-		gutter:    gutter,
 	})
 	boxBottom(sb)
 }
@@ -2331,11 +2358,10 @@ type statsLabel struct {
 	latestFmt string // "%4.2f" / "%4.1f%%"
 	unit      string // "load avg" / "use%"
 	dotAnsi   string
-	gutter    int
 }
 
 // emitChart writes one header row + `height` chart rows. Auto-scales
-// y-axis to (min..max) of the supplied data with a 10% padding so a
+// y-axis to (min..max) of the supplied data with 5% headroom so a
 // flat trace doesn't sit pinned to the top or bottom edge.
 func emitChart(sb *strings.Builder, values []float64, height, chartW int, lbl statsLabel) {
 	if len(values) == 0 {
@@ -2351,8 +2377,6 @@ func emitChart(sb *strings.Builder, values []float64, height, chartW int, lbl st
 	if vmax <= vmin {
 		vmax = vmin + 0.1
 	}
-	// 5% headroom top + bottom so dots aren't clipped onto the
-	// border. Looks like a graphing app's auto-fit.
 	pad := (vmax - vmin) * 0.05
 	vmin -= pad
 	vmax += pad
@@ -2368,22 +2392,8 @@ func emitChart(sb *strings.Builder, values []float64, height, chartW int, lbl st
 	boxLine(sb, header)
 
 	rows := dotChart(values, height, chartW, vmin, vmax)
-	for i, r := range rows {
-		// y-axis label only on the top + bottom rows; middle rows
-		// get a "┊" tick so the chart reads as a single column.
-		var axis string
-		switch i {
-		case 0:
-			axis = fmt.Sprintf(ansi.Dim+"%*s"+ansi.Reset+"%s┊"+ansi.Reset+" ",
-				lbl.gutter-1, fmtAxisLabel(vmax, lbl), ansi.Dim)
-		case len(rows) - 1:
-			axis = fmt.Sprintf(ansi.Dim+"%*s"+ansi.Reset+"%s┊"+ansi.Reset+" ",
-				lbl.gutter-1, fmtAxisLabel(vmin, lbl), ansi.Dim)
-		default:
-			axis = fmt.Sprintf("%s%s┊%s ",
-				strings.Repeat(" ", lbl.gutter-1), ansi.Dim, ansi.Reset)
-		}
-		boxLine(sb, axis+lbl.dotAnsi+r+ansi.Reset)
+	for _, r := range rows {
+		boxLine(sb, lbl.dotAnsi+r+ansi.Reset)
 	}
 }
 
@@ -2403,14 +2413,6 @@ func dataRange(values []float64) (float64, float64) {
 	return mn, mx
 }
 
-func fmtAxisLabel(v float64, lbl statsLabel) string {
-	// Pick a compact form: 12.3 / 12.3% / 1.23 depending on unit.
-	if strings.Contains(lbl.latestFmt, "%%") {
-		return fmt.Sprintf("%.1f%%", v)
-	}
-	return fmt.Sprintf("%.2f", v)
-}
-
 // pushStatsSample appends one sample to each ring, capped at
 // statsHistoryLen. Called by the main loop when it drains statsCh.
 func pushStatsSample(st *uiState, s StatsSample) {
@@ -2423,6 +2425,12 @@ func pushStatsSample(st *uiState, s StatsSample) {
 		// rather than skipping the slot silently.
 	} else {
 		st.statsErr = ""
+	}
+	if s.Host != "" {
+		st.statsHost = s.Host
+	}
+	if s.Profile != "" {
+		st.statsProfile = s.Profile
 	}
 	st.cpuHistory = appendCapped(st.cpuHistory, s.CPULoad, statsHistoryLen)
 	st.memHistory = appendCapped(st.memHistory, s.MemPercent, statsHistoryLen)

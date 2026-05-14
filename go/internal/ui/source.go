@@ -78,11 +78,17 @@ type Source interface {
 // is the 1-minute load average (matches /proc/loadavg field 1).
 // MemPercent is used/total*100. Err carries a one-line reason when
 // sampling failed -- the renderer surfaces it under the sparkline.
+// Profile + Host get echoed back so the STATS panel can show users
+// which machine the values came from -- helps spot misconfigured
+// profiles where the user expected "server" data but the probe was
+// hitting localhost via some wrong profile.
 type StatsSample struct {
 	CPULoad    float64
 	MemPercent float64
 	When       time.Time
 	Err        string
+	Profile    string
+	Host       string
 }
 
 // Snapshot is the bundle Source.Snapshot returns. Fields are owned by
@@ -106,11 +112,25 @@ type Snapshot struct {
 // liveSource talks to the real config / daemon / SSH / jobs.json on
 // every Snapshot. The disk + daemon calls match what `srv ui` did
 // before the refactor; nothing about timing or RPC shape changed.
-type liveSource struct{}
+type liveSource struct {
+	// profileOverride mirrors the -P flag the user passed to
+	// `srv ui`. Honoured by Stats() so the sampled host is the same
+	// one the dashboard is targeting; without this, Stats() used to
+	// fall back to the global default profile, which surprised users
+	// whose default differed from their override.
+	profileOverride string
+}
 
 // NewLiveSource is exported so tests / external embedders can build
 // the live path explicitly. Cmd() picks it for non-demo invocations.
 func NewLiveSource() Source { return &liveSource{} }
+
+// NewLiveSourceForProfile is the override-aware constructor used by
+// Cmd when -P is in effect. The override flows into Stats()'s profile
+// resolution; everything else still loads cfg fresh per call.
+func NewLiveSourceForProfile(profileOverride string) Source {
+	return &liveSource{profileOverride: profileOverride}
+}
 
 func (liveSource) IsDemo() bool { return false }
 
@@ -197,33 +217,36 @@ func (liveSource) TunnelRemove(name string, cfg *config.Config) (string, error) 
 	return uiTunnelRemove(name, cfg)
 }
 
-func (liveSource) Stats() StatsSample {
+func (s *liveSource) Stats() StatsSample {
 	cfg, err := config.Load()
 	if err != nil || cfg == nil {
 		return StatsSample{When: time.Now(), Err: "no config"}
 	}
-	name, profile, err := config.Resolve(cfg, "")
-	_ = name
+	// Honour the -P override the user gave to `srv ui`. The previous
+	// `Resolve(cfg, "")` ignored it, so a user running `srv -P prod
+	// ui` against a non-default profile was seeing the DEFAULT
+	// profile's stats -- which made them read like "local" when the
+	// default happened to be localhost or unconfigured.
+	name, profile, err := config.Resolve(cfg, s.profileOverride)
 	if err != nil {
 		return StatsSample{When: time.Now(), Err: "no profile"}
 	}
-	// One-liner Linux probe: load avg + memory used%.
 	cmd := `awk '{print $1}' /proc/loadavg && awk 'BEGIN{used=0; total=1} /^MemTotal:/{total=$2} /^MemAvailable:/{avail=$2} END{if(total>0) printf "%.2f", (total-avail)/total*100}' /proc/meminfo`
 	stdout, exitCode, ok := statsProbe(profile, cmd)
 	if !ok {
-		return StatsSample{When: time.Now(), Err: "no remote"}
+		return StatsSample{When: time.Now(), Err: "no remote", Profile: name, Host: profile.Host}
 	}
 	if exitCode != 0 {
-		return StatsSample{When: time.Now(), Err: "remote err"}
+		return StatsSample{When: time.Now(), Err: "remote err", Profile: name, Host: profile.Host}
 	}
 	out := strings.TrimSpace(stdout)
 	parts := strings.Fields(out)
 	if len(parts) < 2 {
-		return StatsSample{When: time.Now(), Err: "parse"}
+		return StatsSample{When: time.Now(), Err: "parse", Profile: name, Host: profile.Host}
 	}
 	cpu, _ := strconv.ParseFloat(parts[0], 64)
 	mem, _ := strconv.ParseFloat(parts[1], 64)
-	return StatsSample{CPULoad: cpu, MemPercent: mem, When: time.Now()}
+	return StatsSample{CPULoad: cpu, MemPercent: mem, When: time.Now(), Profile: name, Host: profile.Host}
 }
 
 // --- demo source -----------------------------------------------------
@@ -324,5 +347,8 @@ func (demoSource) Stats() StatsSample {
 	if mem > 100 {
 		mem = 100
 	}
-	return StatsSample{CPULoad: cpu, MemPercent: mem, When: now}
+	return StatsSample{
+		CPULoad: cpu, MemPercent: mem, When: now,
+		Profile: "美国备用", Host: "backup.example.com",
+	}
 }
