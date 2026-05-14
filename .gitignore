@@ -31,6 +31,7 @@ Thumbs.db
 /srv
 /srv.exe
 /srv.exe~
+/srv.exe.old*
 go/srv
 go/srv.exe
 *.test
@@ -38,3 +39,7 @@ go/srv.exe
 
 # goreleaser local-snapshot output
 /dist/
+
+# Tool caches (Claude Code workspace, local go build cache)
+.claude/
+.gocache/
