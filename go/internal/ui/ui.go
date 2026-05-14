@@ -58,10 +58,14 @@ type uiState struct {
 	jobCursor    int        // index within the jobs window
 	mcpCursor    int        // index within the mcp recent-tools window
 	detailScroll int        // first visible body row in the right-side DETAIL panel
+	tunnelRows   int        // adaptive visible rows for the TUNNELS panel
+	jobRows      int        // adaptive visible rows for the JOBS panel
+	groupRows    int        // adaptive visible rows for the GROUPS panel
 	detailMode   bool       // showing the per-row detail panel
 	confirm      *uiConfirm // non-nil = popup is up, awaiting Y/N
-	statusMsg    string     // transient line in the footer (kill result, etc.)
+	statusMsg    string     // transient line in the STATUS panel (kill result, etc.)
 	demoMode     bool       // mirror of src.IsDemo() for renderers; the authoritative value lives on src
+	compact      bool       // short terminal: drop nonessential rows so panels fit vertically
 	src          Source     // data + action facade; demoSource or liveSource
 	// snapshotOnly = true when this state was built for a one-shot
 	// `srv ui | less` style render. The renderers use it to suppress
@@ -404,12 +408,17 @@ func Cmd(args []string, cfg *config.Config) error {
 			// up-front: the per-line EL only handles trailing chars
 			// on the new frame's rows, not the rows that don't exist
 			// in the new frame at all.
+			fullClear := st.needFullClear
 			prefix := cursorHome
-			if st.needFullClear {
+			if fullClear {
 				prefix = clearScreen + cursorHome
 				st.needFullClear = false
 			}
-			fmt.Fprint(os.Stderr, prefix+altScreenFrame(out, dashboardHeight)+clearEnd)
+			if fullClear || st.lastFrame == "" {
+				fmt.Fprint(os.Stderr, prefix+altScreenFrame(out, dashboardHeight)+clearEnd)
+			} else {
+				fmt.Fprint(os.Stderr, altScreenPatch(st.lastFrame, out, dashboardHeight))
+			}
 			st.lastFrame = out
 			st.forceRedraw = false
 		}
@@ -1076,8 +1085,8 @@ func drainJobLogCh(st *uiState) bool {
 //	on a tunnel row: Space = toggle up/down,  x = remove
 //
 // Non-applicable combinations (Space on a job, k on a tunnel) are
-// silently ignored -- the key hint in the footer already advertises
-// which keys apply to which kind of row.
+// silently ignored -- the header/help hints advertise which keys apply
+// to which kind of row.
 func armConfirmFor(st *uiState, row uiRow, jobs []*jobs.Record, tunnelNames []string, cfg *config.Config, key byte) {
 	// Every destructive action goes through st.src so the demo path
 	// returns a canned acknowledgement string while the live path
@@ -1315,6 +1324,39 @@ func altScreenFrame(content string, height int) string {
 	return strings.Join(lines, "\x1b[K\n") + "\x1b[K"
 }
 
+func altScreenPatch(prev, next string, height int) string {
+	oldLines := splitDashboardLines(prev)
+	newLines := splitDashboardLines(next)
+	if height > 0 {
+		if len(oldLines) > height {
+			oldLines = oldLines[:height]
+		}
+		if len(newLines) > height {
+			newLines = newLines[:height]
+		}
+	}
+	limit := max(len(oldLines), len(newLines))
+	if height > 0 && limit > height {
+		limit = height
+	}
+	var sb strings.Builder
+	for i := 0; i < limit; i++ {
+		oldLine, newLine := "", ""
+		if i < len(oldLines) {
+			oldLine = oldLines[i]
+		}
+		if i < len(newLines) {
+			newLine = newLines[i]
+		}
+		if oldLine == newLine {
+			continue
+		}
+		fmt.Fprintf(&sb, "\x1b[%d;1H%s\x1b[K", i+1, newLine)
+	}
+	sb.WriteString(cursorHome)
+	return sb.String()
+}
+
 // buildSource picks the right Source for this invocation. `srv ui demo`
 // builds a demoSource over the user's actual config (so locale carries
 // over); `srv ui` builds a liveSource.
@@ -1396,10 +1438,8 @@ func demoDashboardData(base *config.Config) (*config.Config, []*jobs.Record, mcp
 	cfg.DefaultProfile = "美国备用"
 	demoTrue := true
 	cfg.Profiles = map[string]*config.Profile{
-		"美国备用": {Host: "backup.example.com", User: "deploy", DefaultCwd: "/srv/demo"},
-		"美国服务": {Host: "service.example.com", User: "ops", DefaultCwd: "/data/app"},
-		// tokyo-demo carries agent_forwarding=true so the ↺ icon in
-		// PROFILES is exercised in the demo screenshot.
+		"美国备用":       {Host: "backup.example.com", User: "deploy", DefaultCwd: "/srv/demo"},
+		"美国服务":       {Host: "service.example.com", User: "ops", DefaultCwd: "/data/app"},
 		"tokyo-demo": {Host: "tokyo.example.com", User: "dev", DefaultCwd: "/workspace", AgentForwarding: &demoTrue},
 	}
 	cfg.Groups = map[string][]string{
@@ -1480,70 +1520,57 @@ func renderDashboard(cfg *config.Config, jobs []*jobs.Record, tunnelNames []stri
 
 func renderDashboardWithMCP(cfg *config.Config, jobs []*jobs.Record, tunnelNames []string, st *uiState, mcpSnapshot mcplog.Status) string {
 	var sb strings.Builder
+	if st != nil {
+		st.compact = dashboardHeight < 30
+	}
 	panelHeader(&sb, st)
 	panelProfiles(&sb, cfg, st)
-	if isSnapshotMode(st) || dashboardWidth < dashboardTwoColumnMinWidth {
-		panelOverview(&sb, cfg, jobs, tunnelNames, mcpSnapshot, st)
-		panelDaemon(&sb, st)
-		panelTunnels(&sb, cfg, tunnelNames, st)
-		panelJobs(&sb, jobs, st)
-		// MCP panel intentionally hidden -- the data still flows
-		// through `srv mcp stats` / `srv mcp replay` for the user
-		// who wants to inspect it; the dashboard stays focused on
-		// remote system state (profiles / daemon / tunnels / jobs).
-		// Snapshot mode skips the in-line status + footer here so
-		// the post-Groups footer below isn't duplicated -- the
-		// snapshot-mode footer is the canonical one outside the
-		// if-block.
-		if !isSnapshotMode(st) {
-			panelStatus(&sb, st)
-			panelFooter(&sb, st)
-		}
+	if st == nil || dashboardWidth < dashboardTwoColumnMinWidth {
+		prefixLines := len(splitDashboardLines(sb.String()))
+		groupLines := measureGroupsLines(cfg)
+		available := dashboardHeight - prefixLines - groupLines
+		middle := fitListRowsToHeight(st, available, func() string {
+			var middle strings.Builder
+			renderDashboardMiddle(&middle, cfg, jobs, tunnelNames, mcpSnapshot, st)
+			return middle.String()
+		})
+		sb.WriteString(middle)
 	} else {
 		leftW, rightW, gap := splitColumnsWidth(dashboardWidth)
-		// The DETAIL panel's `╰─╯` is anchored to the bottom of the
-		// JOBS panel: rendering the left column in two stages lets us
-		// measure exactly how tall OVERVIEW + DAEMON + TUNNELS + JOBS
-		// are together, and target the detail panel to that height so
-		// the two columns close on the same row. MCP + FOOTER follow
-		// below on the left while the right side is just plain blank
-		// space (writeSideBySide pads with spaces, no floating walls).
-		var leftTop, leftBot strings.Builder
-		withDashboardWidth(leftW, func() {
-			panelOverview(&leftTop, cfg, jobs, tunnelNames, mcpSnapshot, st)
-			panelDaemon(&leftTop, st)
-			panelTunnels(&leftTop, cfg, tunnelNames, st)
-			panelJobs(&leftTop, jobs, st)
-			// MCP panel suppressed; see single-column branch above.
-			panelStatus(&leftBot, st)
-			panelFooter(&leftBot, st)
+		// DETAIL spans the full left control stack and closes on the
+		// same row as the left stack. Keeping STATUS inside the side-by-side
+		// measurement avoids the right panel ending early while the
+		// left column continues below it.
+		prefixLines := len(splitDashboardLines(sb.String()))
+		groupLines := measureGroupsLines(cfg)
+		available := dashboardHeight - prefixLines - groupLines
+		left := fitListRowsToHeight(st, available, func() string {
+			var leftBuf strings.Builder
+			withDashboardWidth(leftW, func() {
+				panelOverview(&leftBuf, cfg, jobs, tunnelNames, mcpSnapshot, st)
+				panelDaemon(&leftBuf, st)
+				panelTunnels(&leftBuf, cfg, tunnelNames, st)
+				panelJobs(&leftBuf, jobs, st)
+				// MCP panel suppressed; see single-column branch above.
+				panelStatus(&leftBuf, st)
+			})
+			return leftBuf.String()
 		})
-		topLines := splitDashboardLines(leftTop.String())
-		// DETAIL is anchored exactly to leftTop: its `╭─╮` lines up
-		// with OVERVIEW's `╭─╮` (both start on the same row of the
-		// side-by-side block) and its `╰─╯` lines up with JOBS' `╰─╯`
-		// (both close on the last row of leftTop). On terminals too
-		// short to fit leftTop, the bottom edges land below the visible
-		// frame together -- that's a terminal-size problem, not a
-		// layout one.
+		leftLines := splitDashboardLines(left)
 		var rightBuf strings.Builder
 		withDashboardWidth(rightW, func() {
-			renderStretchedDetail(&rightBuf, cfg, jobs, tunnelNames, mcpSnapshot, st, len(topLines))
+			renderStretchedDetail(&rightBuf, cfg, jobs, tunnelNames, mcpSnapshot, st, len(leftLines))
 		})
-		writeSideBySide(&sb, leftTop.String(), rightBuf.String(), leftW, rightW, gap)
-		// MCP + FOOTER stack underneath the side-by-side block, at the
-		// left column's width. The right side of those rows stays
-		// genuinely empty so the panels naturally hang off the bottom
-		// of the now-closed DETAIL column without re-opening any
-		// border walls.
-		sb.WriteString(leftBot.String())
+		writeSideBySide(&sb, left, rightBuf.String(), leftW, rightW, gap)
 	}
 
-	panelGroups(&sb, cfg)
-	if isSnapshotMode(st) {
-		panelFooter(&sb, st)
+	if shouldRenderGroups(&sb, cfg, st) {
+		panelGroups(&sb, cfg, st)
 	}
 	out := sb.String()
+	if st != nil && st.compact {
+		out = trimBlankRowsToHeight(out, dashboardHeight)
+	}
 	if st != nil && st.historyVisible {
 		return overlayHistoryPopup(out, st)
 	}
@@ -1554,6 +1581,123 @@ func renderDashboardWithMCP(cfg *config.Config, jobs []*jobs.Record, tunnelNames
 		return overlayConfirmPopup(out, st.confirm)
 	}
 	return out
+}
+
+func trimBlankRowsToHeight(out string, height int) string {
+	if height <= 0 {
+		return out
+	}
+	lines := splitDashboardLines(out)
+	for len(lines) > height {
+		removed := false
+		for i, line := range lines {
+			if strings.TrimSpace(line) != "" {
+				continue
+			}
+			lines = append(lines[:i], lines[i+1:]...)
+			removed = true
+			break
+		}
+		if !removed {
+			break
+		}
+	}
+	if len(lines) == 0 {
+		return ""
+	}
+	return strings.Join(lines, "\n") + "\n"
+}
+
+func shouldRenderGroups(sb *strings.Builder, cfg *config.Config, st *uiState) bool {
+	if st == nil || !st.compact {
+		return true
+	}
+	used := len(splitDashboardLines(sb.String()))
+	needed := measureGroupsLines(cfg)
+	return used+needed <= dashboardHeight
+}
+
+func renderDashboardMiddle(sb *strings.Builder, cfg *config.Config, jobs []*jobs.Record, tunnelNames []string, mcpSnapshot mcplog.Status, st *uiState) {
+	panelOverview(sb, cfg, jobs, tunnelNames, mcpSnapshot, st)
+	panelDaemon(sb, st)
+	panelTunnels(sb, cfg, tunnelNames, st)
+	panelJobs(sb, jobs, st)
+	// MCP panel intentionally hidden -- the data still flows through
+	// `srv mcp stats` / `srv mcp replay` for the user who wants to
+	// inspect it; the dashboard stays focused on profiles / daemon /
+	// tunnels / jobs.
+	if st != nil {
+		panelStatus(sb, st)
+	}
+}
+
+func measureGroupsLines(cfg *config.Config) int {
+	var sb strings.Builder
+	panelGroups(&sb, cfg, nil)
+	return len(splitDashboardLines(sb.String()))
+}
+
+func fitListRowsToHeight(st *uiState, available int, render func() string) string {
+	if st == nil {
+		return render()
+	}
+	st.tunnelRows = dashboardListRows
+	st.jobRows = dashboardListRows
+	st.groupRows = dashboardListRows
+	// Snapshot mode renders to a pipe / file -- there's no fixed
+	// viewport to fit into. Skip the fit pass entirely so all rows
+	// stay visible. The interactive alt-screen path is the only
+	// caller that actually needs compression.
+	if st.snapshotOnly {
+		return render()
+	}
+	out := render()
+	for len(splitDashboardLines(out)) > available && (st.tunnelRows > 1 || st.jobRows > 1 || st.groupRows > 1) {
+		shrinkListRows(st)
+		out = render()
+	}
+	return out
+}
+
+// shrinkListRows decrements one of tunnelRows / jobRows / groupRows by
+// 1 per call. Strategy: keep the focused pane longer; among unfocused
+// panes shrink the tallest first so column heights stay balanced.
+// Floors at 1 row per pane so the user always sees at least the
+// most-recent entry from each list.
+func shrinkListRows(st *uiState) {
+	if st == nil {
+		return
+	}
+	// Preferential order: protect the focused pane. GROUPS is never
+	// focusable (no row actions) so always shrink it before the
+	// interactive panes when it's the tallest.
+	type pane struct {
+		name string
+		val  *int
+	}
+	all := []pane{
+		{"tunnel", &st.tunnelRows},
+		{"job", &st.jobRows},
+		{"group", &st.groupRows},
+	}
+	// Drop the focused pane to the back so it's chosen last when
+	// everything is otherwise equal.
+	sort.SliceStable(all, func(i, j int) bool {
+		if all[i].name == st.focusPane {
+			return false
+		}
+		if all[j].name == st.focusPane {
+			return true
+		}
+		// Bigger first so the tallest pane gives up a row.
+		return *all[i].val > *all[j].val
+	})
+	for _, p := range all {
+		if *p.val > 1 {
+			*p.val--
+			return
+		}
+	}
 }
 
 // overlayHelpPopup renders the `?` help screen as a centred overlay.
@@ -2180,18 +2324,18 @@ func panelHeader(sb *strings.Builder, st *uiState) {
 	if isSnapshotMode(st) {
 		boxLine(sb, ansi.Dim+"snapshot mode (no tty)"+ansi.Reset)
 		boxBottom(sb)
-		fmt.Fprintln(sb)
 		return
 	}
-	boxLine(sb, fmt.Sprintf("keys  %stab/h/l%s pane   %s↑/↓%s row   %sCtrl-U/D%s detail   %s/%s filter   %s?%s help   %sq%s quit",
-		ansi.Yellow+ansi.Bold, ansi.Reset,
-		ansi.Yellow+ansi.Bold, ansi.Reset,
-		ansi.Yellow+ansi.Bold, ansi.Reset,
-		ansi.Yellow+ansi.Bold, ansi.Reset,
-		ansi.Yellow+ansi.Bold, ansi.Reset,
-		ansi.Yellow+ansi.Bold, ansi.Reset))
+	if !st.compact {
+		boxLine(sb, fmt.Sprintf("keys  %stab/h/l%s pane   %s↑/↓%s row   %sCtrl-U/D%s detail   %s/%s filter   %s?%s help   %sq%s quit",
+			ansi.Yellow+ansi.Bold, ansi.Reset,
+			ansi.Yellow+ansi.Bold, ansi.Reset,
+			ansi.Yellow+ansi.Bold, ansi.Reset,
+			ansi.Yellow+ansi.Bold, ansi.Reset,
+			ansi.Yellow+ansi.Bold, ansi.Reset,
+			ansi.Yellow+ansi.Bold, ansi.Reset))
+	}
 	boxBottom(sb)
-	fmt.Fprintln(sb)
 }
 
 // panelProfiles lists every configured profile and marks each one as
@@ -2205,7 +2349,6 @@ func panelProfiles(sb *strings.Builder, cfg *config.Config, st *uiState) {
 		boxTop(sb, "profiles")
 		boxLine(sb, ansi.Dim+"no profiles configured"+ansi.Reset)
 		boxBottom(sb)
-		fmt.Fprintln(sb)
 		return
 	}
 
@@ -2274,12 +2417,6 @@ func panelProfiles(sb *strings.Builder, cfg *config.Config, st *uiState) {
 				dot = ansi.Dim + "○ " + ansi.Reset
 				label = ansi.Dim + n + ansi.Reset
 			}
-			// Tiny ↺ suffix when the profile has agent forwarding on.
-			// Cheap visual cue without inflating the column width --
-			// `srv config show <name>` still has the authoritative view.
-			if p := cfg.Profiles[n]; p != nil && p.GetAgentForwarding() {
-				label += ansi.Cyan + " ↺" + ansi.Reset
-			}
 			cell := dot + padAnsiRight(label, cellW-marker)
 			line.WriteString(cell)
 		}
@@ -2289,7 +2426,6 @@ func panelProfiles(sb *strings.Builder, cfg *config.Config, st *uiState) {
 		boxLine(sb, ansi.Dim+fmt.Sprintf("... %d more (use `srv ls` to view all)", len(names)-visible)+ansi.Reset)
 	}
 	boxBottom(sb)
-	fmt.Fprintln(sb)
 }
 
 // profileNamesSorted returns the cfg.Profiles keys alphabetically.
@@ -2410,7 +2546,6 @@ func panelDaemon(sb *strings.Builder, st *uiState) {
 	if resp == nil {
 		boxLine(sb, dashStatus("stopped", ansi.Dim))
 		boxBottom(sb)
-		fmt.Fprintln(sb)
 		return
 	}
 	parts := []string{
@@ -2423,7 +2558,6 @@ func panelDaemon(sb *strings.Builder, st *uiState) {
 	}
 	boxLine(sb, fitInlineParts(parts, "", dashboardContentWidth))
 	boxBottom(sb)
-	fmt.Fprintln(sb)
 }
 
 func panelOverview(sb *strings.Builder, cfg *config.Config, jobs []*jobs.Record, tunnelNames []string, mcp mcplog.Status, st *uiState) {
@@ -2467,7 +2601,6 @@ func panelOverview(sb *strings.Builder, cfg *config.Config, jobs []*jobs.Record,
 	// not on the dashboard. Suppress the unused-param check on mcp.
 	_ = mcp
 	boxBottom(sb)
-	fmt.Fprintln(sb)
 }
 
 func overviewItem(label, value string) string {
@@ -2494,7 +2627,7 @@ func fetchDaemonStatusForUI() *daemon.Response {
 	return resp
 }
 
-func panelGroups(sb *strings.Builder, cfg *config.Config) {
+func panelGroups(sb *strings.Builder, cfg *config.Config, st *uiState) {
 	if len(cfg.Groups) == 0 {
 		// Empty-state card so `srv ui` keeps a stable panel set
 		// regardless of what's configured -- same reasoning as
@@ -2503,24 +2636,38 @@ func panelGroups(sb *strings.Builder, cfg *config.Config) {
 		boxTop(sb, "groups 0")
 		boxLine(sb, ansi.Dim+"no profile groups  (try: srv group set <name> <profile...>)"+ansi.Reset)
 		boxBottom(sb)
-		fmt.Fprintln(sb)
 		return
 	}
-	boxTop(sb, fmt.Sprintf("groups %d", len(cfg.Groups)))
-	boxLine(sb, ansi.Dim+"NAME          SIZE  MEMBERS"+ansi.Reset)
-	boxLine(sb, ansi.Dim+strings.Repeat("-", dashboardContentWidth)+ansi.Reset)
 	names := make([]string, 0, len(cfg.Groups))
 	for n := range cfg.Groups {
 		names = append(names, n)
 	}
 	sort.Strings(names)
-	for _, n := range names {
+	// Row cap only applies in interactive mode -- snapshot mode
+	// (piped to less / file) has no viewport bound and should show
+	// every group. Interactive: fitListRowsToHeight may shrink
+	// groupRows to keep other panes visible on a short terminal.
+	limit := len(names)
+	if st != nil && !isSnapshotMode(st) && st.groupRows > 0 && st.groupRows < limit {
+		limit = st.groupRows
+	}
+	title := fmt.Sprintf("groups %d", len(cfg.Groups))
+	if limit < len(names) {
+		title += fmt.Sprintf("  showing %d/%d", limit, len(names))
+	}
+	boxTop(sb, title)
+	boxLine(sb, ansi.Dim+"NAME          SIZE  MEMBERS"+ansi.Reset)
+	boxLine(sb, ansi.Dim+strings.Repeat("-", dashboardContentWidth)+ansi.Reset)
+	for i := 0; i < limit; i++ {
+		n := names[i]
 		members := cfg.Groups[n]
 		boxLine(sb, fmt.Sprintf("%-12s  %s%2d%s  %s",
 			dashName(n), ansi.Magenta+ansi.Bold, len(members), ansi.Reset, ansi.Cyan+fitPlain(strings.Join(members, ", "), 56)+ansi.Reset))
 	}
+	if limit < len(names) {
+		boxLine(sb, ansi.Dim+fmt.Sprintf("... %d more (resize terminal or use `srv group list`)", len(names)-limit)+ansi.Reset)
+	}
 	boxBottom(sb)
-	fmt.Fprintln(sb)
 }
 
 func panelTunnels(sb *strings.Builder, cfg *config.Config, names []string, st *uiState) {
@@ -2536,7 +2683,6 @@ func panelTunnels(sb *strings.Builder, cfg *config.Config, names []string, st *u
 		boxTopWithHint(sb, "tunnels 0", "space toggle  x remove", focused)
 		boxLineFocused(sb, ansi.Dim+"no saved tunnels  (try: srv tunnel add <name> <port>)"+ansi.Reset, focused)
 		boxBottomFocused(sb, focused)
-		fmt.Fprintln(sb)
 		return
 	}
 	// Same story as panelDaemon: pull active/errs from the snapshot
@@ -2553,7 +2699,6 @@ func panelTunnels(sb *strings.Builder, cfg *config.Config, names []string, st *u
 	if st != nil && len(names) > 0 {
 		title += fmt.Sprintf("  %d/%d", st.tunnelCursor+1, len(names))
 	}
-	boxTopWithHint(sb, title, "space toggle  x remove", focused)
 	nameW := 12
 	typeW := 7
 	specW := dashboardContentWidth - nameW - typeW - 22
@@ -2563,9 +2708,26 @@ func panelTunnels(sb *strings.Builder, cfg *config.Config, names []string, st *u
 	if specW > 44 {
 		specW = 44
 	}
+	start, end := 0, len(names)
+	// Snapshot mode (piped output / non-TTY) shows every row: there's
+	// no fixed viewport to compress into. Interactive mode honors
+	// st.tunnelRows so the JOBS / GROUPS panels below stay reachable
+	// on short terminals.
+	if st != nil && !isSnapshotMode(st) {
+		limit := st.tunnelRows
+		if limit <= 0 {
+			limit = dashboardListRows
+		}
+		start, end = visibleListRange(len(names), st.tunnelCursor, limit)
+		if end-start < len(names) {
+			title += fmt.Sprintf("  showing %d-%d/%d", start+1, end, len(names))
+		}
+	}
+	boxTopWithHint(sb, title, "space toggle  x remove", focused)
 	boxLineFocused(sb, ansi.Dim+"  "+padAnsiRight("NAME", nameW)+"  "+padAnsiRight("TYPE", typeW)+"  SPEC / STATE"+ansi.Reset, focused)
 	boxLineFocused(sb, ansi.Dim+strings.Repeat("-", dashboardContentWidth)+ansi.Reset, focused)
-	for i, n := range names {
+	for i := start; i < end; i++ {
+		n := names[i]
 		def := cfg.Tunnels[n]
 		status := dashStatus("stopped", ansi.Dim)
 		extra := ""
@@ -2606,7 +2768,6 @@ func panelTunnels(sb *strings.Builder, cfg *config.Config, names []string, st *u
 		}
 	}
 	boxBottomFocused(sb, focused)
-	fmt.Fprintln(sb)
 }
 
 // filterJobs returns the subset of `js` whose ID or Cmd contains
@@ -2641,7 +2802,6 @@ func panelJobs(sb *strings.Builder, jobs []*jobs.Record, st *uiState) {
 		boxTopWithHint(sb, "jobs 0", "k kill", focused)
 		boxLineFocused(sb, ansi.Dim+"nothing running  (try: srv -d <cmd> to detach one)"+ansi.Reset, focused)
 		boxBottomFocused(sb, focused)
-		fmt.Fprintln(sb)
 		return
 	}
 	title := fmt.Sprintf("jobs %d", len(jobs))
@@ -2659,8 +2819,12 @@ func panelJobs(sb *strings.Builder, jobs []*jobs.Record, st *uiState) {
 		title += "  /" + q
 	}
 	start, end := 0, len(jobs)
-	if st != nil {
-		start, end = visibleListRange(len(jobs), st.jobCursor, dashboardListRows)
+	if st != nil && !isSnapshotMode(st) {
+		limit := st.jobRows
+		if limit <= 0 {
+			limit = dashboardListRows
+		}
+		start, end = visibleListRange(len(jobs), st.jobCursor, limit)
 		if end-start < len(jobs) {
 			title += fmt.Sprintf("  showing %d-%d/%d", start+1, end, len(jobs))
 		}
@@ -2673,7 +2837,6 @@ func panelJobs(sb *strings.Builder, jobs []*jobs.Record, st *uiState) {
 		}
 		boxLineFocused(sb, msg, focused)
 		boxBottomFocused(sb, focused)
-		fmt.Fprintln(sb)
 		return
 	}
 	boxLineFocused(sb, ansi.Dim+"  ID            PROFILE       PID       AGE"+ansi.Reset, focused)
@@ -2695,7 +2858,6 @@ func panelJobs(sb *strings.Builder, jobs []*jobs.Record, st *uiState) {
 		boxLineFocused(sb, row, focused)
 	}
 	boxBottomFocused(sb, focused)
-	fmt.Fprintln(sb)
 }
 
 // panelDetail is the right-column panel: a live view of whatever the
@@ -2723,7 +2885,6 @@ func panelDetail(sb *strings.Builder, cfg *config.Config, jobs []*jobs.Record, t
 	boxTop(sb, "detail")
 	boxLine(sb, ansi.Dim+"(no row selected -- move cursor with ↑/↓)"+ansi.Reset)
 	boxBottom(sb)
-	fmt.Fprintln(sb)
 }
 
 // panelMCPDetail removed alongside panelMCP -- the MCP pane is no
@@ -2805,7 +2966,6 @@ func panelJobDetail(sb *strings.Builder, title string, j *jobs.Record, st *uiSta
 	boxLine(sb, "")
 	boxLine(sb, ansi.Dim+"press "+ansi.Yellow+ansi.Bold+"k"+ansi.Reset+ansi.Dim+" to kill   "+ansi.Yellow+ansi.Bold+"L"+ansi.Reset+ansi.Dim+" log preview"+ansi.Reset)
 	boxBottom(sb)
-	fmt.Fprintln(sb)
 }
 
 // panelTunnelDetail renders tunnel details for the right
@@ -2818,7 +2978,6 @@ func panelTunnelDetail(sb *strings.Builder, title, name string, cfg *config.Conf
 		boxTop(sb, title)
 		boxLine(sb, ansi.Red+"tunnel "+name+" not found in config"+ansi.Reset)
 		boxBottom(sb)
-		fmt.Fprintln(sb)
 		return
 	}
 	boxTop(sb, title)
@@ -2855,7 +3014,6 @@ func panelTunnelDetail(sb *strings.Builder, title, name string, cfg *config.Conf
 	boxLine(sb, "")
 	boxLine(sb, ansi.Dim+"press "+ansi.Yellow+ansi.Bold+"Space"+ansi.Reset+ansi.Dim+" up/down, "+ansi.Yellow+ansi.Bold+"x"+ansi.Reset+ansi.Dim+" remove"+ansi.Reset)
 	boxBottom(sb)
-	fmt.Fprintln(sb)
 }
 
 // panelMCP removed -- the dashboard no longer shows recent MCP tool
@@ -2895,49 +3053,6 @@ func panelStatus(sb *strings.Builder, st *uiState) {
 	boxTop(sb, "status")
 	boxLine(sb, st.statusMsg)
 	boxBottom(sb)
-	fmt.Fprintln(sb)
-}
-
-func panelFooter(sb *strings.Builder, st *uiState) {
-	boxTop(sb, "keys")
-	if isSnapshotMode(st) {
-		boxLine(sb, ansi.Dim+"snapshot complete"+ansi.Reset)
-	} else {
-		focus := st.focusPane
-		if focus == "" {
-			focus = "none"
-		}
-		boxLine(sb, kvPair("focus", ansi.Yellow+ansi.Bold+strings.ToUpper(focus)+ansi.Reset, "mode", "live dashboard"))
-		switch focus {
-		case "tunnel":
-			boxLine(sb, keyHelp("↑/↓ move", "space up/down", "x remove", "tab next", "? help"))
-		case "job":
-			boxLine(sb, keyHelp("↑/↓ move", "k kill", "L log", "/ filter", "tab next", "? help"))
-		default:
-			boxLine(sb, keyHelp("tab choose pane", "? help", "q quit"))
-		}
-	}
-	boxBottom(sb)
-}
-
-func keyHelp(parts ...string) string {
-	out := make([]string, 0, len(parts))
-	for _, p := range parts {
-		fields := strings.Fields(p)
-		if len(fields) == 0 {
-			continue
-		}
-		key := fields[0]
-		desc := strings.TrimSpace(strings.TrimPrefix(p, key))
-		if key == "read-only" {
-			out = append(out, ansi.Dim+"read-only"+ansi.Reset)
-		} else if desc == "" {
-			out = append(out, ansi.Yellow+ansi.Bold+key+ansi.Reset)
-		} else {
-			out = append(out, ansi.Yellow+ansi.Bold+key+ansi.Reset+" "+desc)
-		}
-	}
-	return strings.Join(out, ansi.Dim+"  ·  "+ansi.Reset)
 }
 
 // renderHelpPopup draws the `?` help cheatsheet. Same box shape as
@@ -3470,7 +3585,6 @@ func dashHeader(sb *strings.Builder, st *uiState) {
 		// Non-TTY snapshot mode: no interactive keys to advertise.
 		boxLine(sb, ansi.Dim+"snapshot mode (no tty)"+ansi.Reset)
 		boxBottom(sb)
-		fmt.Fprintln(sb)
 		return
 	}
 	fmt.Fprintf(sb,
