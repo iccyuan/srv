@@ -63,6 +63,13 @@ type uiState struct {
 	statusMsg    string     // transient line in the footer (kill result, etc.)
 	demoMode     bool       // mirror of src.IsDemo() for renderers; the authoritative value lives on src
 	src          Source     // data + action facade; demoSource or liveSource
+	// snapshotOnly = true when this state was built for a one-shot
+	// `srv ui | less` style render. The renderers use it to suppress
+	// interactive affordances (cursors, key hints, focus tagging) and
+	// to skip persistence -- mirrors the legacy `st == nil` path's
+	// semantics but lets the snap* fields carry through to renderers
+	// like panelDaemon / panelTunnels that previously dialled live.
+	snapshotOnly bool
 	lastFrame    string
 	prevLines    int
 	forceRedraw  bool
@@ -232,16 +239,17 @@ func Cmd(args []string, cfg *config.Config) error {
 	src := buildSource(demo, cfg)
 	if !srvtty.IsStdinTTY() {
 		// Without a TTY there's no way to read keys; degrade to a
-		// one-shot print of the snapshot so `srv ui | less` still
-		// works (or piped into a script). Jobs are still listed --
-		// just without the selection markers and key hints.
-		// One code path for both demo and live: the Source returns
-		// the right data, the renderer doesn't know which is which.
-		snap := src.Snapshot()
-		if snap.Cfg == nil {
-			snap.Cfg = cfg
+		// one-shot print so `srv ui | less` still works. We build a
+		// real uiState (marked snapshotOnly) so panelDaemon /
+		// panelTunnels / etc. see the Source's data instead of
+		// dialling the live daemon -- the previous nil-st path
+		// bypassed the Source and made `srv ui demo | less` show
+		// real daemon state under the demo header.
+		st := buildSnapshotState(src)
+		if st.snapCfg == nil {
+			st.snapCfg = cfg
 		}
-		fmt.Print(renderDashboardWithMCP(snap.Cfg, snap.Jobs, sortedTunnelNames(snap.Cfg), nil, snap.MCP))
+		fmt.Print(renderDashboardWithMCP(st.snapCfg, st.snapJobs, sortedTunnelNames(st.snapCfg), st, st.snapMCP))
 		return nil
 	}
 	fd := int(os.Stdin.Fd())
@@ -487,7 +495,10 @@ func loadUIState() persistedUIState {
 // to exit just because the state file is on a read-only filesystem
 // or the disk is full. The state is purely a navigation convenience.
 func saveUIState(st *uiState) {
-	if st == nil {
+	if isSnapshotMode(st) {
+		// Snapshot mode (one-shot render or `srv ui demo`) never
+		// persists its cursor / focus -- that state belongs to the
+		// interactive session that owns the alt-screen.
 		return
 	}
 	s := persistedUIState{
@@ -1317,6 +1328,55 @@ func buildSource(demo bool, base *config.Config) Source {
 	return NewLiveSource()
 }
 
+// isSnapshotMode reports whether we're rendering a one-shot snapshot
+// instead of an interactive dashboard. True for both legacy `st == nil`
+// callers (tests, older snapshot path) and the new explicit
+// `snapshotOnly` flag set when Cmd's non-TTY branch builds an st to
+// carry source data through.
+func isSnapshotMode(st *uiState) bool {
+	return st == nil || st.snapshotOnly
+}
+
+// buildSnapshotState wraps Source's Snapshot in a uiState so the
+// non-TTY path can reuse the same renderers the interactive loop
+// uses. Mirrors the live loop's "filter exited jobs via liveness +
+// track hidden count" pass so the OVERVIEW row reads the same number
+// in both modes.
+func buildSnapshotState(src Source) *uiState {
+	snap := src.Snapshot()
+	live := src.Liveness(snap.Jobs)
+	visible := snap.Jobs[:0]
+	hidden := 0
+	for _, j := range snap.Jobs {
+		if alive, ok := live[j.ID]; ok && !alive {
+			hidden++
+			continue
+		}
+		visible = append(visible, j)
+	}
+	st := &uiState{
+		snapshotOnly:     true,
+		demoMode:         src.IsDemo(),
+		src:              src,
+		snapCfg:          snap.Cfg,
+		snapJobs:         visible,
+		hiddenJobs:       hidden,
+		snapMCP:          snap.MCP,
+		snapDaemonResp:   snap.DaemonResp,
+		snapTunnelActive: snap.TunnelActive,
+		snapTunnelErrs:   snap.TunnelErrs,
+		snapAt:           snap.CapturedAt,
+		liveness:         live,
+	}
+	if st.snapTunnelActive == nil {
+		st.snapTunnelActive = map[string]daemon.TunnelInfo{}
+	}
+	if st.snapTunnelErrs == nil {
+		st.snapTunnelErrs = map[string]string{}
+	}
+	return st
+}
+
 func uiDemoMode(args []string) bool {
 	if os.Getenv("SRV_UI_DEMO") == "1" {
 		return true
@@ -1337,10 +1397,13 @@ func demoDashboardData(base *config.Config) (*config.Config, []*jobs.Record, mcp
 		cfg.Hints = base.Hints
 	}
 	cfg.DefaultProfile = "美国备用"
+	demoTrue := true
 	cfg.Profiles = map[string]*config.Profile{
-		"美国备用":       {Host: "backup.example.com", User: "deploy", DefaultCwd: "/srv/demo"},
-		"美国服务":       {Host: "service.example.com", User: "ops", DefaultCwd: "/data/app"},
-		"tokyo-demo": {Host: "tokyo.example.com", User: "dev", DefaultCwd: "/workspace"},
+		"美国备用": {Host: "backup.example.com", User: "deploy", DefaultCwd: "/srv/demo"},
+		"美国服务": {Host: "service.example.com", User: "ops", DefaultCwd: "/data/app"},
+		// tokyo-demo carries agent_forwarding=true so the ↺ icon in
+		// PROFILES is exercised in the demo screenshot.
+		"tokyo-demo": {Host: "tokyo.example.com", User: "dev", DefaultCwd: "/workspace", AgentForwarding: &demoTrue},
 	}
 	cfg.Groups = map[string][]string{
 		"演示组": {"美国备用", "美国服务", "tokyo-demo"},
@@ -1348,6 +1411,14 @@ func demoDashboardData(base *config.Config) (*config.Config, []*jobs.Record, mcp
 	cfg.Tunnels = map[string]*config.TunnelDef{
 		"数据库": {Type: "local", Spec: "15432:db.internal:5432", Profile: "美国备用"},
 		"监控":  {Type: "remote", Spec: "19090:127.0.0.1:9090", Profile: "tokyo-demo", Autostart: true},
+		// On-demand entry so the demo exercises the C1 rendering
+		// path and screenshots show what the [on-demand] flag looks
+		// like in the wild.
+		"api-lazy": {Type: "local", Spec: "18080:127.0.0.1:8080", Profile: "美国服务", OnDemand: true},
+		// `proxy` is deliberately broken: a failed daemon attempt
+		// surfaces as a red "failed: ..." row under TUNNELS. Without
+		// this, the live failure path never appeared in screenshots.
+		"proxy": {Type: "local", Spec: "11080:127.0.0.1:1080", Profile: "美国备用"},
 	}
 
 	now := time.Now()
@@ -1399,9 +1470,8 @@ func demoDashboardData(base *config.Config) (*config.Config, []*jobs.Record, mcp
 // output of stacked boxes is more useful than ascii-art columns.
 func renderDashboard(cfg *config.Config, jobs []*jobs.Record, tunnelNames []string, st *uiState) string {
 	// Reuse the snapshot the main loop already tailed -- one disk
-	// read per snapTTL, not per redraw. Snapshot mode (st == nil) and
-	// the legacy paths still hit disk because there's no cache to
-	// inherit from.
+	// read per snapTTL, not per redraw. Test-only callers can still
+	// pass a nil st; we fall back to mcplog.Read() then.
 	var mcpSnapshot mcplog.Status
 	if st != nil {
 		mcpSnapshot = st.snapMCP
@@ -1415,7 +1485,7 @@ func renderDashboardWithMCP(cfg *config.Config, jobs []*jobs.Record, tunnelNames
 	var sb strings.Builder
 	panelHeader(&sb, st)
 	panelProfiles(&sb, cfg, st)
-	if st == nil || dashboardWidth < dashboardTwoColumnMinWidth {
+	if isSnapshotMode(st) || dashboardWidth < dashboardTwoColumnMinWidth {
 		panelOverview(&sb, cfg, jobs, tunnelNames, mcpSnapshot, st)
 		panelDaemon(&sb, st)
 		panelTunnels(&sb, cfg, tunnelNames, st)
@@ -1466,7 +1536,7 @@ func renderDashboardWithMCP(cfg *config.Config, jobs []*jobs.Record, tunnelNames
 	}
 
 	panelGroups(&sb, cfg)
-	if st == nil {
+	if isSnapshotMode(st) {
 		panelFooter(&sb, st)
 	}
 	out := sb.String()
@@ -2084,12 +2154,16 @@ func panelHeader(sb *strings.Builder, st *uiState) {
 	// is shown below as "snapshot mode (no tty)", so the upper-right
 	// "live terminal view" tag would contradict it -- swap to a
 	// neutral label in that case.
+	// Two independent axes: snapshotMode (interactive or not) and
+	// demoMode (real data vs sample). The label captures whichever
+	// dominates -- demo wins because the user explicitly asked for
+	// it; snapshot is the fallback for non-TTY.
 	mode := ansi.Dim + "live terminal view" + ansi.Reset
 	switch {
-	case st == nil:
-		mode = ansi.Dim + "one-shot snapshot" + ansi.Reset
-	case st.demoMode:
+	case st != nil && st.demoMode:
 		mode = ansi.Yellow + ansi.Bold + "DEMO" + ansi.Reset + ansi.Dim + " simulated data" + ansi.Reset
+	case isSnapshotMode(st):
+		mode = ansi.Dim + "one-shot snapshot" + ansi.Reset
 	}
 	boxLine(sb, fitInlineParts(
 		[]string{
@@ -2099,7 +2173,7 @@ func panelHeader(sb *strings.Builder, st *uiState) {
 		mode,
 		dashboardContentWidth,
 	))
-	if st == nil {
+	if isSnapshotMode(st) {
 		boxLine(sb, ansi.Dim+"snapshot mode (no tty)"+ansi.Reset)
 		boxBottom(sb)
 		fmt.Fprintln(sb)
@@ -2195,6 +2269,12 @@ func panelProfiles(sb *strings.Builder, cfg *config.Config, st *uiState) {
 			} else {
 				dot = ansi.Dim + "○ " + ansi.Reset
 				label = ansi.Dim + n + ansi.Reset
+			}
+			// Tiny ↺ suffix when the profile has agent forwarding on.
+			// Cheap visual cue without inflating the column width --
+			// `srv config show <name>` still has the authoritative view.
+			if p := cfg.Profiles[n]; p != nil && p.GetAgentForwarding() {
+				label += ansi.Cyan + " ↺" + ansi.Reset
 			}
 			cell := dot + padAnsiRight(label, cellW-marker)
 			line.WriteString(cell)
@@ -2311,6 +2391,12 @@ func ellipsisAnsiRight(s string, w int) string {
 // 6-7 socket round-trips per second.
 func panelDaemon(sb *strings.Builder, st *uiState) {
 	boxTop(sb, "daemon")
+	// Always read from the snapshot. The previous `st == nil` branch
+	// dialled the real daemon -- which made `srv ui demo | less`
+	// show live daemon state under the demo header. Snapshot mode now
+	// supplies a populated st (Cmd's non-TTY path); tests that pass
+	// nil still work because we fall back to a live dial only as a
+	// last resort.
 	var resp *daemon.Response
 	if st != nil {
 		resp = st.snapDaemonResp
@@ -2349,14 +2435,14 @@ func panelOverview(sb *strings.Builder, cfg *config.Config, jobs []*jobs.Record,
 		defaultProfile = "-"
 	}
 	focus := "snapshot"
-	if st != nil {
+	if !isSnapshotMode(st) {
 		focus = st.focusPane
 		if focus == "" {
 			focus = "none"
 		}
-		if st.demoMode {
-			focus += " demo"
-		}
+	}
+	if st != nil && st.demoMode {
+		focus += " demo"
 	}
 	hidden := 0
 	if st != nil {
@@ -2450,6 +2536,8 @@ func panelTunnels(sb *strings.Builder, cfg *config.Config, names []string, st *u
 		fmt.Fprintln(sb)
 		return
 	}
+	// Same story as panelDaemon: pull active/errs from the snapshot
+	// so demo and live both reflect what their Source returned.
 	var active map[string]daemon.TunnelInfo
 	var errs map[string]string
 	if st != nil {
@@ -2488,7 +2576,13 @@ func panelTunnels(sb *strings.Builder, cfg *config.Config, names []string, st *u
 		}
 		flag := ""
 		if def.Autostart {
-			flag = " " + dashStatus("autostart", ansi.Cyan)
+			flag += " " + dashStatus("autostart", ansi.Cyan)
+		}
+		if def.OnDemand {
+			// On-demand tunnels share the same flag-cell strip as
+			// autostart. Magenta so both flags can coexist on one
+			// row without color collisions.
+			flag += " " + dashStatus("on-demand", ansi.Magenta)
 		}
 		row := "  " +
 			padAnsiRight(dashName(fitPlain(n, nameW)), nameW) + "  " +
@@ -2690,6 +2784,20 @@ func panelJobDetail(sb *strings.Builder, title string, j *jobs.Record, st *uiSta
 	if j.Log != "" {
 		boxLine(sb, kvLine("log", dashPath(fitPlain(j.Log, dashboardContentWidth-10))))
 	}
+	// Phase 3 fields: surface completion + notification state. The
+	// JOBS list filters out exited rows entirely (alive only), so
+	// these only show up here when the user navigates to a job that
+	// just finished but hasn't been pruned yet.
+	if j.Finished != "" {
+		finished := j.Finished
+		if t, ok := parseISOLike(j.Finished); ok {
+			finished = j.Finished + dashMeta(" ("+fmtDuration(time.Since(t))+" ago)")
+		}
+		boxLine(sb, kvLine("finished", finished))
+	}
+	if j.Notified {
+		boxLine(sb, kvLine("notified", ansi.Green+"yes"+ansi.Reset+ansi.Dim+"  (local toast / webhook fired)"+ansi.Reset))
+	}
 	boxLine(sb, "")
 	boxLine(sb, ansi.Dim+"COMMAND:"+ansi.Reset)
 	for _, line := range wrapText(j.Cmd, dashboardContentWidth-2) {
@@ -2748,6 +2856,10 @@ func panelTunnelDetail(sb *strings.Builder, title, name string, cfg *config.Conf
 	boxLine(sb, kvLine("spec", dashPath(def.Spec)))
 	boxLine(sb, kvLine("profile", ansi.Cyan+tunnelProfileLabel(def)+ansi.Reset))
 	boxLine(sb, kvLine("autostart", boolLabel(def.Autostart)))
+	if def.OnDemand {
+		boxLine(sb, kvLine("on-demand", ansi.Cyan+"yes"+ansi.Reset+ansi.Dim+"  (SSH dial deferred until first connect)"+ansi.Reset))
+	}
+	// Pull from snapshot, same as the list view.
 	var active map[string]daemon.TunnelInfo
 	var errs map[string]string
 	if st != nil {
@@ -2871,7 +2983,7 @@ func panelStatus(sb *strings.Builder, st *uiState) {
 
 func panelFooter(sb *strings.Builder, st *uiState) {
 	boxTop(sb, "keys")
-	if st == nil {
+	if isSnapshotMode(st) {
 		boxLine(sb, ansi.Dim+"snapshot complete"+ansi.Reset)
 	} else {
 		focus := st.focusPane
@@ -3601,7 +3713,13 @@ func dashTunnels(sb *strings.Builder, cfg *config.Config, names []string, st *ui
 		}
 		flag := ""
 		if def.Autostart {
-			flag = " " + dashStatus("autostart", ansi.Cyan)
+			flag += " " + dashStatus("autostart", ansi.Cyan)
+		}
+		if def.OnDemand {
+			// On-demand tunnels share the same flag-cell strip as
+			// autostart. Magenta so both flags can coexist on one
+			// row without color collisions.
+			flag += " " + dashStatus("on-demand", ansi.Magenta)
 		}
 		if extra != "" {
 			extra = ansi.Dim + extra + ansi.Reset

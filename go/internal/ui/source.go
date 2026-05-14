@@ -182,25 +182,40 @@ func (demoSource) IsDemo() bool { return true }
 
 func (d *demoSource) Snapshot() Snapshot {
 	cfg, js, mcp := demoDashboardData(d.base)
+	// Exercise the renderers' state branches so the demo doubles as a
+	// screenshot fixture for every visual state, not just the happy
+	// path. Each entry below maps to a live-only branch the
+	// pre-refactor demo never showed:
+	//   - 数据库 running          -> "listen=..." extra
+	//   - proxy errored           -> red "failed: ..." row
+	//   - 监控 / api-lazy stopped -> default state
+	active := map[string]daemon.TunnelInfo{
+		"数据库": {Name: "数据库", Type: "local", Spec: "15432:db.internal:5432",
+			Profile: "美国备用", Listen: "127.0.0.1:15432",
+			Started: time.Now().Add(-37 * time.Minute).Unix()},
+	}
+	errs := map[string]string{
+		"proxy": "ssh connection closed: EOF after 3 retries",
+	}
 	return Snapshot{
-		Cfg:        cfg,
-		Jobs:       js,
-		MCP:        mcp,
-		DaemonResp: &daemon.Response{OK: true, Profiles: []string{"美国备用", "tokyo-demo"}, Uptime: int64(2 * time.Hour / time.Second)},
-		// Empty maps -- the demo doesn't simulate running tunnels so
-		// renderers see "stopped" for each saved tunnel.
-		TunnelActive: map[string]daemon.TunnelInfo{},
-		TunnelErrs:   map[string]string{},
+		Cfg:          cfg,
+		Jobs:         js,
+		MCP:          mcp,
+		DaemonResp:   &daemon.Response{OK: true, Profiles: []string{"美国备用", "tokyo-demo"}, Uptime: int64(2 * time.Hour / time.Second)},
+		TunnelActive: active,
+		TunnelErrs:   errs,
 		CapturedAt:   time.Now(),
 	}
 }
 
 func (demoSource) Liveness(js []*jobs.Record) map[string]bool {
-	// In the demo we want every job to render as alive so the panel
-	// shows the full sample row set. A real probe would dial remotes.
+	// Most demo jobs are alive so the panel shows a full row set,
+	// but mark the oldest one as exited (it ran `npm run build` 42m
+	// ago -- realistic for a tail-end build) so the JOBS title's
+	// "+ N hidden" branch is exercised in the screenshot.
 	out := make(map[string]bool, len(js))
-	for _, j := range js {
-		out[j.ID] = true
+	for i, j := range js {
+		out[j.ID] = i != 0 // first record (demo-job-0001) is exited
 	}
 	return out
 }
