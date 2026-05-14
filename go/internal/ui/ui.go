@@ -3,6 +3,7 @@ package ui
 import (
 	"encoding/json"
 	"fmt"
+	"math"
 	"os"
 	"path/filepath"
 	"sort"
@@ -51,22 +52,31 @@ type uiConfirm struct {
 // confirmation popup is up. Kept in one struct so the renderers can
 // read it without each one growing a parameter.
 type uiState struct {
-	cursor       int        // index into rows; -1 when rows is empty
-	rows         []uiRow    // selectable rows in display order
-	focusPane    string     // "tunnel" / "job" / "mcp"; Tab / h / l cycles
-	tunnelCursor int        // index within the tunnel window
-	jobCursor    int        // index within the jobs window
-	mcpCursor    int        // index within the mcp recent-tools window
-	detailScroll int        // first visible body row in the right-side DETAIL panel
-	tunnelRows   int        // adaptive visible rows for the TUNNELS panel
-	jobRows      int        // adaptive visible rows for the JOBS panel
-	groupRows    int        // adaptive visible rows for the GROUPS panel
-	detailMode   bool       // showing the per-row detail panel
-	confirm      *uiConfirm // non-nil = popup is up, awaiting Y/N
-	statusMsg    string     // transient line in the STATUS panel (kill result, etc.)
-	demoMode     bool       // mirror of src.IsDemo() for renderers; the authoritative value lives on src
-	compact      bool       // short terminal: drop nonessential rows so panels fit vertically
-	src          Source     // data + action facade; demoSource or liveSource
+	cursor       int     // index into rows; -1 when rows is empty
+	rows         []uiRow // selectable rows in display order
+	focusPane    string  // "tunnel" / "job" / "mcp"; Tab / h / l cycles
+	tunnelCursor int     // index within the tunnel window
+	jobCursor    int     // index within the jobs window
+	mcpCursor    int     // index within the mcp recent-tools window
+	detailScroll int     // first visible body row in the right-side DETAIL panel
+	tunnelRows   int     // adaptive visible rows for the TUNNELS panel
+	jobRows      int     // adaptive visible rows for the JOBS panel
+	groupRows    int     // adaptive visible rows for the GROUPS panel
+	// cpuHistory / memHistory are bounded ring buffers of recent
+	// StatsSample values driven by the background stats sampler.
+	// Both are sized to `statsHistoryLen` and newest entry is the
+	// last element. statsErr carries the most recent sampling error,
+	// if any, so the panel can surface it inline.
+	cpuHistory []float64
+	memHistory []float64
+	statsErr   string
+	statsCh    chan StatsSample // background sampler -> main loop
+	detailMode bool             // showing the per-row detail panel
+	confirm    *uiConfirm       // non-nil = popup is up, awaiting Y/N
+	statusMsg  string           // transient line in the STATUS panel (kill result, etc.)
+	demoMode   bool             // mirror of src.IsDemo() for renderers; the authoritative value lives on src
+	compact    bool             // short terminal: drop nonessential rows so panels fit vertically
+	src        Source           // data + action facade; demoSource or liveSource
 	// snapshotOnly = true when this state was built for a one-shot
 	// `srv ui | less` style render. The renderers use it to suppress
 	// interactive affordances (cursors, key hints, focus tagging) and
@@ -285,6 +295,7 @@ func Cmd(args []string, cfg *config.Config) error {
 		demoMode:    demo,
 		src:         src,
 		jobLogCh:    make(chan *uiJobLog, 4),
+		statsCh:     make(chan StatsSample, 4),
 	}
 	// Persisted cursor / focus is loaded only outside demo mode. Demo
 	// is meant to be a clean reproducible screenshot; leaking last
@@ -294,6 +305,12 @@ func Cmd(args []string, cfg *config.Config) error {
 		applyPersistedState(st, loadUIState())
 		defer saveUIState(st)
 	}
+	// Background stats sampler. Runs on its own ticker so the
+	// (possibly slow) ssh round-trip never blocks the redraw loop.
+	// Closes when the function returns via the stopStats channel.
+	stopStats := make(chan struct{})
+	defer close(stopStats)
+	go runStatsSampler(src, st.statsCh, stopStats)
 	const refreshEvery = 2 * time.Second
 	// pollEvery is how often the loop wakes when no key is pressed.
 	// Short enough that a terminal resize lands within ~50ms (Windows
@@ -445,6 +462,9 @@ func Cmd(args []string, cfg *config.Config) error {
 				st.forceRedraw = true
 			}
 			if drainJobLogCh(st) {
+				st.forceRedraw = true
+			}
+			if drainStatsCh(st) {
 				st.forceRedraw = true
 			}
 			continue
@@ -1059,6 +1079,69 @@ func shellQuote(s string) string {
 	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
 }
 
+// runStatsSampler runs the Source.Stats() probe on a fixed ticker
+// and emits each sample onto out. Stops when stop closes. Designed
+// to run in its own goroutine so the redraw loop never blocks on a
+// slow ssh round-trip.
+//
+// We don't sleep between out-channel-full backpressure; the channel
+// is small (cap 4) and the main loop drains it every poll. Worst
+// case is one dropped sample if the user puts the dashboard in
+// background and the queue fills.
+func runStatsSampler(src Source, out chan<- StatsSample, stop <-chan struct{}) {
+	if src == nil {
+		return
+	}
+	// First sample fires immediately so the panel doesn't sit on
+	// "collecting..." for a full statsInterval after open.
+	first := time.NewTimer(50 * time.Millisecond)
+	defer first.Stop()
+	ticker := time.NewTicker(statsInterval)
+	defer ticker.Stop()
+	emit := func() {
+		s := src.Stats()
+		select {
+		case out <- s:
+		case <-stop:
+		default:
+			// Channel full: drop the sample rather than blocking the
+			// sampler. The main loop will pick up the next one.
+		}
+	}
+	for {
+		select {
+		case <-stop:
+			return
+		case <-first.C:
+			emit()
+		case <-ticker.C:
+			emit()
+		}
+	}
+}
+
+// drainStatsCh empties pending samples into the rings. Returns true
+// when at least one sample landed so the caller can mark the frame
+// dirty.
+func drainStatsCh(st *uiState) bool {
+	if st == nil || st.statsCh == nil {
+		return false
+	}
+	got := false
+	for {
+		select {
+		case s, ok := <-st.statsCh:
+			if !ok {
+				return got
+			}
+			pushStatsSample(st, s)
+			got = true
+		default:
+			return got
+		}
+	}
+}
+
 // drainJobLogCh non-blockingly pulls any pending log results into
 // st.jobLog. Called by the main loop's idle tick so a slow fetch
 // doesn't have to coincide with a keypress to land on screen.
@@ -1426,7 +1509,42 @@ func buildSnapshotState(src Source) *uiState {
 	if st.snapTunnelErrs == nil {
 		st.snapTunnelErrs = map[string]string{}
 	}
+	// Seed the stats rings with a small synthetic history so the
+	// snapshot screenshot doesn't show "collecting..." but a real-
+	// looking sparkline. For the live source this samples once (slow
+	// but acceptable on a one-shot snapshot); for the demo source it
+	// just walks the sinusoid backwards from now.
+	if src.IsDemo() {
+		for i := statsHistoryLen; i >= 1; i-- {
+			s := simulateBackdatedDemoSample(i)
+			st.cpuHistory = appendCapped(st.cpuHistory, s.CPULoad, statsHistoryLen)
+			st.memHistory = appendCapped(st.memHistory, s.MemPercent, statsHistoryLen)
+		}
+	} else {
+		s := src.Stats()
+		pushStatsSample(st, s)
+	}
 	return st
+}
+
+// simulateBackdatedDemoSample is the demoSource.Stats sinusoid evaluated
+// at "n samples ago". Lets buildSnapshotState pre-seed a full history
+// for the demo screenshot rather than a one-sample "starting" view.
+func simulateBackdatedDemoSample(stepsAgo int) StatsSample {
+	t := time.Now().Add(-time.Duration(stepsAgo) * statsInterval)
+	phase := float64(t.Unix()%180) / 180.0
+	cpu := 0.6 + 0.8*math.Sin(phase*2*math.Pi)
+	mem := 50 + 25*math.Sin(phase*2*math.Pi+math.Pi/3)
+	if cpu < 0 {
+		cpu = 0
+	}
+	if mem < 0 {
+		mem = 0
+	}
+	if mem > 100 {
+		mem = 100
+	}
+	return StatsSample{CPULoad: cpu, MemPercent: mem, When: t}
 }
 
 func uiDemoMode(args []string) bool {
@@ -1550,29 +1668,36 @@ func renderDashboardWithMCP(cfg *config.Config, jobs []*jobs.Record, tunnelNames
 		sb.WriteString(middle)
 	} else {
 		leftW, rightW, gap := splitColumnsWidth(dashboardWidth)
-		// DETAIL spans the full left control stack and closes on the
-		// same row as the left stack. Keeping STATUS inside the side-by-side
-		// measurement avoids the right panel ending early while the
-		// left column continues below it.
+		// Left stack: OVERVIEW + DAEMON + TUNNELS + JOBS (+ STATUS).
+		// We measure the height of each section so the right column
+		// can split into DETAIL (top = OVERVIEW+DAEMON+TUNNELS) and
+		// STATS (bottom = JOBS+STATUS). User wants DETAIL's bottom
+		// border aligned with TUNNELS's bottom, not with JOBS.
 		prefixLines := len(splitDashboardLines(sb.String()))
 		groupLines := measureGroupsLines(cfg)
 		available := dashboardHeight - prefixLines - groupLines
+
+		// Render top + bottom sections separately so we can measure
+		// each one's height. They're concatenated on the left and
+		// the heights become DETAIL and STATS targets on the right.
+		var topH, jobsH int
 		left := fitListRowsToHeight(st, available, func() string {
-			var leftBuf strings.Builder
+			var topBuf, jobsBuf strings.Builder
 			withDashboardWidth(leftW, func() {
-				panelOverview(&leftBuf, cfg, jobs, tunnelNames, mcpSnapshot, st)
-				panelDaemon(&leftBuf, st)
-				panelTunnels(&leftBuf, cfg, tunnelNames, st)
-				panelJobs(&leftBuf, jobs, st)
-				// MCP panel suppressed; see single-column branch above.
-				panelStatus(&leftBuf, st)
+				panelOverview(&topBuf, cfg, jobs, tunnelNames, mcpSnapshot, st)
+				panelDaemon(&topBuf, st)
+				panelTunnels(&topBuf, cfg, tunnelNames, st)
+				panelJobs(&jobsBuf, jobs, st)
+				panelStatus(&jobsBuf, st)
 			})
-			return leftBuf.String()
+			topH = len(splitDashboardLines(topBuf.String()))
+			jobsH = len(splitDashboardLines(jobsBuf.String()))
+			return topBuf.String() + jobsBuf.String()
 		})
-		leftLines := splitDashboardLines(left)
 		var rightBuf strings.Builder
 		withDashboardWidth(rightW, func() {
-			renderStretchedDetail(&rightBuf, cfg, jobs, tunnelNames, mcpSnapshot, st, len(leftLines))
+			renderStretchedDetail(&rightBuf, cfg, jobs, tunnelNames, mcpSnapshot, st, topH)
+			renderStretchedStats(&rightBuf, st, jobsH)
 		})
 		writeSideBySide(&sb, left, rightBuf.String(), leftW, rightW, gap)
 	}
@@ -1639,6 +1764,10 @@ func renderDashboardMiddle(sb *strings.Builder, cfg *config.Config, jobs []*jobs
 	// `srv mcp stats` / `srv mcp replay` for the user who wants to
 	// inspect it; the dashboard stays focused on profiles / daemon /
 	// tunnels / jobs.
+	// STATS lives next to JOBS on wide layouts; on narrow / snapshot
+	// layouts it stacks underneath instead so the user still sees the
+	// CPU / memory sparkline.
+	panelStats(sb, st)
 	if st != nil {
 		panelStatus(sb, st)
 	}
@@ -2014,6 +2143,202 @@ func writeSideBySide(sb *strings.Builder, left, right string, leftWidth, rightWi
 	}
 }
 
+// statsHistoryLen caps how many StatsSamples the dashboard keeps for
+// the sparkline. 24 fits comfortably in a 30-char-wide STATS pane
+// at full Unicode-block density and represents ~72s of history at
+// statsInterval=3s -- enough to spot a spike without flooding the
+// screen with stale data.
+const statsHistoryLen = 24
+
+// statsInterval is how often the background sampler invokes
+// Source.Stats(). 3s balances "see the CPU spike I just caused" with
+// "don't hammer the remote with one ssh call every poll".
+const statsInterval = 3 * time.Second
+
+// sparklineGlyphs are the unicode block characters used to draw the
+// per-cell magnitude of one sample. 8 levels matches what most
+// terminal fonts render evenly.
+var sparklineGlyphs = []rune("▁▂▃▄▅▆▇█")
+
+// sparkline renders the supplied values as a left-aligned bar strip
+// in `width` cells. Values are normalised against max (or 1 if all
+// zero). Missing samples (empty slot) render as a space, so a fresh
+// dashboard with only one sample so far renders mostly empty until
+// the ring fills in.
+func sparkline(values []float64, width int, vmin, vmax float64) string {
+	if width <= 0 {
+		return ""
+	}
+	if len(values) == 0 {
+		return strings.Repeat(" ", width)
+	}
+	// Auto-scale when caller passes vmax<=vmin: pick the actual max.
+	if vmax <= vmin {
+		vmin = 0
+		vmax = values[0]
+		for _, v := range values {
+			if v > vmax {
+				vmax = v
+			}
+		}
+		if vmax <= 0 {
+			vmax = 1
+		}
+	}
+	span := vmax - vmin
+	out := make([]rune, 0, width)
+	// Right-align: pad with spaces on the LEFT for the empty portion
+	// of the ring, so the newest sample sits at the right edge of the
+	// strip and the visual sweep is left-to-right.
+	pad := width - len(values)
+	if pad < 0 {
+		pad = 0
+	}
+	for i := 0; i < pad; i++ {
+		out = append(out, ' ')
+	}
+	start := 0
+	if len(values) > width {
+		start = len(values) - width
+	}
+	for _, v := range values[start:] {
+		norm := (v - vmin) / span
+		if norm < 0 {
+			norm = 0
+		}
+		if norm > 1 {
+			norm = 1
+		}
+		idx := int(norm * float64(len(sparklineGlyphs)-1))
+		out = append(out, sparklineGlyphs[idx])
+	}
+	return string(out)
+}
+
+// panelStats renders the CPU + MEM sparklines plus the latest numeric
+// values. Sits in the right column beneath DETAIL. Empty state (no
+// samples yet) shows a "collecting..." line.
+func panelStats(sb *strings.Builder, st *uiState) {
+	boxTop(sb, "stats")
+	if st == nil || (len(st.cpuHistory) == 0 && len(st.memHistory) == 0) {
+		hint := ansi.Dim + "collecting remote samples..." + ansi.Reset
+		if st != nil && st.statsErr != "" {
+			hint = ansi.Red + "stats unavailable: " + st.statsErr + ansi.Reset
+		}
+		boxLine(sb, hint)
+		boxBottom(sb)
+		return
+	}
+	// Sparkline width = panel content width minus the prefix "CPU
+	// X.XX " (10 chars). Cap to a reasonable upper bound so the
+	// chart stays scannable at very wide terminals.
+	const prefix = 10
+	width := dashboardContentWidth - prefix
+	if width > statsHistoryLen {
+		width = statsHistoryLen
+	}
+	if width < 6 {
+		width = 6
+	}
+	cpuLatest := 0.0
+	if n := len(st.cpuHistory); n > 0 {
+		cpuLatest = st.cpuHistory[n-1]
+	}
+	memLatest := 0.0
+	if n := len(st.memHistory); n > 0 {
+		memLatest = st.memHistory[n-1]
+	}
+	// CPU auto-scales because load average has no natural ceiling.
+	// MEM is 0..100 by construction so we pin the scale to make
+	// "always near 80%" visually obvious instead of flattening.
+	cpuBar := sparkline(st.cpuHistory, width, 0, 0)
+	memBar := sparkline(st.memHistory, width, 0, 100)
+	boxLine(sb, fmt.Sprintf("%sCPU%s  %s%4.2f%s  %s",
+		ansi.Dim, ansi.Reset,
+		ansi.Yellow+ansi.Bold, cpuLatest, ansi.Reset,
+		ansi.Cyan+cpuBar+ansi.Reset))
+	boxLine(sb, fmt.Sprintf("%sMEM%s  %s%4.1f%%%s %s",
+		ansi.Dim, ansi.Reset,
+		ansi.Yellow+ansi.Bold, memLatest, ansi.Reset,
+		ansi.Magenta+memBar+ansi.Reset))
+	if st.statsErr != "" {
+		boxLine(sb, ansi.Red+"last sample err: "+st.statsErr+ansi.Reset)
+	} else {
+		boxLine(sb, ansi.Dim+fmt.Sprintf("%d samples · refreshes every %v",
+			len(st.cpuHistory), statsInterval)+ansi.Reset)
+	}
+	boxBottom(sb)
+}
+
+// pushStatsSample appends one sample to each ring, capped at
+// statsHistoryLen. Called by the main loop when it drains statsCh.
+func pushStatsSample(st *uiState, s StatsSample) {
+	if st == nil {
+		return
+	}
+	if s.Err != "" {
+		st.statsErr = s.Err
+		// Still record a 0 so the gap is visible in the sparkline,
+		// rather than skipping the slot silently.
+	} else {
+		st.statsErr = ""
+	}
+	st.cpuHistory = appendCapped(st.cpuHistory, s.CPULoad, statsHistoryLen)
+	st.memHistory = appendCapped(st.memHistory, s.MemPercent, statsHistoryLen)
+}
+
+func appendCapped(arr []float64, v float64, max int) []float64 {
+	arr = append(arr, v)
+	if len(arr) > max {
+		arr = arr[len(arr)-max:]
+	}
+	return arr
+}
+
+// renderStretchedStats is the STATS-side analogue of
+// renderStretchedDetail. Pads / truncates panelStats output to
+// exactly `targetHeight` rows so its closing border lands flush
+// with the JOBS panel's closing border on the left.
+func renderStretchedStats(sb *strings.Builder, st *uiState, targetHeight int) {
+	if targetHeight < 3 {
+		targetHeight = 3
+	}
+	var buf strings.Builder
+	panelStats(&buf, st)
+	lines := splitDashboardLines(buf.String())
+	bottomIdx := -1
+	for i := len(lines) - 1; i >= 0; i-- {
+		if strings.Contains(lines[i], "╰") {
+			bottomIdx = i
+			break
+		}
+	}
+	if bottomIdx < 0 {
+		sb.WriteString(buf.String())
+		return
+	}
+	body := lines[1:bottomIdx]
+	bodyMax := targetHeight - 2
+	if bodyMax < 0 {
+		bodyMax = 0
+	}
+	if len(body) > bodyMax {
+		body = body[:bodyMax]
+	}
+	sb.WriteString(lines[0])
+	sb.WriteByte('\n')
+	for _, line := range body {
+		sb.WriteString(line)
+		sb.WriteByte('\n')
+	}
+	pad := bodyMax - len(body)
+	for i := 0; i < pad; i++ {
+		boxLine(sb, "")
+	}
+	sb.WriteString(lines[bottomIdx])
+	sb.WriteByte('\n')
+}
+
 // renderStretchedDetail draws panelDetail at exactly `targetHeight`
 // rows (excluding the trailing blank). The box's `╭─╮` top sits on
 // row 0 and its `╰─╯` bottom on row targetHeight-1, so the closing
@@ -2089,7 +2414,12 @@ func renderStretchedDetail(sb *strings.Builder, cfg *config.Config, jobs []*jobs
 		boxLine(sb, "")
 	}
 	sb.WriteString(lines[bottomIdx])
-	sb.WriteString("\n\n")
+	// Single trailing newline. The original `"\n\n"` left an extra
+	// blank row below DETAIL which was harmless when DETAIL was the
+	// only thing in the right column; now STATS sits beneath, and
+	// that blank shoves STATS one row south of where it should align
+	// with JOBS top.
+	sb.WriteByte('\n')
 }
 
 func detailScrollHint(st *uiState, hidden int) string {

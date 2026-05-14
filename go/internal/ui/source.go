@@ -2,14 +2,32 @@ package ui
 
 import (
 	"fmt"
+	"math"
 	"srv/internal/config"
 	"srv/internal/daemon"
 	"srv/internal/jobs"
 	"srv/internal/mcplog"
 	"srv/internal/remote"
 	"srv/internal/tunnel"
+	"strconv"
+	"strings"
 	"time"
 )
+
+// statsProbe routes the Stats() shell command through the daemon
+// when available, falling back to a direct dial when not. Returns
+// (stdout, exitCode, ok). `ok=false` means we couldn't even get a
+// reply -- caller surfaces "no remote" in the sparkline error slot.
+func statsProbe(profile *config.Profile, cmd string) (string, int, bool) {
+	if res, ok := daemon.TryRunCapture(profile.Name, "", cmd); ok && res != nil {
+		return res.Stdout, res.ExitCode, true
+	}
+	res, err := remote.RunCapture(profile, "", cmd)
+	if err != nil || res == nil {
+		return "", 0, false
+	}
+	return res.Stdout, res.ExitCode, true
+}
 
 // Source is the dashboard's data + side-effect façade. Every piece
 // of state the renderers care about (config, jobs, MCP status,
@@ -49,6 +67,22 @@ type Source interface {
 	// place in the UI where demo and live are visibly distinguished;
 	// everything else flows through the data surface above.
 	IsDemo() bool
+	// Stats returns a single CPU-load + memory-percent sample for the
+	// remote, used by panelStats to draw a small sparkline of recent
+	// trends. The dashboard calls this on its own cadence (every
+	// statsInterval); the Source itself doesn't have to cache.
+	Stats() StatsSample
+}
+
+// StatsSample is one snapshot of the remote's resource usage. CPULoad
+// is the 1-minute load average (matches /proc/loadavg field 1).
+// MemPercent is used/total*100. Err carries a one-line reason when
+// sampling failed -- the renderer surfaces it under the sparkline.
+type StatsSample struct {
+	CPULoad    float64
+	MemPercent float64
+	When       time.Time
+	Err        string
 }
 
 // Snapshot is the bundle Source.Snapshot returns. Fields are owned by
@@ -163,6 +197,35 @@ func (liveSource) TunnelRemove(name string, cfg *config.Config) (string, error) 
 	return uiTunnelRemove(name, cfg)
 }
 
+func (liveSource) Stats() StatsSample {
+	cfg, err := config.Load()
+	if err != nil || cfg == nil {
+		return StatsSample{When: time.Now(), Err: "no config"}
+	}
+	name, profile, err := config.Resolve(cfg, "")
+	_ = name
+	if err != nil {
+		return StatsSample{When: time.Now(), Err: "no profile"}
+	}
+	// One-liner Linux probe: load avg + memory used%.
+	cmd := `awk '{print $1}' /proc/loadavg && awk 'BEGIN{used=0; total=1} /^MemTotal:/{total=$2} /^MemAvailable:/{avail=$2} END{if(total>0) printf "%.2f", (total-avail)/total*100}' /proc/meminfo`
+	stdout, exitCode, ok := statsProbe(profile, cmd)
+	if !ok {
+		return StatsSample{When: time.Now(), Err: "no remote"}
+	}
+	if exitCode != 0 {
+		return StatsSample{When: time.Now(), Err: "remote err"}
+	}
+	out := strings.TrimSpace(stdout)
+	parts := strings.Fields(out)
+	if len(parts) < 2 {
+		return StatsSample{When: time.Now(), Err: "parse"}
+	}
+	cpu, _ := strconv.ParseFloat(parts[0], 64)
+	mem, _ := strconv.ParseFloat(parts[1], 64)
+	return StatsSample{CPULoad: cpu, MemPercent: mem, When: time.Now()}
+}
+
 // --- demo source -----------------------------------------------------
 
 // demoSource serves the fixed demo dataset. Actions return canned
@@ -241,4 +304,25 @@ func (demoSource) TunnelDown(name string) (string, error) {
 }
 func (demoSource) TunnelRemove(name string, _ *config.Config) (string, error) {
 	return "demo tunnel removed; no config changed", nil
+}
+
+func (demoSource) Stats() StatsSample {
+	// Deterministic-but-lively sample so the demo screenshot shows a
+	// non-trivial sparkline. Two slow sinusoids offset by π/3 so the
+	// CPU and MEM rows aren't identical -- helps users see the panel
+	// has two independent series.
+	now := time.Now()
+	phase := float64(now.Unix()%180) / 180.0 // 3-minute period
+	cpu := 0.6 + 0.8*math.Sin(phase*2*math.Pi)
+	mem := 50 + 25*math.Sin(phase*2*math.Pi+math.Pi/3)
+	if cpu < 0 {
+		cpu = 0
+	}
+	if mem < 0 {
+		mem = 0
+	}
+	if mem > 100 {
+		mem = 100
+	}
+	return StatsSample{CPULoad: cpu, MemPercent: mem, When: now}
 }
