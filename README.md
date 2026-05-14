@@ -467,7 +467,7 @@ srv recipe run deploy SVC=myapp
 
 **v1 的边界(请阅读再用):**
 
-- 远端必须有 `srv` 二进制,且操作系统支持 `/dev/ptmx`(Linux/macOS/BSD;Windows server 端不支持)。
+- 远端必须有 `srv` 二进制,且系统是 Linux(server 端 PTY 通过 `/dev/ptmx` + `TIOCSPTLCK`/`TIOCGPTN` ioctl 拿,macOS/BSD/Windows 的 server 端不支持 —— 客户端在所有 OS 上都能用)。
 - 不实现 mosh 的预测本地回显;键入延迟就是网络真实延迟。
 - 不实现 mosh 的终端状态同步协议;输出按帧流式传送,断线缓冲只到 RTO 上限。
 - 不支持跨进程续会话(关掉 `srv mosh` 再开就是新会话,旧服务端 30 分钟空闲后超时退出)。

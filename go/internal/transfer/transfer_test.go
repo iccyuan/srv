@@ -5,6 +5,7 @@ import (
 	"encoding/hex"
 	"os"
 	"path/filepath"
+	"sync/atomic"
 	"testing"
 )
 
@@ -75,10 +76,12 @@ func TestRunParallelEmptyAndSequential(t *testing.T) {
 
 func TestRunParallelFirstErrorWins(t *testing.T) {
 	jobs := []fileJob{{src: "a"}, {src: "b"}, {src: "fail"}, {src: "d"}, {src: "e"}}
-	calls := 0
+	// atomic counter -- multiple worker goroutines invoke the function
+	// concurrently; a plain int++ would race the test on go test -race.
+	var calls atomic.Int32
 	myErr := os.ErrPermission
 	err := runParallel(jobs, 4, func(j fileJob) error {
-		calls++
+		calls.Add(1)
 		if j.src == "fail" {
 			return myErr
 		}
@@ -87,7 +90,7 @@ func TestRunParallelFirstErrorWins(t *testing.T) {
 	if err != myErr {
 		t.Errorf("expected first error, got %v", err)
 	}
-	if calls == 0 {
+	if calls.Load() == 0 {
 		t.Errorf("worker should have been invoked at least once")
 	}
 }

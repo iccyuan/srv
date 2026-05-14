@@ -1,6 +1,14 @@
-//go:build linux || darwin || freebsd || netbsd || openbsd
+//go:build linux
 
 package moshx
+
+// Linux-only PTY allocation. The TIOCSPTLCK / TIOCGPTN ioctls used
+// below are Linux-kernel-specific; BSDs (including macOS) use the
+// POSIX path `posix_openpt` / `grantpt` / `unlockpt` / `ptsname`,
+// which Go doesn't expose directly without cgo. For v1 we restrict
+// the mosh server side to Linux remotes -- that's the typical SSH
+// target anyway. macOS / BSD servers fall through to the stub in
+// pty_other.go which returns a clear "not supported" error.
 
 import (
 	"fmt"

@@ -15,6 +15,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 
 	"github.com/pkg/sftp"
 )
@@ -498,13 +499,19 @@ func runParallel(jobs []fileJob, workers int, do func(fileJob) error) error {
 	}
 
 	jobCh := make(chan fileJob)
+	// firstErr holds the first non-nil error any worker observed.
+	// atomic.Pointer keeps the read on the hot "should I skip this
+	// job?" path lock-free AND race-detector clean. Plain sync.Once
+	// would order the WRITE but not the concurrent READs on line
+	// `if firstErr != nil`, which is what `go test -race` flagged
+	// on CI.
 	var (
 		wg       sync.WaitGroup
 		errOnce  sync.Once
-		firstErr error
+		firstErr atomic.Pointer[error]
 	)
 	setErr := func(e error) {
-		errOnce.Do(func() { firstErr = e })
+		errOnce.Do(func() { firstErr.Store(&e) })
 	}
 	for i := 0; i < workers; i++ {
 		wg.Add(1)
@@ -514,7 +521,7 @@ func runParallel(jobs []fileJob, workers int, do func(fileJob) error) error {
 				// Skip remaining work after a peer reported an error --
 				// we still drain the channel so the producer's `<-jobCh`
 				// loop terminates, just stop spending bandwidth on it.
-				if firstErr != nil {
+				if firstErr.Load() != nil {
 					continue
 				}
 				if err := do(j); err != nil {
@@ -528,5 +535,8 @@ func runParallel(jobs []fileJob, workers int, do func(fileJob) error) error {
 	}
 	close(jobCh)
 	wg.Wait()
-	return firstErr
+	if p := firstErr.Load(); p != nil {
+		return *p
+	}
+	return nil
 }
