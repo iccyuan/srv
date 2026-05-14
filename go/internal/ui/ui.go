@@ -457,15 +457,18 @@ func sortedTunnelNames(cfg *config.Config) []string {
 // (tunnels -> jobs -> mcp recent), so a press of `j` walks the
 // cursor visually downward without jumping between sections.
 func buildSelectableRows(tunnels []string, jobs []*jobs.Record, mcpRecent []mcplog.ToolCall) []uiRow {
-	rows := make([]uiRow, 0, len(tunnels)+len(jobs)+len(mcpRecent))
+	// MCP rows used to be appended here so Tab could cycle focus into
+	// an "mcp" pane. The MCP panel is no longer rendered, so we don't
+	// want focus to land on a pane the user can't see. Signature kept
+	// (mcpRecent stays accepted but ignored) so call sites don't have
+	// to change.
+	_ = mcpRecent
+	rows := make([]uiRow, 0, len(tunnels)+len(jobs))
 	for i, n := range tunnels {
 		rows = append(rows, uiRow{kind: "tunnel", id: n, idx: i})
 	}
 	for i, j := range jobs {
 		rows = append(rows, uiRow{kind: "job", id: j.ID, idx: i})
-	}
-	for i, tc := range mcpRecent {
-		rows = append(rows, uiRow{kind: "mcp", id: tc.Name, idx: i})
 	}
 	return rows
 }
@@ -578,17 +581,16 @@ func clampCursor(st *uiState) {
 
 	// If the focused pane has been emptied (e.g., user killed the
 	// last job), pick the next non-empty pane in our preferred order.
+	// MCP is no longer a target -- the panel was removed.
 	if (st.focusPane == "tunnel" && tunnels == 0) ||
 		(st.focusPane == "job" && jobs == 0) ||
-		(st.focusPane == "mcp" && mcp == 0) ||
+		st.focusPane == "mcp" ||
 		st.focusPane == "" {
 		switch {
 		case tunnels > 0:
 			st.focusPane = "tunnel"
 		case jobs > 0:
 			st.focusPane = "job"
-		case mcp > 0:
-			st.focusPane = "mcp"
 		default:
 			st.focusPane = ""
 		}
@@ -648,8 +650,8 @@ func focusPrevPane(st *uiState) {
 }
 
 func cyclePane(st *uiState, dir int) {
-	tunnels, jobs, mcp := countUIRows(st.rows)
-	order := []string{"tunnel", "job", "mcp"}
+	tunnels, jobs, _ := countUIRows(st.rows)
+	order := []string{"tunnel", "job"}
 	avail := []string{}
 	for _, p := range order {
 		switch p {
@@ -659,10 +661,6 @@ func cyclePane(st *uiState, dir int) {
 			}
 		case "job":
 			if jobs > 0 {
-				avail = append(avail, p)
-			}
-		case "mcp":
-			if mcp > 0 {
 				avail = append(avail, p)
 			}
 		}
@@ -693,13 +691,12 @@ func moveFocusedRow(st *uiState, delta int) {
 	if len(st.rows) == 0 {
 		return
 	}
-	tunnels, jobs, mcp := countUIRows(st.rows)
-	order := []string{"tunnel", "job", "mcp"}
-	sizes := map[string]int{"tunnel": tunnels, "job": jobs, "mcp": mcp}
+	tunnels, jobs, _ := countUIRows(st.rows)
+	order := []string{"tunnel", "job"}
+	sizes := map[string]int{"tunnel": tunnels, "job": jobs}
 	cursors := map[string]*int{
 		"tunnel": &st.tunnelCursor,
 		"job":    &st.jobCursor,
-		"mcp":    &st.mcpCursor,
 	}
 
 	if st.focusPane == "" || sizes[st.focusPane] == 0 {
@@ -1490,8 +1487,15 @@ func renderDashboardWithMCP(cfg *config.Config, jobs []*jobs.Record, tunnelNames
 		panelDaemon(&sb, st)
 		panelTunnels(&sb, cfg, tunnelNames, st)
 		panelJobs(&sb, jobs, st)
-		panelMCP(&sb, mcpSnapshot, st)
-		if st != nil {
+		// MCP panel intentionally hidden -- the data still flows
+		// through `srv mcp stats` / `srv mcp replay` for the user
+		// who wants to inspect it; the dashboard stays focused on
+		// remote system state (profiles / daemon / tunnels / jobs).
+		// Snapshot mode skips the in-line status + footer here so
+		// the post-Groups footer below isn't duplicated -- the
+		// snapshot-mode footer is the canonical one outside the
+		// if-block.
+		if !isSnapshotMode(st) {
 			panelStatus(&sb, st)
 			panelFooter(&sb, st)
 		}
@@ -1510,7 +1514,7 @@ func renderDashboardWithMCP(cfg *config.Config, jobs []*jobs.Record, tunnelNames
 			panelDaemon(&leftTop, st)
 			panelTunnels(&leftTop, cfg, tunnelNames, st)
 			panelJobs(&leftTop, jobs, st)
-			panelMCP(&leftBot, mcpSnapshot, st)
+			// MCP panel suppressed; see single-column branch above.
 			panelStatus(&leftBot, st)
 			panelFooter(&leftBot, st)
 		})
@@ -2458,11 +2462,10 @@ func panelOverview(sb *strings.Builder, cfg *config.Config, jobs []*jobs.Record,
 		overviewItem("tunnels", strconv.Itoa(len(tunnelNames))),
 		overviewItem("jobs", fmt.Sprintf("%d visible / %d hidden", len(jobs), hidden)),
 	))
-	if mcp.LogExists {
-		boxLine(sb, overviewItem("mcp", fmt.Sprintf("%d recent", len(mcp.RecentTools))))
-	} else {
-		boxLine(sb, overviewItem("mcp", dashMeta("no log yet")))
-	}
+	// MCP line removed alongside the MCP panel -- the model's tool
+	// call history lives in `srv mcp stats` / `srv mcp replay` now,
+	// not on the dashboard. Suppress the unused-param check on mcp.
+	_ = mcp
 	boxBottom(sb)
 	fmt.Fprintln(sb)
 }
@@ -2713,51 +2716,19 @@ func panelDetail(sb *strings.Builder, cfg *config.Config, jobs []*jobs.Record, t
 			panelJobDetail(sb, fmt.Sprintf("job detail  %d/%d", row.idx+1, len(jobs)), jobs[row.idx], st)
 			return
 		}
-	case "mcp":
-		if row.idx >= 0 && row.idx < len(mcp.RecentTools) {
-			panelMCPDetail(sb, fmt.Sprintf("mcp call detail  %d/%d", row.idx+1, len(mcp.RecentTools)), mcp.RecentTools[row.idx], mcp)
-			return
-		}
 	}
+	// MCP rows no longer go into the selectable set, so the dispatch
+	// above never sees row.kind == "mcp"; case removed.
+	_ = mcp
 	boxTop(sb, "detail")
 	boxLine(sb, ansi.Dim+"(no row selected -- move cursor with ↑/↓)"+ansi.Reset)
 	boxBottom(sb)
 	fmt.Fprintln(sb)
 }
 
-// panelMCPDetail renders one MCP tool call in the right column:
-// the parsed fields (name / dur / ok-or-err / when) plus the server
-// PID that handled it. We cross-reference against mcp.ActivePIDs so
-// the row reads "12345 (alive)" if that MCP server is still running,
-// or "12345 (previous session)" if it has since exited -- useful
-// when debugging "which Claude Code instance issued this call".
-func panelMCPDetail(sb *strings.Builder, title string, tc mcplog.ToolCall, mcp mcplog.Status) {
-	boxTop(sb, title)
-	boxLine(sb, kvLine("tool", ansi.Yellow+ansi.Bold+tc.Name+ansi.Reset))
-	boxLine(sb, kvLine("duration", ansi.Magenta+tc.Dur+ansi.Reset))
-	status := dashStatus("ok", ansi.Green)
-	if !tc.OK {
-		status = dashStatus("err", ansi.Red)
-	}
-	boxLine(sb, kvLine("result", status))
-	boxLine(sb, kvLine("when", tc.When.Format("2006-01-02 15:04:05")+dashMeta(" ("+fmtDuration(time.Since(tc.When))+" ago)")))
-
-	pidLabel := strconv.Itoa(tc.PID)
-	if tc.PID == 0 {
-		pidLabel = dashMeta("(unknown)")
-	} else if mcplog.PidActive(tc.PID, mcp.ActivePIDs) {
-		pidLabel = ansi.Green + ansi.Bold + pidLabel + ansi.Reset + dashMeta(" (alive)")
-	} else {
-		pidLabel = pidLabel + dashMeta(" (previous session)")
-	}
-	boxLine(sb, kvLine("server pid", pidLabel))
-
-	boxLine(sb, "")
-	boxLine(sb, ansi.Dim+"raw log: ~/.srv/mcp.log"+ansi.Reset)
-	boxLine(sb, ansi.Dim+"(read-only -- no actions available here)"+ansi.Reset)
-	boxBottom(sb)
-	fmt.Fprintln(sb)
-}
+// panelMCPDetail removed alongside panelMCP -- the MCP pane is no
+// longer rendered on the dashboard. The same data is available via
+// `srv mcp stats` / `srv mcp replay`.
 
 // pidIsActive moved to srv/internal/mcplog as mcplog.PidActive --
 // reproducing the helper here is no longer necessary now that the
@@ -2887,66 +2858,12 @@ func panelTunnelDetail(sb *strings.Builder, title, name string, cfg *config.Conf
 	fmt.Fprintln(sb)
 }
 
-// panelMCP renders the MCP panel: header row with daemon state +
-// optional active PIDs, then the recent tool-call list (selectable
-// row by row -- focused-pane visuals + cursor matching same shape
-// as Tunnels / Jobs).
-func panelMCP(sb *strings.Builder, mcp mcplog.Status, st *uiState) {
-	if !mcp.LogExists {
-		return
-	}
-	focused := st != nil && st.focusPane == "mcp"
-	title := fmt.Sprintf("mcp %d", len(mcp.RecentTools))
-	if st != nil && len(mcp.RecentTools) > 0 {
-		title += fmt.Sprintf("  %d/%d", st.mcpCursor+1, len(mcp.RecentTools))
-	}
-	boxTopWithHint(sb, title, "read-only", focused)
-	if len(mcp.ActivePIDs) == 0 {
-		boxLineFocused(sb, kvPair("state", dashStatus("idle", ansi.Dim), "last", fmtDuration(time.Since(mcp.LastActive))+" ago"), focused)
-	} else {
-		pids := make([]string, 0, len(mcp.ActivePIDs))
-		for _, p := range mcp.ActivePIDs {
-			pids = append(pids, strconv.Itoa(p))
-		}
-		boxLineFocused(sb, kvPair("state", dashStatus("running", ansi.Green), "pids", strings.Join(pids, ", ")), focused)
-	}
-	if len(mcp.RecentTools) > 0 {
-		boxLineFocused(sb, ansi.Dim+"  TOOL                  DUR      STATE    AGE"+ansi.Reset, focused)
-		boxLineFocused(sb, ansi.Dim+strings.Repeat("-", dashboardContentWidth)+ansi.Reset, focused)
-		toolW := dashboardContentWidth - 30
-		if toolW < 10 {
-			toolW = 10
-		}
-		if toolW > 20 {
-			toolW = 20
-		}
-		start, end := 0, len(mcp.RecentTools)
-		if st != nil {
-			start, end = visibleListRange(len(mcp.RecentTools), st.mcpCursor, dashboardListRows)
-			if end-start < len(mcp.RecentTools) {
-				boxLineFocused(sb, dashMeta(fmt.Sprintf("showing %d-%d/%d", start+1, end, len(mcp.RecentTools))), focused)
-			}
-		}
-		for i := start; i < end; i++ {
-			tc := mcp.RecentTools[i]
-			status := dashStatus("ok", ansi.Green)
-			if !tc.OK {
-				status = dashStatus("err", ansi.Red)
-			}
-			row := "  " +
-				padAnsiRight(ansi.Yellow+fitPlain(tc.Name, toolW)+ansi.Reset, toolW) + "  " +
-				padAnsiRight(ansi.Magenta+tc.Dur+ansi.Reset, 7) + "  " +
-				padAnsiRight(status, 7) + "  " +
-				dashMeta(fmtDuration(time.Since(tc.When))+" ago")
-			if st != nil && st.isSelected("mcp", i) {
-				row = ansi.Yellow + ansi.Bold + "> " + ansi.Reset + ansi.Reverse + row[2:] + ansi.Reset
-			}
-			boxLineFocused(sb, row, focused)
-		}
-	}
-	boxBottomFocused(sb, focused)
-	fmt.Fprintln(sb)
-}
+// panelMCP removed -- the dashboard no longer shows recent MCP tool
+// calls. The data still streams through ~/.srv/mcp.log and is
+// available via `srv mcp stats` (aggregate) / `srv mcp replay` (full
+// args+result). Re-introducing the panel is a one-line call-site
+// addition above + restoring this function; both args (mcp, st) are
+// still wired through the renderer so we don't have to redo plumbing.
 
 func visibleListRange(total, cursor, limit int) (start, end int) {
 	if total <= 0 {
@@ -2996,8 +2913,6 @@ func panelFooter(sb *strings.Builder, st *uiState) {
 			boxLine(sb, keyHelp("↑/↓ move", "space up/down", "x remove", "tab next", "? help"))
 		case "job":
 			boxLine(sb, keyHelp("↑/↓ move", "k kill", "L log", "/ filter", "tab next", "? help"))
-		case "mcp":
-			boxLine(sb, keyHelp("↑/↓ move", "read-only", "tab next", "? help"))
 		default:
 			boxLine(sb, keyHelp("tab choose pane", "? help", "q quit"))
 		}
@@ -3195,11 +3110,6 @@ func helpRows(st *uiState) []string {
 			ansi.Dim + "job pane:" + ansi.Reset,
 			yk("k", "send SIGTERM to selected job"),
 			yk("L", "preview last log lines in DETAIL"),
-		}
-	case "mcp":
-		perPane = []string{
-			ansi.Dim + "mcp pane:" + ansi.Reset,
-			ansi.Dim + "read-only -- no row actions" + ansi.Reset,
 		}
 	default:
 		perPane = []string{

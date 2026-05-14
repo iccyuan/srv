@@ -393,65 +393,19 @@ func TestConfirmColorReflectsAction(t *testing.T) {
 	}
 }
 
-func TestPanelMCPShowsScrollableWindow(t *testing.T) {
-	now := time.Now()
-	tools := make([]mcplog.ToolCall, 9)
-	for i := range tools {
-		tools[i] = mcplog.ToolCall{
-			When: now.Add(-time.Duration(i) * time.Minute),
-			Name: "tool-" + string(rune('0'+i)),
-			Dur:  "1.0s",
-			OK:   true,
-			PID:  4242,
-		}
-	}
-	st := &uiState{
-		rows:      buildSelectableRows(nil, nil, tools),
-		focusPane: "mcp",
-		mcpCursor: 7,
-	}
-	clampCursor(st)
-	mcp := mcplog.Status{
-		LogExists:   true,
-		ActivePIDs:  []int{4242},
-		LastActive:  now,
-		RecentTools: tools,
-	}
+// TestPanelMCPShowsScrollableWindow + TestDemoDashboardDataIncludesJobsAndMCP
+// removed alongside the MCP panel. mcp data is still populated by
+// demoDashboardData (so re-enabling the panel is just adding back
+// the panelMCP call in renderDashboardWithMCP) but the dashboard
+// itself no longer surfaces it.
 
-	withDashboardWidth(96, func() {
-		var sb strings.Builder
-		panelMCP(&sb, mcp, st)
-		out := sb.String()
-		assertDashboardLineWidths(t, out, 96)
-		if !strings.Contains(out, "showing 5-9/9") {
-			t.Fatalf("mcp panel missing range hint: %q", out)
-		}
-		for _, want := range []string{"tool-4", "tool-5", "tool-6", "tool-7", "tool-8"} {
-			if !strings.Contains(out, want) {
-				t.Fatalf("mcp panel missing visible row %q: %q", want, out)
-			}
-		}
-		for _, hidden := range []string{"tool-0", "tool-1", "tool-2", "tool-3"} {
-			if strings.Contains(out, hidden) {
-				t.Fatalf("mcp panel included hidden row %q: %q", hidden, out)
-			}
-		}
-	})
-}
-
-func TestDemoDashboardDataIncludesJobsAndMCP(t *testing.T) {
-	cfg, js, mcp := demoDashboardData(nil)
+func TestDemoDashboardDataIncludesJobs(t *testing.T) {
+	cfg, js, _ := demoDashboardData(nil)
 	if cfg == nil || len(cfg.Profiles) == 0 {
 		t.Fatal("demo config should include profiles")
 	}
 	if len(js) < dashboardListRows+1 {
 		t.Fatalf("demo jobs=%d, want more than visible list rows", len(js))
-	}
-	if len(mcp.RecentTools) < dashboardListRows+1 {
-		t.Fatalf("demo mcp tools=%d, want more than visible list rows", len(mcp.RecentTools))
-	}
-	if !mcp.LogExists || len(mcp.ActivePIDs) == 0 {
-		t.Fatalf("demo mcp should look active: %+v", mcp)
 	}
 }
 
