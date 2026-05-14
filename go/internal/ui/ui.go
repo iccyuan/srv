@@ -1697,7 +1697,7 @@ func renderDashboardWithMCP(cfg *config.Config, jobs []*jobs.Record, tunnelNames
 		var rightBuf strings.Builder
 		withDashboardWidth(rightW, func() {
 			renderStretchedDetail(&rightBuf, cfg, jobs, tunnelNames, mcpSnapshot, st, topH)
-			renderStretchedStats(&rightBuf, st, jobsH)
+			panelStats(&rightBuf, st, jobsH)
 		})
 		writeSideBySide(&sb, left, rightBuf.String(), leftW, rightW, gap)
 	}
@@ -1767,7 +1767,7 @@ func renderDashboardMiddle(sb *strings.Builder, cfg *config.Config, jobs []*jobs
 	// STATS lives next to JOBS on wide layouts; on narrow / snapshot
 	// layouts it stacks underneath instead so the user still sees the
 	// CPU / memory sparkline.
-	panelStats(sb, st)
+	panelStats(sb, st, 0)
 	if st != nil {
 		panelStatus(sb, st)
 	}
@@ -2155,53 +2155,53 @@ const statsHistoryLen = 24
 // "don't hammer the remote with one ssh call every poll".
 const statsInterval = 3 * time.Second
 
-// sparklineGlyphs are the unicode block characters used to draw the
-// per-cell magnitude of one sample. 8 levels matches what most
-// terminal fonts render evenly.
-var sparklineGlyphs = []rune("▁▂▃▄▅▆▇█")
-
-// sparkline renders the supplied values as a left-aligned bar strip
-// in `width` cells. Values are normalised against max (or 1 if all
-// zero). Missing samples (empty slot) render as a space, so a fresh
-// dashboard with only one sample so far renders mostly empty until
-// the ring fills in.
-func sparkline(values []float64, width int, vmin, vmax float64) string {
-	if width <= 0 {
-		return ""
+// dotChart renders `values` as a column of `height` rows × `width`
+// chars of dots. Each sample becomes one point: column position is
+// time (newest at the right edge), row position is magnitude
+// (highest value at the top, lowest at the bottom).
+//
+// The newest sample uses `●` (filled) so the user's eye lands on the
+// current value; older samples use `·` (mid dot). Empty cells stay
+// blank.
+//
+// vmin / vmax pin the y-axis. When vmax <= vmin, the function
+// auto-scales 0..max(values, 0.1) so a uniformly-zero history still
+// renders a flat baseline rather than dividing by zero.
+func dotChart(values []float64, height, width int, vmin, vmax float64) []string {
+	if height < 1 {
+		height = 1
+	}
+	if width < 1 {
+		width = 1
+	}
+	grid := make([][]rune, height)
+	for i := range grid {
+		grid[i] = make([]rune, width)
+		for j := range grid[i] {
+			grid[i][j] = ' '
+		}
 	}
 	if len(values) == 0 {
-		return strings.Repeat(" ", width)
+		return runesToRows(grid)
 	}
-	// Auto-scale when caller passes vmax<=vmin: pick the actual max.
 	if vmax <= vmin {
 		vmin = 0
-		vmax = values[0]
+		vmax = 0.1
 		for _, v := range values {
 			if v > vmax {
 				vmax = v
 			}
 		}
-		if vmax <= 0 {
-			vmax = 1
-		}
 	}
 	span := vmax - vmin
-	out := make([]rune, 0, width)
-	// Right-align: pad with spaces on the LEFT for the empty portion
-	// of the ring, so the newest sample sits at the right edge of the
-	// strip and the visual sweep is left-to-right.
-	pad := width - len(values)
-	if pad < 0 {
-		pad = 0
-	}
-	for i := 0; i < pad; i++ {
-		out = append(out, ' ')
-	}
 	start := 0
 	if len(values) > width {
 		start = len(values) - width
 	}
-	for _, v := range values[start:] {
+	points := values[start:]
+	colOffset := width - len(points) // right-align trailing-newest
+	for i, v := range points {
+		col := colOffset + i
 		norm := (v - vmin) / span
 		if norm < 0 {
 			norm = 0
@@ -2209,16 +2209,60 @@ func sparkline(values []float64, width int, vmin, vmax float64) string {
 		if norm > 1 {
 			norm = 1
 		}
-		idx := int(norm * float64(len(sparklineGlyphs)-1))
-		out = append(out, sparklineGlyphs[idx])
+		row := int(math.Round((1 - norm) * float64(height-1)))
+		if row < 0 {
+			row = 0
+		}
+		if row >= height {
+			row = height - 1
+		}
+		// `·` for history, `●` for the freshest point so the eye
+		// finds "now" without scanning. Doubled by a `·` in the
+		// previous column (when we have room) -- a single-pixel dot
+		// looks lonely.
+		marker := '·'
+		if i == len(points)-1 {
+			marker = '●'
+		}
+		grid[row][col] = marker
 	}
-	return string(out)
+	return runesToRows(grid)
 }
 
-// panelStats renders the CPU + MEM sparklines plus the latest numeric
-// values. Sits in the right column beneath DETAIL. Empty state (no
-// samples yet) shows a "collecting..." line.
-func panelStats(sb *strings.Builder, st *uiState) {
+func runesToRows(grid [][]rune) []string {
+	out := make([]string, len(grid))
+	for i, row := range grid {
+		out[i] = string(row)
+	}
+	return out
+}
+
+// panelStats draws CPU + MEM dot scatter charts that share the panel
+// height equally. targetHeight is the total panel rows the caller
+// wants; <=0 picks a natural default for single-column / snapshot
+// layouts. Both charts auto-scale to their own observed range so a
+// flat 30-40% MEM trace actually moves on the screen instead of
+// collapsing into a single row in a 0..100 window.
+//
+// Layout (targetHeight rows total, body split 50/50):
+//
+//	╭── stats ──────────────────╮
+//	│ CPU 0.45  range 0.12..1.26│   <- 1 header row
+//	│ 1.26┊     ·   ●           │   <- chart rows (half the body)
+//	│     ┊  ·   ·              │
+//	│ 0.12┊·     ·               │
+//	│ MEM 34.6% range 32..47%   │   <- 1 header row
+//	│ 47.0┊       ·  ·  ●       │   <- chart rows (other half)
+//	│     ┊  ·   ·               │
+//	│ 32.0┊·                    │
+//	╰────────────────────────────╯
+//
+// On very short panels (<8 rows) the chart bodies collapse to one row
+// each; on <6 rows we fall back to the empty-state hint plus padding.
+func panelStats(sb *strings.Builder, st *uiState, targetHeight int) {
+	if targetHeight <= 0 {
+		targetHeight = 12
+	}
 	boxTop(sb, "stats")
 	if st == nil || (len(st.cpuHistory) == 0 && len(st.memHistory) == 0) {
 		hint := ansi.Dim + "collecting remote samples..." + ansi.Reset
@@ -2226,48 +2270,145 @@ func panelStats(sb *strings.Builder, st *uiState) {
 			hint = ansi.Red + "stats unavailable: " + st.statsErr + ansi.Reset
 		}
 		boxLine(sb, hint)
+		for i := 0; i < targetHeight-3; i++ {
+			boxLine(sb, "")
+		}
 		boxBottom(sb)
 		return
 	}
-	// Sparkline width = panel content width minus the prefix "CPU
-	// X.XX " (10 chars). Cap to a reasonable upper bound so the
-	// chart stays scannable at very wide terminals.
-	const prefix = 10
-	width := dashboardContentWidth - prefix
-	if width > statsHistoryLen {
-		width = statsHistoryLen
+	// targetHeight rows = top + bottom + 2 headers + chart body. The
+	// body is split as evenly as possible; if the body is odd we give
+	// the extra row to MEM (visually below, the eye treats the top
+	// chart as the "main" one).
+	body := targetHeight - 4
+	if body < 2 {
+		body = 2
 	}
-	if width < 6 {
-		width = 6
+	cpuH := body / 2
+	memH := body - cpuH
+	if cpuH < 1 {
+		cpuH = 1
 	}
-	cpuLatest := 0.0
-	if n := len(st.cpuHistory); n > 0 {
-		cpuLatest = st.cpuHistory[n-1]
+	if memH < 1 {
+		memH = 1
 	}
-	memLatest := 0.0
-	if n := len(st.memHistory); n > 0 {
-		memLatest = st.memHistory[n-1]
+
+	// y-axis gutter for the per-row min/max labels. Width here has to
+	// be stable across rows so dots align vertically.
+	const gutter = 7                             // "1234.5 " or "1234.5%"
+	chartW := dashboardContentWidth - gutter - 1 // -1 for the "┊" tick
+	if chartW > statsHistoryLen {
+		chartW = statsHistoryLen
 	}
-	// CPU auto-scales because load average has no natural ceiling.
-	// MEM is 0..100 by construction so we pin the scale to make
-	// "always near 80%" visually obvious instead of flattening.
-	cpuBar := sparkline(st.cpuHistory, width, 0, 0)
-	memBar := sparkline(st.memHistory, width, 0, 100)
-	boxLine(sb, fmt.Sprintf("%sCPU%s  %s%4.2f%s  %s",
-		ansi.Dim, ansi.Reset,
-		ansi.Yellow+ansi.Bold, cpuLatest, ansi.Reset,
-		ansi.Cyan+cpuBar+ansi.Reset))
-	boxLine(sb, fmt.Sprintf("%sMEM%s  %s%4.1f%%%s %s",
-		ansi.Dim, ansi.Reset,
-		ansi.Yellow+ansi.Bold, memLatest, ansi.Reset,
-		ansi.Magenta+memBar+ansi.Reset))
-	if st.statsErr != "" {
-		boxLine(sb, ansi.Red+"last sample err: "+st.statsErr+ansi.Reset)
-	} else {
-		boxLine(sb, ansi.Dim+fmt.Sprintf("%d samples · refreshes every %v",
-			len(st.cpuHistory), statsInterval)+ansi.Reset)
+	if chartW < 8 {
+		chartW = 8
 	}
+
+	emitChart(sb, st.cpuHistory, cpuH, chartW, statsLabel{
+		title:     "CPU",
+		titleAnsi: ansi.Cyan + ansi.Bold,
+		latestFmt: "%4.2f",
+		unit:      "load avg",
+		dotAnsi:   ansi.Cyan,
+		gutter:    gutter,
+	})
+	emitChart(sb, st.memHistory, memH, chartW, statsLabel{
+		title:     "MEM",
+		titleAnsi: ansi.Magenta + ansi.Bold,
+		latestFmt: "%4.1f%%",
+		unit:      "use%",
+		dotAnsi:   ansi.Magenta,
+		gutter:    gutter,
+	})
 	boxBottom(sb)
+}
+
+// statsLabel bundles the per-series presentation choices so emitChart
+// stays generic across CPU and MEM.
+type statsLabel struct {
+	title     string // "CPU" / "MEM"
+	titleAnsi string
+	latestFmt string // "%4.2f" / "%4.1f%%"
+	unit      string // "load avg" / "use%"
+	dotAnsi   string
+	gutter    int
+}
+
+// emitChart writes one header row + `height` chart rows. Auto-scales
+// y-axis to (min..max) of the supplied data with a 10% padding so a
+// flat trace doesn't sit pinned to the top or bottom edge.
+func emitChart(sb *strings.Builder, values []float64, height, chartW int, lbl statsLabel) {
+	if len(values) == 0 {
+		boxLine(sb, fmt.Sprintf("%s%s%s %s(no samples)%s",
+			lbl.titleAnsi, lbl.title, ansi.Reset, ansi.Dim, ansi.Reset))
+		for i := 0; i < height; i++ {
+			boxLine(sb, "")
+		}
+		return
+	}
+	latest := values[len(values)-1]
+	vmin, vmax := dataRange(values)
+	if vmax <= vmin {
+		vmax = vmin + 0.1
+	}
+	// 5% headroom top + bottom so dots aren't clipped onto the
+	// border. Looks like a graphing app's auto-fit.
+	pad := (vmax - vmin) * 0.05
+	vmin -= pad
+	vmax += pad
+	if vmin < 0 {
+		vmin = 0
+	}
+
+	header := fmt.Sprintf("%s%s%s "+lbl.latestFmt+"  %srange "+lbl.latestFmt+".."+lbl.latestFmt+"  %s%s",
+		lbl.titleAnsi, lbl.title, ansi.Reset,
+		latest,
+		ansi.Dim, vmin, vmax,
+		lbl.unit, ansi.Reset)
+	boxLine(sb, header)
+
+	rows := dotChart(values, height, chartW, vmin, vmax)
+	for i, r := range rows {
+		// y-axis label only on the top + bottom rows; middle rows
+		// get a "┊" tick so the chart reads as a single column.
+		var axis string
+		switch i {
+		case 0:
+			axis = fmt.Sprintf(ansi.Dim+"%*s"+ansi.Reset+"%s┊"+ansi.Reset+" ",
+				lbl.gutter-1, fmtAxisLabel(vmax, lbl), ansi.Dim)
+		case len(rows) - 1:
+			axis = fmt.Sprintf(ansi.Dim+"%*s"+ansi.Reset+"%s┊"+ansi.Reset+" ",
+				lbl.gutter-1, fmtAxisLabel(vmin, lbl), ansi.Dim)
+		default:
+			axis = fmt.Sprintf("%s%s┊%s ",
+				strings.Repeat(" ", lbl.gutter-1), ansi.Dim, ansi.Reset)
+		}
+		boxLine(sb, axis+lbl.dotAnsi+r+ansi.Reset)
+	}
+}
+
+func dataRange(values []float64) (float64, float64) {
+	if len(values) == 0 {
+		return 0, 1
+	}
+	mn, mx := values[0], values[0]
+	for _, v := range values {
+		if v < mn {
+			mn = v
+		}
+		if v > mx {
+			mx = v
+		}
+	}
+	return mn, mx
+}
+
+func fmtAxisLabel(v float64, lbl statsLabel) string {
+	// Pick a compact form: 12.3 / 12.3% / 1.23 depending on unit.
+	if strings.Contains(lbl.latestFmt, "%%") {
+		return fmt.Sprintf("%.1f%%", v)
+	}
+	return fmt.Sprintf("%.2f", v)
 }
 
 // pushStatsSample appends one sample to each ring, capped at
@@ -2295,49 +2436,9 @@ func appendCapped(arr []float64, v float64, max int) []float64 {
 	return arr
 }
 
-// renderStretchedStats is the STATS-side analogue of
-// renderStretchedDetail. Pads / truncates panelStats output to
-// exactly `targetHeight` rows so its closing border lands flush
-// with the JOBS panel's closing border on the left.
-func renderStretchedStats(sb *strings.Builder, st *uiState, targetHeight int) {
-	if targetHeight < 3 {
-		targetHeight = 3
-	}
-	var buf strings.Builder
-	panelStats(&buf, st)
-	lines := splitDashboardLines(buf.String())
-	bottomIdx := -1
-	for i := len(lines) - 1; i >= 0; i-- {
-		if strings.Contains(lines[i], "╰") {
-			bottomIdx = i
-			break
-		}
-	}
-	if bottomIdx < 0 {
-		sb.WriteString(buf.String())
-		return
-	}
-	body := lines[1:bottomIdx]
-	bodyMax := targetHeight - 2
-	if bodyMax < 0 {
-		bodyMax = 0
-	}
-	if len(body) > bodyMax {
-		body = body[:bodyMax]
-	}
-	sb.WriteString(lines[0])
-	sb.WriteByte('\n')
-	for _, line := range body {
-		sb.WriteString(line)
-		sb.WriteByte('\n')
-	}
-	pad := bodyMax - len(body)
-	for i := 0; i < pad; i++ {
-		boxLine(sb, "")
-	}
-	sb.WriteString(lines[bottomIdx])
-	sb.WriteByte('\n')
-}
+// renderStretchedStats removed -- panelStats now takes targetHeight
+// directly and sizes its CPU/MEM charts to fill exactly that many
+// rows, so the post-render pad-or-truncate wrapper is dead weight.
 
 // renderStretchedDetail draws panelDetail at exactly `targetHeight`
 // rows (excluding the trailing blank). The box's `╭─╮` top sits on
