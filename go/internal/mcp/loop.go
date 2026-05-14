@@ -143,6 +143,16 @@ func Run(cfg *config.Config, versionStr string) error {
 				ProgressBytes: progressBytesCounter,
 				OK:            !res.IsError,
 			})
+			// Persist a full args+result replay record. Independent of
+			// stats so users can disable one without losing the other.
+			_ = appendReplay(replayEntry{
+				TS:            start,
+				Tool:          p.Name,
+				Args:          args,
+				Result:        res,
+				DurMs:         dur.Milliseconds(),
+				ProgressBytes: progressBytesCounter,
+			})
 			send(response(req.ID, res, nil))
 		default:
 			if req.ID != nil {

@@ -1,6 +1,8 @@
 package syncx
 
 import (
+	"os"
+	"path/filepath"
 	"reflect"
 	"srv/internal/remote"
 	"srv/internal/srvutil"
@@ -83,6 +85,47 @@ func TestMatchesAnyExclude(t *testing.T) {
 		if got != tc.want {
 			t.Errorf("matchesAnyExclude(%q) = %v; want %v", tc.path, got, tc.want)
 		}
+	}
+}
+
+func TestMatchesAnyExcludeNegation(t *testing.T) {
+	// gitignore-style: later !pattern re-includes what an earlier
+	// pattern excluded. Order matters.
+	cases := []struct {
+		name     string
+		patterns []string
+		path     string
+		want     bool
+	}{
+		{"plain exclude", []string{"*.log"}, "foo.log", true},
+		{"negation re-includes", []string{"*.log", "!important.log"}, "important.log", false},
+		{"negation does not affect non-match", []string{"*.log", "!important.log"}, "other.log", true},
+		{"negation then re-exclude", []string{"*.log", "!important.log", "important.log"}, "important.log", true},
+		{"negation across categories", []string{"node_modules", "!node_modules/keep.me"}, "node_modules/keep.me", false},
+		{"bare ! ignored", []string{"!"}, "anything", false},
+	}
+	for _, tc := range cases {
+		got := matchesAnyExclude(tc.path, tc.patterns)
+		if got != tc.want {
+			t.Errorf("%s: matchesAnyExclude(%q, %v) = %v; want %v",
+				tc.name, tc.path, tc.patterns, got, tc.want)
+		}
+	}
+}
+
+func TestLoadIgnoreFile(t *testing.T) {
+	dir := t.TempDir()
+	content := "# header comment\n*.log\n\n  # indented comment\n!keep.log\nnode_modules/\n"
+	if err := os.WriteFile(filepath.Join(dir, IgnoreFileName), []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	got := LoadIgnoreFile(dir)
+	want := []string{"*.log", "!keep.log", "node_modules/"}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("LoadIgnoreFile got %v; want %v", got, want)
+	}
+	if missing := LoadIgnoreFile(t.TempDir()); missing != nil {
+		t.Errorf("missing .srvignore should return nil, got %v", missing)
 	}
 }
 

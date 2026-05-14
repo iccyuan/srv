@@ -44,15 +44,18 @@ _srv() {
         return 0
     fi
 
-    # First positional: complete from the subcommand list. We must
-    # return 0 here -- "return nil" (the previous typo) is not a valid
-    # exit code in bash and triggered "numeric argument required" on
-    # every TAB. Under bash-completion or any -o bashdefault setup that
-    # non-zero exit fell through to local file completion, so
-    # "srv con" + TAB looked like it was completing filenames starting
-    # with "con" instead of suggesting config / completion.
+    # First positional: complete from the subcommand list plus the
+    # cached remote PATH executables, so 'srv ls<TAB>' works the same
+    # whether ls is a srv subcommand or just a remote binary. The
+    # _remote_path call is essentially free after the first warm-up
+    # (1 hr disk cache), so we can call it unconditionally on every
+    # TAB without it feeling laggy. We MUST return 0 here -- the old
+    # "return nil" typo was not a valid bash exit code and triggered
+    # "numeric argument required" on every TAB.
     if [[ -z "$sub" ]]; then
-        COMPREPLY=( $(compgen -W "$subs" -- "$cur") )
+        local rpath
+        rpath=$(srv _remote_path 2>/dev/null)
+        COMPREPLY=( $(compgen -W "$subs $rpath" -- "$cur") )
         return 0
     fi
 
@@ -147,6 +150,14 @@ _srv() {
 
     if [[ -z $sub ]]; then
         _describe 'subcommand' subs
+        # Also offer remote PATH binaries so 'srv ls<TAB>' /
+        # 'srv ht<TAB>' complete to remote-installed tools alongside
+        # srv's own subcommand list. The disk cache keeps this fast.
+        local rpath
+        rpath=("${(@f)$(srv _remote_path 2>/dev/null)}")
+        if (( ${#rpath} > 0 )); then
+            compadd -- $rpath
+        fi
         return
     fi
 
@@ -219,7 +230,10 @@ Register-ArgumentCompleter -Native -CommandName srv,srv.exe -ScriptBlock {
 
     $subs = @(__SRV_SUBS_PS__)
     if (-not $sub) {
-        & $emit $subs
+        # Subcommands AND remote PATH binaries -- the disk cache makes
+        # the extra invocation cheap (~5ms warm).
+        $rpath = @((& srv _remote_path 2>$null) -split "` + "`" + `n" | Where-Object { $_ })
+        & $emit ($subs + $rpath)
         return
     }
 
@@ -355,6 +369,7 @@ func buildCompletionScript(shell string, subs []string) (string, string, error) 
 		out = strings.ReplaceAll(out, "__SRV_CASES__", emitPSCases())
 		out = strings.ReplaceAll(out, "& srv _profiles", "& "+quoted+" _profiles")
 		out = strings.ReplaceAll(out, "& srv _ls", "& "+quoted+" _ls")
+		out = strings.ReplaceAll(out, "& srv _remote_path", "& "+quoted+" _remote_path")
 		return out, "powershell", nil
 	}
 	return "", "", fmt.Errorf("unknown shell %q (expected bash/zsh/powershell)", shell)

@@ -16,13 +16,15 @@ import (
 // outlives the CLI process).
 
 // cmdAdd parses the same arg shape as one-shot `srv tunnel` plus a
-// leading <name> and optional --autostart, then saves the result.
+// leading <name> and optional --autostart / --on-demand, then saves
+// the result.
 //
 //	srv tunnel add db -L 5432:db.internal:5432 -P prod --autostart
 //	srv tunnel add web 8080
+//	srv tunnel add api 8080 --on-demand
 func cmdAdd(args []string, cfg *config.Config, profileOverride string) error {
 	if len(args) < 2 {
-		return clierr.Errf(2, "usage: srv tunnel add <name> [-R] <spec> [-P <profile>] [--autostart]")
+		return clierr.Errf(2, "usage: srv tunnel add <name> [-R] <spec> [-P <profile>] [--autostart] [--on-demand]")
 	}
 	name := args[0]
 	rest := args[1:]
@@ -42,6 +44,8 @@ func cmdAdd(args []string, cfg *config.Config, profileOverride string) error {
 			def.Type = "local"
 		case a == "--autostart":
 			def.Autostart = true
+		case a == "--on-demand":
+			def.OnDemand = true
 		case a == "-P" || a == "--profile":
 			if i+1 >= len(rest) {
 				return clierr.Errf(2, "%s requires a value", a)
@@ -64,6 +68,9 @@ func cmdAdd(args []string, cfg *config.Config, profileOverride string) error {
 	if !specSeen {
 		return clierr.Errf(2, "missing port spec (e.g. 8080 or 5432:db:5432)")
 	}
+	if def.OnDemand && def.Type == "remote" {
+		return clierr.Errf(2, "--on-demand is local-direction only (reverse tunnels need the SSH session up to register the remote listener)")
+	}
 	if def.Profile != "" {
 		if _, ok := cfg.Profiles[def.Profile]; !ok {
 			return clierr.Errf(1, "profile %q not found", def.Profile)
@@ -83,6 +90,9 @@ func cmdAdd(args []string, cfg *config.Config, profileOverride string) error {
 	}
 	if def.Autostart {
 		fmt.Print(", autostart")
+	}
+	if def.OnDemand {
+		fmt.Print(", on-demand")
 	}
 	fmt.Println(")")
 	return nil
@@ -133,7 +143,10 @@ func cmdList(cfg *config.Config) error {
 		}
 		flags := ""
 		if def.Autostart {
-			flags = " autostart"
+			flags += " autostart"
+		}
+		if def.OnDemand {
+			flags += " on-demand"
 		}
 		profile := def.Profile
 		if profile == "" {
@@ -170,6 +183,7 @@ func cmdShow(args []string, cfg *config.Config) error {
 		fmt.Printf("profile:   (default at up-time)\n")
 	}
 	fmt.Printf("autostart: %v\n", def.Autostart)
+	fmt.Printf("on-demand: %v\n", def.OnDemand)
 	active, errs := LoadStatuses()
 	if a, ok := active[name]; ok {
 		fmt.Printf("status:    running (listen=%s, started %s)\n",

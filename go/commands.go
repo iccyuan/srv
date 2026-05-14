@@ -13,18 +13,24 @@ import (
 	"srv/internal/group"
 	"srv/internal/guard"
 	"srv/internal/hints"
+	"srv/internal/history"
+	"srv/internal/hooks"
 	"srv/internal/install"
 	"srv/internal/jobcli"
 	"srv/internal/launcher"
 	"srv/internal/mcp"
 	"srv/internal/mcpstats"
+	"srv/internal/moshx"
 	"srv/internal/project"
+	"srv/internal/recipe"
+	"srv/internal/session"
 	"srv/internal/streams"
 	"srv/internal/sudo"
 	"srv/internal/syncx"
 	"srv/internal/theme"
 	"srv/internal/tunnel"
 	"srv/internal/ui"
+	"time"
 
 	"srv/internal/i18n"
 )
@@ -60,6 +66,11 @@ type cmdCtx struct {
 	detach  bool
 	tty     bool
 	noHints bool
+	// runwrap-related: see globalOpts in main.go.
+	restartOnFail int
+	restartDelay  time.Duration
+	cpuLimit      string
+	memLimit      string
 }
 
 type subcommand struct {
@@ -129,10 +140,15 @@ var subcommands = []subcommand{
 
 	// Tunnel / jobs / sessions.
 	{name: "tunnel", handler: func(c cmdCtx) error { return tunnel.Cmd(c.args, c.cfg, c.profileOverride) }},
-	{name: "jobs", handler: func(c cmdCtx) error { return jobcli.CmdJobs(c.cfg, c.profileOverride) }},
+	{name: "jobs", handler: func(c cmdCtx) error { return jobcli.CmdJobs(c.args, c.cfg, c.profileOverride) }},
 	{name: "logs", handler: func(c cmdCtx) error { return jobcli.CmdLogs(c.args, c.cfg, c.profileOverride) }},
 	{name: "kill", handler: func(c cmdCtx) error { return jobcli.CmdKill(c.args, c.cfg, c.profileOverride) }},
 	{name: "sessions", handler: func(c cmdCtx) error { return cmdSessions(c.args) }},
+	{name: "hooks", handler: func(c cmdCtx) error { return hooks.Cmd(c.args, c.cfg) }},
+	{name: "history", handler: func(c cmdCtx) error { return history.Cmd(c.args, session.ID()) }},
+	{name: "recipe", handler: func(c cmdCtx) error { return recipe.Cmd(c.args, c.cfg, c.profileOverride) }},
+	{name: "mosh", handler: func(c cmdCtx) error { return moshx.ClientCmd(c.args, c.cfg, c.profileOverride) }},
+	{name: "mosh-server", noConfig: true, hidden: true, handler: func(c cmdCtx) error { return moshx.ServerCmd(c.args) }},
 
 	// Integrations / settings.
 	{name: "mcp", handler: func(c cmdCtx) error {
@@ -148,8 +164,10 @@ var subcommands = []subcommand{
 		switch c.args[0] {
 		case "stats":
 			return mcpstats.Cmd(c.args[1:])
+		case "replay":
+			return mcp.ReplayCmd(c.args[1:])
 		}
-		return clierr.Errf(2, "unknown mcp subcommand %q (try: serve, stats)", c.args[0])
+		return clierr.Errf(2, "unknown mcp subcommand %q (try: serve, stats, replay)", c.args[0])
 	}},
 	{name: "guard", handler: func(c cmdCtx) error { return guard.Cmd(c.args) }},
 	{name: "color", handler: func(c cmdCtx) error { return theme.Cmd(c.args) }},
@@ -171,13 +189,22 @@ var subcommands = []subcommand{
 			return group.RunCmd(c.args, c.cfg, c.group)
 		}
 		if c.detach {
-			return jobcli.CmdDetach(c.args, c.cfg, c.profileOverride)
+			return jobcli.CmdDetach(c.args, c.cfg, c.profileOverride, jobcli.RunOpts{
+				RestartOnFail: c.restartOnFail,
+				RestartDelay:  c.restartDelay,
+				CPULimit:      c.cpuLimit,
+				MemLimit:      c.memLimit,
+			})
 		}
 		return cmdRunWithHints(c.args, c.cfg, globalOpts{
-			profile: c.profileOverride,
-			tty:     c.tty,
-			detach:  c.detach,
-			noHints: c.noHints,
+			profile:       c.profileOverride,
+			tty:           c.tty,
+			detach:        c.detach,
+			noHints:       c.noHints,
+			restartOnFail: c.restartOnFail,
+			restartDelay:  c.restartDelay,
+			cpuLimit:      c.cpuLimit,
+			memLimit:      c.memLimit,
 		})
 	}},
 
@@ -190,6 +217,7 @@ var subcommands = []subcommand{
 		return nil
 	}},
 	{name: "_ls", hidden: true, handler: func(c cmdCtx) error { return completion.LsCmd(c.args, c.cfg, c.profileOverride) }},
+	{name: "_remote_path", hidden: true, handler: func(c cmdCtx) error { return completion.RemotePathCmd(c.args, c.cfg, c.profileOverride) }},
 }
 
 // subcommandMap and reservedSubcommands are populated by init() rather

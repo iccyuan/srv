@@ -13,6 +13,9 @@ import (
 	"srv/internal/group"
 	"srv/internal/hints"
 	"srv/internal/jobcli"
+	"strconv"
+	"strings"
+	"time"
 
 	"srv/internal/i18n"
 )
@@ -52,6 +55,13 @@ type globalOpts struct {
 	tty     bool
 	detach  bool
 	noHints bool
+	// runwrap-related flags. Live here (rather than inside cmdRun)
+	// because -d / `srv -d <cmd>` reaches cmdDetach via a different
+	// path that still needs to see them.
+	restartOnFail int           // 0 = off, -1 = unlimited, >0 = bounded
+	restartDelay  time.Duration // <=0 picks the runwrap default (5s)
+	cpuLimit      string
+	memLimit      string
 }
 
 func parseGlobalFlags(args []string) (globalOpts, []string) {
@@ -92,6 +102,70 @@ func parseGlobalFlags(args []string) (globalOpts, []string) {
 			continue
 		case a == "--no-hints":
 			opts.noHints = true
+			i++
+			continue
+		case a == "--restart-on-fail":
+			// Look ahead for an optional positive integer; otherwise
+			// treat as unlimited.
+			opts.restartOnFail = -1
+			if i+1 < len(args) {
+				if n, err := strconv.Atoi(args[i+1]); err == nil && n > 0 {
+					opts.restartOnFail = n
+					i += 2
+					continue
+				}
+			}
+			i++
+			continue
+		case strings.HasPrefix(a, "--restart-on-fail="):
+			v := strings.TrimPrefix(a, "--restart-on-fail=")
+			n, err := strconv.Atoi(v)
+			if err != nil || n <= 0 {
+				fatal("error: --restart-on-fail= requires a positive integer (got %q)", v)
+			}
+			opts.restartOnFail = n
+			i++
+			continue
+		case a == "--restart-delay":
+			if i+1 >= len(args) {
+				fatal("%s", i18n.T("err.flag_requires_value", a))
+			}
+			d, err := time.ParseDuration(args[i+1])
+			if err != nil || d < 0 {
+				fatal("error: --restart-delay expects a duration like 5s / 1m (got %q)", args[i+1])
+			}
+			opts.restartDelay = d
+			i += 2
+			continue
+		case strings.HasPrefix(a, "--restart-delay="):
+			v := strings.TrimPrefix(a, "--restart-delay=")
+			d, err := time.ParseDuration(v)
+			if err != nil || d < 0 {
+				fatal("error: --restart-delay expects a duration like 5s / 1m (got %q)", v)
+			}
+			opts.restartDelay = d
+			i++
+			continue
+		case a == "--cpu-limit":
+			if i+1 >= len(args) {
+				fatal("%s", i18n.T("err.flag_requires_value", a))
+			}
+			opts.cpuLimit = args[i+1]
+			i += 2
+			continue
+		case strings.HasPrefix(a, "--cpu-limit="):
+			opts.cpuLimit = strings.TrimPrefix(a, "--cpu-limit=")
+			i++
+			continue
+		case a == "--mem-limit":
+			if i+1 >= len(args) {
+				fatal("%s", i18n.T("err.flag_requires_value", a))
+			}
+			opts.memLimit = args[i+1]
+			i += 2
+			continue
+		case strings.HasPrefix(a, "--mem-limit="):
+			opts.memLimit = strings.TrimPrefix(a, "--mem-limit=")
 			i++
 			continue
 		}
@@ -180,6 +254,10 @@ func run(args []string) int {
 		detach:          opts.detach,
 		tty:             opts.tty,
 		noHints:         opts.noHints,
+		restartOnFail:   opts.restartOnFail,
+		restartDelay:    opts.restartDelay,
+		cpuLimit:        opts.cpuLimit,
+		memLimit:        opts.memLimit,
 	}
 	needCfg := !known || !cmd.noConfig
 	if needCfg {
@@ -205,7 +283,12 @@ func run(args []string) int {
 		return translateExit(group.RunCmd(rest, ctx.cfg, opts.group))
 	}
 	if opts.detach {
-		return translateExit(jobcli.CmdDetach(rest, ctx.cfg, opts.profile))
+		return translateExit(jobcli.CmdDetach(rest, ctx.cfg, opts.profile, jobcli.RunOpts{
+			RestartOnFail: opts.restartOnFail,
+			RestartDelay:  opts.restartDelay,
+			CPULimit:      opts.cpuLimit,
+			MemLimit:      opts.memLimit,
+		}))
 	}
 	return translateExit(cmdRunWithHints(rest, ctx.cfg, opts))
 }

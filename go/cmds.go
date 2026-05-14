@@ -9,9 +9,12 @@ import (
 	"srv/internal/check"
 	"srv/internal/config"
 	"srv/internal/editcmd"
+	"srv/internal/history"
+	"srv/internal/hooks"
 	"srv/internal/i18n"
 	"srv/internal/picker"
 	"srv/internal/remote"
+	"srv/internal/runwrap"
 	"srv/internal/session"
 	"srv/internal/srvpath"
 	"srv/internal/srvtty"
@@ -379,6 +382,8 @@ func applyProfileSet(p *config.Profile, key, value string) {
 		p.Compression = asBool()
 	case "compress_sync":
 		p.CompressSync = asBool()
+	case "agent_forwarding":
+		p.AgentForwarding = asBool()
 	case "connect_timeout":
 		n, _ := strconv.Atoi(value)
 		p.ConnectTimeout = n
@@ -516,13 +521,48 @@ func cmdCd(path string, cfg *config.Config, profileOverride string) error {
 	if err != nil {
 		return exitErr(1, "%v", err)
 	}
+	// `srv cd -`: shell-style swap with the previously-recorded cwd.
+	// SetCwd already maintains the prev map, so going through the
+	// normal ChangeCwd path leaves prev pointing at the right place.
+	if path == "-" {
+		prev := config.GetPrevCwd(name)
+		if prev == "" {
+			return exitErr(1, "srv: no previous cwd for profile %q", name)
+		}
+		path = prev
+	}
+	curCwd := config.GetCwd(name, profile)
+	base := hookEvent(name, profile, curCwd)
+	base.Target = path
+	base.Name = "pre-cd"
+	hooks.Run(base)
 	newCwd, err := remote.ChangeCwd(name, profile, path)
 	if err != nil {
+		base.Name = "post-cd"
+		base.Exit = 1
+		hooks.Run(base)
 		check.PrintDialError(err, profile)
 		return exitCode(1)
 	}
+	base.Name = "post-cd"
+	base.Target = newCwd
+	base.Exit = 0
+	hooks.Run(base)
 	fmt.Println(newCwd)
 	return nil
+}
+
+// hookEvent builds the common hook envelope filled in by the caller
+// with name/target/exit. Centralised here so every cmd* path delivers
+// the same profile+host+cwd fields.
+func hookEvent(name string, profile *config.Profile, cwd string) hooks.Event {
+	return hooks.Event{
+		Profile: name,
+		Host:    profile.Host,
+		User:    profile.User,
+		Port:    profile.GetPort(),
+		Cwd:     cwd,
+	}
 }
 
 func cmdPwd(cfg *config.Config, profileOverride string) error {
@@ -587,6 +627,10 @@ func cmdShell(cfg *config.Config, profileOverride string) error {
 }
 
 func cmdRun(args []string, cfg *config.Config, profileOverride string, tty bool) error {
+	return cmdRunWithOpts(args, cfg, profileOverride, tty, runwrap.Opts{})
+}
+
+func cmdRunWithOpts(args []string, cfg *config.Config, profileOverride string, tty bool, wo runwrap.Opts) error {
 	if len(args) == 0 {
 		return exitErr(1, "error: nothing to run.")
 	}
@@ -594,7 +638,11 @@ func cmdRun(args []string, cfg *config.Config, profileOverride string, tty bool)
 	if err != nil {
 		return exitErr(1, "%v", err)
 	}
-	cmd := strings.Join(args, " ")
+	userCmd := strings.Join(args, " ")
+	// Apply runwrap (restart loop / resource limits) BEFORE env / theme
+	// so the user-visible command stays exactly what they typed when no
+	// wrappers are configured (Wrap is a passthrough on the zero Opts).
+	cmd := runwrap.Wrap(userCmd, wo)
 	cmd = remote.ApplyEnv(profile, cmd)
 	// TTY mode allocates a real interactive shell on the remote that
 	// sources ~/.bashrc itself, so colour just works -- skip our hook.
@@ -606,7 +654,23 @@ func cmdRun(args []string, cfg *config.Config, profileOverride string, tty bool)
 		}
 	}
 	cwd := config.GetCwd(name, profile)
-	return exitCode(remote.RunStream(profile, cwd, cmd, tty))
+	base := hookEvent(name, profile, cwd)
+	base.Target = userCmd
+	base.Name = "pre-run"
+	hooks.Run(base)
+	rc := remote.RunStream(profile, cwd, cmd, tty)
+	history.Append(history.Entry{
+		Session: session.ID(),
+		Profile: name,
+		Host:    profile.Host,
+		Cwd:     cwd,
+		Cmd:     userCmd,
+		Exit:    rc,
+	})
+	base.Name = "post-run"
+	base.Exit = rc
+	hooks.Run(base)
+	return exitCode(rc)
 }
 
 func cmdPush(args []string, cfg *config.Config, profileOverride string) error {
@@ -630,10 +694,18 @@ func cmdPush(args []string, cfg *config.Config, profileOverride string) error {
 		rpath = baseName(local)
 	}
 	abs := remote.ResolvePath(rpath, cwd)
+	base := hookEvent(name, profile, cwd)
+	base.Local = local
+	base.Target = abs
+	base.Name = "pre-push"
+	hooks.Run(base)
 	rc, _, err := transfer.PushPath(profile, local, abs, recursive)
 	if err != nil {
 		check.PrintDialError(err, profile)
 	}
+	base.Name = "post-push"
+	base.Exit = rc
+	hooks.Run(base)
 	return exitCode(rc)
 }
 
@@ -653,10 +725,18 @@ func cmdPull(args []string, cfg *config.Config, profileOverride string) error {
 	}
 	cwd := config.GetCwd(name, profile)
 	abs := remote.ResolvePath(rpath, cwd)
+	base := hookEvent(name, profile, cwd)
+	base.Local = local
+	base.Target = abs
+	base.Name = "pre-pull"
+	hooks.Run(base)
 	rc, _, err := transfer.PullPath(profile, abs, local, recursive)
 	if err != nil {
 		check.PrintDialError(err, profile)
 	}
+	base.Name = "post-pull"
+	base.Exit = rc
+	hooks.Run(base)
 	return exitCode(rc)
 }
 

@@ -88,6 +88,104 @@ func RunLocalForwarder(c *Client, localPort int, remoteHost string, remotePort i
 	return cause
 }
 
+// RunLazyLocalForwarder is RunLocalForwarder for the on-demand
+// daemon path: the local listener opens immediately but no SSH dial
+// happens until the first accepted connection arrives. Subsequent
+// accepts reuse the cached client; when its transport dies, the
+// next accept triggers a fresh dial.
+//
+// dial() returns a usable *Client. Errors there are surfaced to the
+// caller's accept loop as a log line + dropped connection, not as a
+// fatal -- callers like the daemon expect the listener to stay up
+// across transient dial failures so a flaky host doesn't permanently
+// take the saved tunnel offline.
+//
+// Clean stop path (stopCh / sigCh) matches RunLocalForwarder: nil on
+// caller-requested shutdown; non-nil error reserved for things that
+// would constitute a "broken tunnel" status in `srv tunnel list`.
+func RunLazyLocalForwarder(localPort int, remoteHost string, remotePort int, dial func() (*Client, error), stopCh <-chan struct{}, sigCh <-chan os.Signal) error {
+	listenAddr := net.JoinHostPort("127.0.0.1", strconv.Itoa(localPort))
+	listener, err := net.Listen("tcp", listenAddr)
+	if err != nil {
+		return fmt.Errorf("listen %s: %w", listenAddr, err)
+	}
+	defer listener.Close()
+
+	stopOnce := sync.Once{}
+	stop := func() { stopOnce.Do(func() { _ = listener.Close() }) }
+	go func() {
+		select {
+		case <-stopCh:
+			stop()
+		case <-sigChOrNil(sigCh):
+			stop()
+		}
+	}()
+
+	var (
+		clientMu sync.Mutex
+		client   *Client
+	)
+	// getOrDial returns a usable client, dialling if no current one or
+	// if the cached client's transport has died. Serialized so two
+	// near-simultaneous accepts don't race two parallel dials.
+	getOrDial := func() (*Client, error) {
+		clientMu.Lock()
+		defer clientMu.Unlock()
+		if client != nil {
+			return client, nil
+		}
+		c, err := dial()
+		if err != nil {
+			return nil, err
+		}
+		client = c
+		// Drop the cached reference when the transport dies so the
+		// next accept reaches for a fresh dial instead of using a
+		// half-dead handle.
+		go func(c *Client) {
+			_ = c.Conn.Wait()
+			clientMu.Lock()
+			if client == c {
+				client = nil
+			}
+			clientMu.Unlock()
+		}(c)
+		return c, nil
+	}
+
+	remoteAddr := net.JoinHostPort(remoteHost, strconv.Itoa(remotePort))
+	var wg sync.WaitGroup
+	for {
+		local, err := listener.Accept()
+		if err != nil {
+			break
+		}
+		wg.Add(1)
+		go func(local net.Conn) {
+			defer wg.Done()
+			defer local.Close()
+			c, err := getOrDial()
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "srv tunnel (on-demand): dial: %v\n", err)
+				return
+			}
+			remote, err := c.Conn.Dial("tcp", remoteAddr)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "srv tunnel (on-demand): remote dial %s: %v\n", remoteAddr, err)
+				return
+			}
+			defer remote.Close()
+			done := make(chan struct{}, 2)
+			go func() { _, _ = io.Copy(remote, local); done <- struct{}{} }()
+			go func() { _, _ = io.Copy(local, remote); done <- struct{}{} }()
+			<-done
+		}(local)
+	}
+	wg.Wait()
+	return nil
+}
+
 // RunReverseForwarder mirrors `ssh -R remotePort:localHost:localPort`.
 // The remote side listens; local dials happen per accepted connection.
 // Same nil-on-clean-stop / err-on-ssh-drop contract as

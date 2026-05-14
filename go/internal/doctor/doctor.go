@@ -11,6 +11,8 @@ package doctor
 import (
 	"encoding/json"
 	"fmt"
+	"net"
+	"os"
 	"os/exec"
 	"srv/internal/clierr"
 	"srv/internal/config"
@@ -85,6 +87,40 @@ func Checks(cfg *config.Config, profileOverride, version string) ([]map[string]a
 		check("daemon", true, "running")
 	} else {
 		check("daemon", true, "not running; will auto-spawn for hot paths")
+	}
+	// SSH agent + agent-forwarding profile count: surface so users
+	// debugging "why doesn't my forwarded key reach the remote"
+	// don't have to chase env vars and config entries separately.
+	sock := os.Getenv("SSH_AUTH_SOCK")
+	wantForward := 0
+	for _, p := range cfg.Profiles {
+		if p.GetAgentForwarding() {
+			wantForward++
+		}
+	}
+	switch {
+	case sock == "":
+		if wantForward > 0 {
+			check("ssh-agent", false,
+				fmt.Sprintf("SSH_AUTH_SOCK unset; %d profile(s) request agent_forwarding=true", wantForward))
+		} else {
+			check("ssh-agent", true, "SSH_AUTH_SOCK unset (no forwarding profiles configured)")
+		}
+	default:
+		// Try to actually reach the agent socket so a stale env var
+		// (set by a long-dead ssh-add) gets reported instead of looking
+		// healthy in green.
+		conn, derr := net.Dial("unix", sock)
+		if derr != nil {
+			check("ssh-agent", false, fmt.Sprintf("SSH_AUTH_SOCK=%s but socket unreachable: %v", sock, derr))
+		} else {
+			_ = conn.Close()
+			detail := sock
+			if wantForward > 0 {
+				detail += fmt.Sprintf("  (forwarding enabled on %d profile(s))", wantForward)
+			}
+			check("ssh-agent", true, detail)
+		}
 	}
 	if _, _, err := config.Resolve(cfg, profileOverride); err != nil {
 		check("active profile", false, err.Error())

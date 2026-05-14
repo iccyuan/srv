@@ -17,6 +17,7 @@ Quick start:
   srv config default             interactive picker: set the global default profile
   srv config default <profile>   set the global default profile (persists)
   srv cd /opt                    set persistent remote cwd (per session+profile)
+  srv cd -                       swap to the previously-recorded cwd (shell-style)
   srv pwd                        show current remote cwd
   srv ls -la                     run on remote in current cwd
   srv "ps aux | grep redis"      pipes/redirects: quote at local shell
@@ -24,6 +25,11 @@ Quick start:
   srv -P dev rsync ...           override profile for a single call
   srv check                      probe connectivity; diagnose key/host/port issues
   srv check --rtt [--count N]    measure SSH-level RTT + packet loss
+  srv check --rotate-key [--revoke-old]
+                                 generate a fresh ed25519 key, push to remote
+                                 authorized_keys, verify, and pin profile to it
+  srv check --bandwidth [--duration 5s]
+                                 measure up/down SSH throughput in Mbps
   srv doctor                     local config / daemon / SSH readiness report
   srv install                    open browser-based installer (PATH, Claude MCP, first profile)
   srv doctor --json              machine-readable diagnostics
@@ -56,12 +62,31 @@ Bulk sync of changed files (tar | ssh tar; preserves relative paths):
   srv sync --delete-limit 50     change delete safety limit (default 20)
   srv sync /opt/app              override remote root (else cwd or sync_root)
   srv sync --watch               keep syncing on every local file change
+  srv sync --diff [-v]           itemize-style preview (new/update/older/unchanged);
+                                 implies dry-run. -v shows '=' rows too.
+  srv sync --pull --files a b    pull remote -> local (list mode)
+  srv sync --pull --include "*.log"   pull remote -> local (remote-find glob)
+  srv sync --pull                git mode: pull whatever's changed on remote
+  # .srvignore at sync root: gitignore-style patterns merged into --exclude;
+  # ! prefix re-includes (override DefaultExcludes / profile.sync_exclude).
+  # Parallel transfer: srv push/pull/sync fan out across SRV_TRANSFER_WORKERS
+  # goroutines (default 4, range 1..32).
 
 Detached jobs (background on remote, log to ~/.srv-jobs/<id>.log):
   srv -d ./long-build.sh         kick off, return immediately, print job id
   srv jobs                       list local job records
+  srv jobs --watch [-n 2s]       refreshing TUI (q / Esc / Ctrl-C to quit)
+  srv jobs notify on             enable OS toast on job completion
+  srv jobs notify webhook URL    POST JSON to URL on completion
+  srv jobs notify test           fire a sample notification
   srv logs <id> [-f]             cat (or tail -f) the remote log
   srv kill <id>                  SIGTERM the remote process and forget it
+
+Supervisor + resource limits (apply to srv run and srv -d):
+  srv --restart-on-fail [N] <cmd>      retry on non-zero exit (default unlimited)
+  srv --restart-delay 10s <cmd>        backoff between retries (default 5s)
+  srv --cpu-limit 50% <cmd>            CPUQuota via systemd-run when available
+  srv --mem-limit 512M <cmd>           MemoryMax via systemd-run when available
 
 Sessions (per-shell isolation):
   srv sessions                   list session records
@@ -69,14 +94,37 @@ Sessions (per-shell isolation):
   srv sessions clear             drop this shell's session record
   srv sessions prune             remove records whose pid is dead
 
+Command history (this session only by default, --all for everything):
+  srv history                    last 50 commands run via srv (this shell)
+  srv history -n 200             different limit
+  srv history --profile prod     filter by profile
+  srv history --grep RE          regex over the command string
+  srv history --all              include every shell's commands
+  srv history --json             raw JSONL (one record per line)
+  srv history clear              truncate ~/.srv/history.jsonl
+  srv history path               print the on-disk path
+
+Lifecycle hooks (local commands triggered by srv events):
+  srv hooks                      list configured hooks
+  srv hooks events               list event names
+  srv hooks set <event> <cmd>    replace the command list for <event>
+  srv hooks add <event> <cmd>    append one more command for <event>
+  srv hooks rm <event> [<idx>]   remove all (or one) commands for <event>
+  srv hooks run <event>          fire <event> manually (debugging)
+  # events: pre-cd post-cd pre-sync post-sync pre-run post-run
+  #         pre-push post-push pre-pull post-pull
+  # each hook runs in your local shell; SRV_HOOK/SRV_PROFILE/SRV_HOST/
+  # SRV_CWD/SRV_TARGET/SRV_LOCAL/SRV_EXIT_CODE env vars describe the event.
+
 Integrations:
   srv completion <bash|zsh|powershell> [--install]
                                          emit shell completion script (or auto-install into the shell's rc file)
   srv project                            show the active .srv-project pin (if any)
   srv group <list|show|set|remove>       manage named profile groups (for fan-out via -G)
   srv -G <group> <cmd>                   run cmd in parallel on every profile in <group>
-  srv tunnel add <name> [-R] <spec> [-P <profile>] [--autostart]
-                                         save a named tunnel
+  srv tunnel add <name> [-R] <spec> [-P <profile>] [--autostart] [--on-demand]
+                                         save a named tunnel (--on-demand defers
+                                         the SSH dial until the first connection)
   srv tunnel <up|down|list|show|remove> [name]
                                          manage saved tunnels (up/down go through the daemon)
   srv sudo [--no-cache] [--cache-ttl <dur>] <cmd>
@@ -91,6 +139,20 @@ Integrations:
   srv top [-n SECS]                      stream "top -b" from the remote (auto-reconnect on drop)
   srv mcp                                run as a stdio MCP server
   srv guard [on|off|status]              MCP confirmation guard for high-risk ops (default off)
+  srv guard test "<cmd>"                 dry-run: report which rule would block <cmd>
+  srv guard rules [list|add|rm|allow|defaults]
+                                         manage the deny-pattern set + allow-list
+  srv mcp replay [list|show <i>|clear|path]
+                                         full args+result log of every MCP tools/call
+  srv recipe [list|show|save|rm|run]     named multi-step playbooks; positional $1..$9
+                                         and named ${KEY} substitution. Steps separated
+                                         by ;; in 'save -- step1 ;; step2'.
+  srv mosh [--cmd "..."] [args]          mosh-style UDP session: SSH bootstraps a
+                                         remote srv mosh-server, then traffic moves
+                                         to AES-GCM UDP that survives NAT rebind / Wi-Fi
+                                         to cellular. v1 limits: no predictive echo, no
+                                         cross-process session resume, remote needs
+                                         /dev/ptmx (unix only).
   srv color [on|off|use [name]|list|status]
                                          CLI run colour, on by default (any platform).
                                          srv color off to disable per-shell. drop *.sh
@@ -129,6 +191,7 @@ const helpZH = `srv - 跨平台 SSH 远端命令工具,持久 cwd / 连接复用
   srv config default             TTY 下:↑↓ 选择器,设全局默认
   srv config default <profile>   设全局默认(写 ~/.srv/config.json,所有 shell 共用)
   srv cd /opt                    设持久远端 cwd(per session+profile)
+  srv cd -                       回到上一个 cwd(类似 shell 的 cd -)
   srv pwd                        显示当前远端 cwd
   srv ls -la                     在远端当前 cwd 跑 ls -la
   srv "ps aux | grep redis"      含管道:本地引号,远端 shell 解析
@@ -136,6 +199,11 @@ const helpZH = `srv - 跨平台 SSH 远端命令工具,持久 cwd / 连接复用
   srv -P dev rsync ...           单次命令切 profile
   srv check                      连通性诊断,9 类失败模式 + 修复建议
   srv check --rtt [--count N]    SSH 级 RTT + 丢包率
+  srv check --rotate-key [--revoke-old]
+                                 生成新的 ed25519 key 推到远端 authorized_keys
+                                 验证后把 profile.identity_file 切到新 key
+  srv check --bandwidth [--duration 5s]
+                                 测量 SSH 上下行吞吐(Mbps)
   srv doctor                     本地配置 / daemon / SSH 准备状态
   srv doctor --json              机器可读诊断
   srv install                    打开浏览器图形化安装器(PATH / Claude MCP / 第一个 profile)
@@ -168,12 +236,30 @@ const helpZH = `srv - 跨平台 SSH 远端命令工具,持久 cwd / 连接复用
   srv sync --delete-limit 50     调整删除保护阈值(默认 20)
   srv sync /opt/app              覆盖远端根(默认 = sync_root 或当前 cwd)
   srv sync --watch               文件变化时持续同步
+  srv sync --diff [-v]           itemize 风格预览(new/update/older/unchanged),
+                                 等价于一个加强版 dry-run;-v 会打印 = 行。
+  srv sync --pull --files a b    反向(远端 -> 本地),list 模式
+  srv sync --pull --include "*.log"   反向 + 远端 find 通配匹配
+  srv sync --pull                远端是 git 仓库时,拉远端 git 改动的文件
+  # 在 sync 根目录放 .srvignore (gitignore 风格), 自动合并到 --exclude;
+  # ! 开头的模式反向放行,覆盖 DefaultExcludes / profile.sync_exclude.
+  # 并行传输:srv push/pull/sync 用 SRV_TRANSFER_WORKERS 控制并发(默认 4,1~32)。
 
 后台作业(远端 nohup,日志落 ~/.srv-jobs/<id>.log):
   srv -d ./long-build.sh         起后台,立刻返回 job id
   srv jobs                       列本地 job 记录
+  srv jobs --watch [-n 2s]       自刷新 TUI(q / Esc / Ctrl-C 退出)
+  srv jobs notify on             job 完成时弹本地 OS 通知
+  srv jobs notify webhook URL    job 完成时 POST JSON 到 URL
+  srv jobs notify test           发一次测试通知
   srv logs <id> [-f]             cat(或 tail -f)远端日志
   srv kill <id>                  SIGTERM 远端进程并丢弃记录
+
+Supervisor / 资源限制(对 srv run 和 srv -d 都生效):
+  srv --restart-on-fail [N] <cmd>      非零退出自动重启(N 缺省 = 不限)
+  srv --restart-delay 10s <cmd>        每次重启之间的延迟(默认 5s)
+  srv --cpu-limit 50% <cmd>            通过 systemd-run 设 CPUQuota(可用时)
+  srv --mem-limit 512M <cmd>           通过 systemd-run 设 MemoryMax(可用时)
 
 会话(per-shell 隔离):
   srv sessions                   列所有 session 记录
@@ -181,14 +267,36 @@ const helpZH = `srv - 跨平台 SSH 远端命令工具,持久 cwd / 连接复用
   srv sessions clear             删当前 session 记录
   srv sessions prune             清掉 PID 已死的 session
 
+命令历史(默认只看当前 shell, --all 看全部):
+  srv history                    最近 50 条远端命令(当前 shell)
+  srv history -n 200             指定条数
+  srv history --profile prod     按 profile 过滤
+  srv history --grep RE          按命令正则过滤
+  srv history --all              所有 shell 的命令
+  srv history --json             原始 JSONL
+  srv history clear              清空 ~/.srv/history.jsonl
+  srv history path               打印历史文件路径
+
+生命周期钩子(srv 命令的事件触发本地脚本):
+  srv hooks                      列出已配置的钩子
+  srv hooks events               列出可用事件名
+  srv hooks set <event> <cmd>    替换 <event> 的命令列表
+  srv hooks add <event> <cmd>    向 <event> 追加一条命令
+  srv hooks rm <event> [<idx>]   删除全部(或某一条)命令
+  srv hooks run <event>          手动触发 <event>(用于调试)
+  # 事件: pre-cd post-cd pre-sync post-sync pre-run post-run
+  #       pre-push post-push pre-pull post-pull
+  # 钩子在本地 shell 里执行,通过 SRV_HOOK / SRV_PROFILE / SRV_HOST /
+  # SRV_CWD / SRV_TARGET / SRV_LOCAL / SRV_EXIT_CODE 等环境变量描述事件
+
 集成 / 工具:
   srv completion <bash|zsh|powershell> [--install]
                                          输出 shell 补全脚本(加 --install 直接写入对应 shell 的 rc 文件)
   srv project                            查看当前 .srv-project 自动 pin 状态
   srv group <list|show|set|remove>       管理命名 profile 组(配合 -G 使用)
   srv -G <group> <cmd>                   在组内所有 profile 上并行执行 cmd
-  srv tunnel add <name> [-R] <spec> [-P <profile>] [--autostart]
-                                         保存命名隧道
+  srv tunnel add <name> [-R] <spec> [-P <profile>] [--autostart] [--on-demand]
+                                         保存命名隧道(--on-demand 延迟 SSH dial 到第一次连接)
   srv tunnel <up|down|list|show|remove> [name]
                                          管理保存的隧道(up/down 由 daemon 托管)
   srv sudo [--no-cache] [--cache-ttl <dur>] <cmd>
@@ -202,6 +310,17 @@ const helpZH = `srv - 跨平台 SSH 远端命令工具,持久 cwd / 连接复用
   srv top [-n SECS]                      流式拉取远端 "top -b",断线自动重连
   srv mcp                                以 stdio MCP server 跑
   srv guard [on|off|status]              MCP 高危操作确认开关(默认关闭,可针对当前 shell 开启)
+  srv guard test "<cmd>"                 dry-run: 给出哪条规则会拦截 <cmd>
+  srv guard rules [list|add|rm|allow|defaults]
+                                         管理拦截正则集合 + 允许列表
+  srv mcp replay [list|show <i>|clear|path]
+                                         每次 tools/call 完整参数+结果回放
+  srv recipe [list|show|save|rm|run]     命名多步剧本,支持 $1..$9 和 ${KEY} 替换。
+                                         save -- s1 ;; s2 用 ;; 切分步骤。
+  srv mosh [--cmd "..."] [args]          mosh 风格 UDP 会话:SSH 引导远端
+                                         srv mosh-server,之后切到 AES-GCM UDP,
+                                         NAT 重绑/换网仍能续连。v1 限制:无预测
+                                         本地回显,不跨进程续会话,远端需 /dev/ptmx。
   srv color [on|off|use [name]|list|status]
                                          CLI 远端命令彩色,默认开启(所有平台)。
                                          srv color off 关掉当前 shell;预设放

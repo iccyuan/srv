@@ -3,6 +3,7 @@ package main
 import (
 	"srv/internal/config"
 	"srv/internal/hints"
+	"srv/internal/runwrap"
 	"strings"
 )
 
@@ -11,7 +12,13 @@ import (
 // depends on cmdRun and globalOpts -- the hint engine itself moved
 // into internal/hints.
 func cmdRunWithHints(args []string, cfg *config.Config, opts globalOpts) error {
-	err := cmdRun(args, cfg, opts.profile, opts.tty)
+	wo := runwrap.Opts{
+		RestartOnFail: opts.restartOnFail,
+		RestartDelay:  opts.restartDelay,
+		CPULimit:      opts.cpuLimit,
+		MemLimit:      opts.memLimit,
+	}
+	err := cmdRunWithOpts(args, cfg, opts.profile, opts.tty, wo)
 	rc := exitCodeOf(err)
 	if rc == 127 && len(args) > 0 {
 		hints.EmitTypoPostFailure(cfg, opts.noHints, strings.Join(args, " "), rc)

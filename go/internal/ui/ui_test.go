@@ -1,6 +1,7 @@
 package ui
 
 import (
+	"srv/internal/ansi"
 	"srv/internal/config"
 	"srv/internal/daemon"
 	"srv/internal/jobs"
@@ -324,6 +325,73 @@ func TestConfirmPopupIsVisibleInClippedDashboard(t *testing.T) {
 	})
 }
 
+func TestDetailPanelScrollsWithinWindow(t *testing.T) {
+	j := &jobs.Record{
+		ID:      "job-long-detail",
+		Profile: "prod",
+		Pid:     4321,
+		Started: "2026-05-13T10:00:00",
+		Cmd:     strings.Repeat("very-long-command-segment ", 20),
+	}
+	st := &uiState{
+		rows:         buildSelectableRows(nil, []*jobs.Record{j}, nil),
+		focusPane:    "job",
+		jobCursor:    0,
+		detailScroll: 5,
+	}
+	clampCursor(st)
+
+	withDashboardWidth(50, func() {
+		var sb strings.Builder
+		renderStretchedDetail(&sb, &config.Config{}, []*jobs.Record{j}, nil, mcplog.Status{}, st, 10)
+		out := sb.String()
+		lines := splitDashboardLines(out)
+		if len(lines) != 10 {
+			t.Fatalf("detail lines=%d, want 10: %q", len(lines), out)
+		}
+		if !strings.Contains(out, "detail scroll") {
+			t.Fatalf("detail should show scroll hint: %q", out)
+		}
+		if !strings.Contains(lines[len(lines)-1], "╰") {
+			t.Fatalf("detail should keep bottom border as final line: %q", out)
+		}
+		assertDashboardLineWidths(t, out, 50)
+	})
+}
+
+func TestDemoHeaderAndStatusPanel(t *testing.T) {
+	st := &uiState{demoMode: true, statusMsg: ansi.Green + "ok" + ansi.Reset}
+	withDashboardWidth(96, func() {
+		var header strings.Builder
+		panelHeader(&header, st)
+		if !strings.Contains(header.String(), "DEMO") {
+			t.Fatalf("demo header missing marker: %q", header.String())
+		}
+		var status strings.Builder
+		panelStatus(&status, st)
+		if !strings.Contains(status.String(), "STATUS") || !strings.Contains(status.String(), "ok") {
+			t.Fatalf("status panel missing message: %q", status.String())
+		}
+		var footer strings.Builder
+		panelFooter(&footer, st)
+		if strings.Contains(footer.String(), "ok") {
+			t.Fatalf("footer should not contain transient status: %q", footer.String())
+		}
+	})
+}
+
+func TestConfirmColorReflectsAction(t *testing.T) {
+	if got := confirmColor("tunnel up db"); got != ansi.Bold+ansi.Green {
+		t.Fatalf("tunnel up color=%q", got)
+	}
+	if got := confirmColor("tunnel down db"); got != ansi.Bold+ansi.Yellow {
+		t.Fatalf("tunnel down color=%q", got)
+	}
+	if got := confirmColor("kill job"); got != ansi.Bold+ansi.Red {
+		t.Fatalf("kill color=%q", got)
+	}
+}
+
 func TestPanelMCPShowsScrollableWindow(t *testing.T) {
 	now := time.Now()
 	tools := make([]mcplog.ToolCall, 9)
@@ -488,6 +556,151 @@ func TestWrapText(t *testing.T) {
 			}
 		}
 	}
+}
+
+func TestFilterJobsSubstringIgnoresCase(t *testing.T) {
+	js := []*jobs.Record{
+		{ID: "build-api", Profile: "prod", Cmd: "npm run build"},
+		{ID: "test-api", Profile: "stage", Cmd: "go test ./..."},
+		{ID: "deploy-web", Profile: "prod", Cmd: "bash deploy.sh"},
+	}
+	cases := []struct {
+		query string
+		want  []string
+	}{
+		{"", []string{"build-api", "test-api", "deploy-web"}},
+		{"API", []string{"build-api", "test-api"}},
+		{"prod", []string{"build-api", "deploy-web"}},
+		{"deploy.sh", []string{"deploy-web"}},
+		{"nothing", nil},
+	}
+	for _, c := range cases {
+		got := filterJobs(js, c.query)
+		ids := make([]string, len(got))
+		for i, j := range got {
+			ids[i] = j.ID
+		}
+		if len(ids) != len(c.want) {
+			t.Fatalf("filterJobs(%q): %v, want %v", c.query, ids, c.want)
+		}
+		for i := range ids {
+			if ids[i] != c.want[i] {
+				t.Errorf("filterJobs(%q)[%d]=%q, want %q", c.query, i, ids[i], c.want[i])
+			}
+		}
+	}
+}
+
+func TestFilterModeAppendsAndBackspaces(t *testing.T) {
+	st := &uiState{filterMode: true, filterQuery: ""}
+	handleFilterKey('a', st, nil)
+	handleFilterKey('p', st, nil)
+	handleFilterKey('i', st, nil)
+	if st.filterQuery != "api" {
+		t.Fatalf("filterQuery=%q, want %q", st.filterQuery, "api")
+	}
+	handleFilterKey('\x7f', st, nil) // Backspace
+	if st.filterQuery != "ap" {
+		t.Fatalf("after backspace filterQuery=%q, want %q", st.filterQuery, "ap")
+	}
+	handleFilterKey('\r', st, nil) // Enter commits
+	if st.filterMode {
+		t.Fatalf("Enter should exit filter mode")
+	}
+	if st.filterQuery != "ap" {
+		t.Fatalf("Enter should preserve query, got %q", st.filterQuery)
+	}
+}
+
+func TestPersistedUIStateRoundtrip(t *testing.T) {
+	src := persistedUIState{
+		FocusPane:    "job",
+		Cursor:       3,
+		TunnelCursor: 1,
+		JobCursor:    2,
+		McpCursor:    4,
+	}
+	st := &uiState{}
+	applyPersistedState(st, src)
+	if st.focusPane != "job" || st.cursor != 3 || st.jobCursor != 2 || st.mcpCursor != 4 || st.tunnelCursor != 1 {
+		t.Fatalf("applyPersistedState mismatch: %+v", st)
+	}
+}
+
+func TestHelpOverlayRendersForFocus(t *testing.T) {
+	st := &uiState{focusPane: "job"}
+	withDashboardWidth(96, func() {
+		var sb strings.Builder
+		renderHelpPopup(&sb, st)
+		out := sb.String()
+		for _, want := range []string{"keyboard shortcuts", "k", "L", "/", "?"} {
+			if !strings.Contains(out, want) {
+				t.Fatalf("help popup missing %q: %q", want, out)
+			}
+		}
+	})
+}
+
+func TestJobLogPreviewAppearsInDetail(t *testing.T) {
+	j := &jobs.Record{ID: "job-X", Profile: "p", Pid: 1, Started: "2026-05-13T10:00:00", Cmd: "echo hi"}
+	st := &uiState{
+		jobLog: &uiJobLog{
+			jobID:     "job-X",
+			lines:     []string{"line one", "line two"},
+			fetchedAt: time.Now(),
+		},
+	}
+	withDashboardWidth(60, func() {
+		var sb strings.Builder
+		panelJobDetail(&sb, "job detail", j, st)
+		out := sb.String()
+		if !strings.Contains(out, "line one") || !strings.Contains(out, "line two") {
+			t.Fatalf("log lines missing from detail: %q", out)
+		}
+		if !strings.Contains(out, "LOG") {
+			t.Fatalf("log header missing: %q", out)
+		}
+	})
+}
+
+func TestJobLogPreviewOnlyForMatchingJob(t *testing.T) {
+	j := &jobs.Record{ID: "job-A", Profile: "p", Pid: 1, Started: "2026-05-13T10:00:00", Cmd: "echo hi"}
+	st := &uiState{
+		jobLog: &uiJobLog{
+			jobID: "job-B",
+			lines: []string{"other job's log"},
+		},
+	}
+	withDashboardWidth(60, func() {
+		var sb strings.Builder
+		panelJobDetail(&sb, "job detail", j, st)
+		out := sb.String()
+		if strings.Contains(out, "other job's log") {
+			t.Fatalf("log preview leaked to wrong job: %q", out)
+		}
+	})
+}
+
+func TestPanelJobsFilterEmptyShowsHint(t *testing.T) {
+	st := &uiState{
+		focusPane:   "job",
+		filterMode:  false,
+		filterQuery: "nothing-matches",
+		rows:        nil,
+	}
+	withDashboardWidth(60, func() {
+		var sb strings.Builder
+		panelJobs(&sb, nil, st)
+		out := sb.String()
+		if !strings.Contains(out, "no jobs match filter") {
+			t.Fatalf("filtered empty panel should show hint: %q", out)
+		}
+		// boxTop upper-cases the title text, so the query echoes back
+		// in uppercase too.
+		if !strings.Contains(strings.ToLower(out), "/nothing-matches") {
+			t.Fatalf("title should reflect active query: %q", out)
+		}
+	})
 }
 
 func TestTruncID(t *testing.T) {

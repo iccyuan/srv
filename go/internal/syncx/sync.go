@@ -12,6 +12,7 @@ import (
 	"sort"
 	"srv/internal/clierr"
 	"srv/internal/config"
+	"srv/internal/hooks"
 	"srv/internal/mcplog"
 	"srv/internal/remote"
 	"srv/internal/srvtty"
@@ -28,20 +29,29 @@ var DefaultExcludes = []string{
 }
 
 type Options struct {
-	RemoteRoot  string
-	Mode        string // git | mtime | glob | list (or empty = auto)
-	GitScope    string
-	NoGit       bool
-	Since       string
-	Include     []string
-	Exclude     []string
-	Files       []string
-	Root        string
-	DryRun      bool
+	RemoteRoot string
+	Mode       string // git | mtime | glob | list (or empty = auto)
+	GitScope   string
+	NoGit      bool
+	Since      string
+	Include    []string
+	Exclude    []string
+	Files      []string
+	Root       string
+	DryRun     bool
+	// Diff = print rsync-itemize style preview (size/mtime per file).
+	// Implies DryRun (no actual transfer happens).
+	Diff bool
+	// Verbose = include unchanged "=" rows in the diff output.
+	Verbose     bool
 	Watch       bool
 	Delete      bool
 	Yes         bool
 	DeleteLimit int
+	// Pull = reverse direction (remote -> local). Mutually exclusive
+	// with --watch (a pull watcher would need remote inotify and is
+	// not in scope).
+	Pull bool
 }
 
 func ParseOptions(args []string) *Options {
@@ -128,6 +138,18 @@ func ParseOptions(args []string) *Options {
 			continue
 		case a == "--dry-run":
 			o.DryRun = true
+			i++
+			continue
+		case a == "--diff":
+			o.Diff = true
+			i++
+			continue
+		case a == "-v" || a == "--verbose":
+			o.Verbose = true
+			i++
+			continue
+		case a == "--pull":
+			o.Pull = true
 			i++
 			continue
 		case a == "--watch":
@@ -433,24 +455,45 @@ func globToRegex(pat string) string {
 	return b.String()
 }
 
-// matchesAnyExclude returns true if any pattern matches the path. Supports:
+// matchesAnyExclude returns true if `path` should be excluded after
+// evaluating every pattern in `patterns` in order. Supports:
 //   - direct fnmatch on the full path
 //   - matching a single path component (so 'node_modules' excludes 'a/node_modules/b')
+//   - gitignore-style negation: a leading "!" turns the pattern into a
+//     re-include rule. Later matches override earlier ones, so a
+//     `.srvignore` of `*.log\n!important.log` keeps important.log.
 func matchesAnyExclude(path string, patterns []string) bool {
 	norm := strings.ReplaceAll(path, "\\", "/")
 	parts := strings.Split(norm, "/")
+	excluded := false
 	for _, raw := range patterns {
-		pat := strings.TrimRight(raw, "/")
-		if strings.ContainsAny(pat, "/*") && srvutil.RegexMatch(globToRegex(pat), norm) {
-			return true
+		neg := false
+		pat := raw
+		if strings.HasPrefix(pat, "!") {
+			neg = true
+			pat = pat[1:]
 		}
-		for _, part := range parts {
-			if srvutil.RegexMatch(globToRegex(pat), part) {
-				return true
+		pat = strings.TrimRight(pat, "/")
+		if pat == "" {
+			continue
+		}
+		match := false
+		if strings.ContainsAny(pat, "/*") && srvutil.RegexMatch(globToRegex(pat), norm) {
+			match = true
+		}
+		if !match {
+			for _, part := range parts {
+				if srvutil.RegexMatch(globToRegex(pat), part) {
+					match = true
+					break
+				}
 			}
 		}
+		if match {
+			excluded = !neg
+		}
 	}
-	return false
+	return excluded
 }
 
 // normalizeForTar makes the path relative to root (forward slashes), or
@@ -728,23 +771,63 @@ func Cmd(args []string, cfg *config.Config, profileOverride string) error {
 
 	// remote root
 	cwd := config.GetCwd(name, profile)
-	_ = cwd
 	if o.RemoteRoot != "" {
 		o.RemoteRoot = remote.ResolvePath(o.RemoteRoot, cwd)
 	} else if profile.SyncRoot != "" {
 		o.RemoteRoot = remote.ResolvePath(profile.SyncRoot, cwd)
 	}
+	if o.RemoteRoot == "" {
+		// Final fallback: session cwd (or `~` if no session). Both push
+		// and pull need a concrete remote root, and historically users
+		// running `srv sync` from inside their working dir expected it
+		// to land in the active remote cwd. Pull especially relies on
+		// this -- otherwise RemoteGitChangedFiles has nothing to cd to.
+		o.RemoteRoot = cwd
+		if o.RemoteRoot == "" {
+			o.RemoteRoot = "~"
+		}
+	}
 
 	allExcludes := append([]string{}, o.Exclude...)
 	allExcludes = append(allExcludes, profile.SyncExclude...)
 	allExcludes = append(allExcludes, DefaultExcludes...)
+	// .srvignore goes LAST so negation (`!pattern`) can re-include files
+	// the user otherwise wants to skip via DefaultExcludes / profile.
+	allExcludes = append(allExcludes, LoadIgnoreFile(localRoot)...)
 
-	files, err := CollectFiles(o, localRoot, allExcludes)
+	// Validate flag combos that don't make sense for the chosen direction.
+	if o.Pull {
+		if o.Delete {
+			return clierr.Errf(1, "error: --pull --delete is not supported (would clobber local files; remove manually instead)")
+		}
+		if o.Watch {
+			return clierr.Errf(1, "error: --pull --watch is not supported (needs remote inotify)")
+		}
+	}
+
+	var files []string
+	if o.Pull {
+		files, err = collectPullFiles(o, profile)
+	} else {
+		files, err = CollectFiles(o, localRoot, allExcludes)
+	}
 	if err != nil {
 		return clierr.Errf(1, "error: %v", err)
 	}
+	// Post-filter pull results through the same exclude pipeline so
+	// .srvignore and --exclude still keep junk out of the local tree.
+	if o.Pull && len(allExcludes) > 0 {
+		filtered := files[:0]
+		for _, f := range files {
+			if !matchesAnyExclude(f, allExcludes) {
+				filtered = append(filtered, f)
+			}
+		}
+		files = filtered
+	}
+
 	var deletes []string
-	if o.Delete {
+	if o.Delete && !o.Pull {
 		limit := o.DeleteLimit
 		if limit == 0 {
 			limit = 20
@@ -762,7 +845,11 @@ func Cmd(args []string, cfg *config.Config, profileOverride string) error {
 	if profile.User != "" {
 		target = profile.User + "@" + profile.Host
 	}
-	header := fmt.Sprintf("mode    : %s", o.Mode)
+	direction := "push"
+	if o.Pull {
+		direction = "pull"
+	}
+	header := fmt.Sprintf("mode    : %s (%s)", o.Mode, direction)
 	if o.Mode == "git" {
 		header += " (" + o.GitScope + ")"
 	} else if o.Mode == "mtime" {
@@ -777,6 +864,26 @@ func Cmd(args []string, cfg *config.Config, profileOverride string) error {
 	}
 	if len(files) == 0 && len(deletes) == 0 {
 		fmt.Fprintln(os.Stderr, "(nothing to sync)")
+		return nil
+	}
+	// --diff is a richer dry-run: skip the plain file list, print the
+	// itemize preview, and never transfer. --dry-run keeps the cheap
+	// path because users sometimes pipe `srv sync --dry-run` into
+	// scripts and don't want the extra remote stat round-trip.
+	if o.Diff {
+		remoteStats, ferr := FetchRemoteStats(profile, o.RemoteRoot, files)
+		if ferr != nil {
+			fmt.Fprintf(os.Stderr, "warning: remote stat failed (%v); showing local-only view\n", ferr)
+			remoteStats = map[string]RemoteStat{}
+		}
+		var entries []DiffEntry
+		if o.Pull {
+			entries = BuildDiffPull(localRoot, files, remoteStats)
+		} else {
+			entries = BuildDiff(localRoot, files, remoteStats, deletes)
+		}
+		fmt.Print(PrintDiff(entries, o.Verbose))
+		fmt.Fprintln(os.Stderr, "(--diff: preview only, nothing transferred)")
 		return nil
 	}
 	listed := files
@@ -796,7 +903,23 @@ func Cmd(args []string, cfg *config.Config, profileOverride string) error {
 		fmt.Fprintln(os.Stderr, "(dry-run, not transferred)")
 		return nil
 	}
-	rc, err := TarUploadStream(profile, localRoot, files, o.RemoteRoot)
+	hookBase := hooks.Event{
+		Profile: name,
+		Host:    profile.Host,
+		User:    profile.User,
+		Port:    profile.GetPort(),
+		Cwd:     localRoot,
+		Local:   localRoot,
+		Target:  o.RemoteRoot,
+	}
+	hookBase.Name = "pre-sync"
+	hooks.Run(hookBase)
+	var rc int
+	if o.Pull {
+		rc, err = TarDownloadStream(profile, o.RemoteRoot, files, localRoot)
+	} else {
+		rc, err = TarUploadStream(profile, localRoot, files, o.RemoteRoot)
+	}
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)
 	}
@@ -808,6 +931,9 @@ func Cmd(args []string, cfg *config.Config, profileOverride string) error {
 			return clierr.Code(drc)
 		}
 	}
+	hookBase.Name = "post-sync"
+	hookBase.Exit = rc
+	hooks.Run(hookBase)
 	if o.Watch {
 		fmt.Fprintln(os.Stderr)
 		return clierr.Code(runWatch(o, profile, localRoot, o.RemoteRoot, allExcludes))

@@ -281,6 +281,11 @@ func Cmd(args []string) error {
 	// shouldn't keep ls / cd / run from working.
 	go state.startAutostartTunnels()
 
+	// Background job-completion watcher: fires local toast + webhook
+	// for detached jobs whose remote `.exit` marker just appeared.
+	// Bails out cheaply when no JobNotify is configured.
+	go state.runJobWatcher()
+
 	// Signal handling.
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, os.Interrupt, syscall.SIGTERM)

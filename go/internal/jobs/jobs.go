@@ -30,6 +30,14 @@ type Record struct {
 	Pid     int    `json:"pid"`
 	Log     string `json:"log"`
 	Started string `json:"started"`
+	// Finished is the daemon-observed completion time (RFC3339). Set
+	// when the remote `.exit` marker appears. Empty for still-running
+	// jobs.
+	Finished string `json:"finished,omitempty"`
+	// Notified is true after the daemon has fired notifications
+	// (local toast + webhook) for this job's completion. Persisted
+	// so daemon restarts don't re-notify already-handled jobs.
+	Notified bool `json:"notified,omitempty"`
 }
 
 // File is the on-disk wrapper: a version stamp plus the slice of

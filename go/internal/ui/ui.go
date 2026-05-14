@@ -1,17 +1,21 @@
 package ui
 
 import (
+	"encoding/json"
 	"fmt"
 	"os"
+	"path/filepath"
 	"sort"
 	"srv/internal/ansi"
 	"srv/internal/clierr"
 	"srv/internal/config"
 	"srv/internal/daemon"
+	"srv/internal/history"
 	"srv/internal/jobs"
 	"srv/internal/mcplog"
 	"srv/internal/project"
 	"srv/internal/remote"
+	"srv/internal/srvpath"
 	"srv/internal/srvtty"
 	"srv/internal/tunnel"
 	"strconv"
@@ -53,6 +57,7 @@ type uiState struct {
 	tunnelCursor int        // index within the tunnel window
 	jobCursor    int        // index within the jobs window
 	mcpCursor    int        // index within the mcp recent-tools window
+	detailScroll int        // first visible body row in the right-side DETAIL panel
 	detailMode   bool       // showing the per-row detail panel
 	confirm      *uiConfirm // non-nil = popup is up, awaiting Y/N
 	statusMsg    string     // transient line in the footer (kill result, etc.)
@@ -93,6 +98,49 @@ type uiState struct {
 	snapTunnelActive map[string]daemon.TunnelInfo
 	snapTunnelErrs   map[string]string
 	snapAt           time.Time
+	// helpVisible toggles the `?` help overlay. While true every key
+	// dismisses the overlay rather than triggering its normal action.
+	helpVisible bool
+	// historyVisible toggles the `H` history overlay (recent CLI
+	// commands from internal/history). Up/Down scroll within the
+	// popup; Esc / any other key closes.
+	historyVisible bool
+	historyScroll  int
+	// filterMode + filterQuery implement the `/` job-filter modal.
+	// In filterMode every printable byte appends to filterQuery,
+	// backspace pops one rune, Enter commits, Esc clears and exits.
+	// Outside filterMode a non-empty filterQuery still filters the
+	// JOBS panel so the user can keep typing-then-navigating.
+	filterMode  bool
+	filterQuery string
+	// jobLog holds the most recently fetched job log preview. The L
+	// key on a job row spawns a goroutine that drops the result on
+	// jobLogCh; the main loop drains it on each idle tick. Only one
+	// fetch is in flight at a time -- subsequent L presses overwrite.
+	jobLog   *uiJobLog
+	jobLogCh chan *uiJobLog
+}
+
+// uiJobLog is the in-memory cache of a job's last-N log lines. Lives
+// on uiState.jobLog; nil when the user has not pressed L yet.
+type uiJobLog struct {
+	jobID     string
+	lines     []string
+	err       string
+	fetchedAt time.Time
+	fetching  bool
+}
+
+// persistedUIState is the JSON shape written to ~/.srv/ui-state.json.
+// Only the fields whose value the user might reasonably want carried
+// across `srv ui` invocations are stored -- the cached snapshots,
+// transient popups, and goroutine handles are session-local.
+type persistedUIState struct {
+	FocusPane    string `json:"focus_pane,omitempty"`
+	Cursor       int    `json:"cursor,omitempty"`
+	TunnelCursor int    `json:"tunnel_cursor,omitempty"`
+	JobCursor    int    `json:"job_cursor,omitempty"`
+	McpCursor    int    `json:"mcp_cursor,omitempty"`
 }
 
 // currentRow returns the uiRow under the cursor, or a zero uiRow
@@ -220,6 +268,15 @@ func Cmd(args []string, cfg *config.Config) error {
 		cursor:      0,
 		liveness:    map[string]bool{},
 		demoMode:    demo,
+		jobLogCh:    make(chan *uiJobLog, 4),
+	}
+	// Persisted cursor / focus is loaded only outside demo mode. Demo
+	// is meant to be a clean reproducible screenshot; leaking last
+	// session's "selected MCP row 7" into demo screenshots would be
+	// surprising.
+	if !demo {
+		applyPersistedState(st, loadUIState())
+		defer saveUIState(st)
 	}
 	const refreshEvery = 2 * time.Second
 	// pollEvery is how often the loop wakes when no key is pressed.
@@ -342,6 +399,12 @@ func Cmd(args []string, cfg *config.Config) error {
 			kept = append(kept, j)
 		}
 		jobs = kept
+		// `/` filter narrows the JOBS list to rows whose ID or Cmd
+		// contains the query substring (case-insensitive). Applied
+		// here so st.rows / cursor bookkeeping below see the filtered
+		// view directly -- panelJobs then renders exactly what's
+		// selectable.
+		jobs = filterJobs(jobs, st.filterQuery)
 		tunnelNames := sortedTunnelNames(fresh)
 		st.hiddenJobs = hidden
 		st.rows = buildSelectableRows(tunnelNames, jobs, st.snapMCP.RecentTools)
@@ -385,6 +448,9 @@ func Cmd(args []string, cfg *config.Config) error {
 			if st.statusMsg != "" && !st.statusSetAt.IsZero() && time.Since(st.statusSetAt) > refreshEvery {
 				st.statusMsg = ""
 				st.statusSetAt = time.Time{}
+				st.forceRedraw = true
+			}
+			if drainJobLogCh(st) {
 				st.forceRedraw = true
 			}
 			continue
@@ -432,6 +498,63 @@ func buildSelectableRows(tunnels []string, jobs []*jobs.Record, mcpRecent []mcpl
 // empty, -1 otherwise. Called every tick because rows can shrink
 // out from under the cursor (we killed a job; another shell did
 // `srv tunnel remove`; an MCP log line rolled off the tail).
+// loadUIState reads ~/.srv/ui-state.json and returns the persisted
+// pane / cursor positions. A missing or malformed file is silently
+// treated as "start from defaults" -- the user shouldn't have to
+// delete the file just to recover from a bad write.
+func loadUIState() persistedUIState {
+	data, err := os.ReadFile(srvpath.UIState())
+	if err != nil {
+		return persistedUIState{}
+	}
+	var s persistedUIState
+	if json.Unmarshal(data, &s) != nil {
+		return persistedUIState{}
+	}
+	return s
+}
+
+// saveUIState writes the per-pane cursor positions back to
+// ~/.srv/ui-state.json. Errors are swallowed -- the UI shouldn't fail
+// to exit just because the state file is on a read-only filesystem
+// or the disk is full. The state is purely a navigation convenience.
+func saveUIState(st *uiState) {
+	if st == nil {
+		return
+	}
+	s := persistedUIState{
+		FocusPane:    st.focusPane,
+		Cursor:       st.cursor,
+		TunnelCursor: st.tunnelCursor,
+		JobCursor:    st.jobCursor,
+		McpCursor:    st.mcpCursor,
+	}
+	data, err := json.Marshal(s)
+	if err != nil {
+		return
+	}
+	path := srvpath.UIState()
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return
+	}
+	_ = os.WriteFile(path, data, 0o644)
+}
+
+// applyPersistedState seeds st with the saved cursor positions. Bounds
+// are not validated here -- clampCursor runs immediately after on the
+// first frame and brings stale indices back into range.
+func applyPersistedState(st *uiState, s persistedUIState) {
+	if s.FocusPane != "" {
+		st.focusPane = s.FocusPane
+	}
+	if s.Cursor != 0 {
+		st.cursor = s.Cursor
+	}
+	st.tunnelCursor = s.TunnelCursor
+	st.jobCursor = s.JobCursor
+	st.mcpCursor = s.McpCursor
+}
+
 func clampCursor(st *uiState) {
 	n := len(st.rows)
 	if n == 0 {
@@ -576,6 +699,9 @@ func cyclePane(st *uiState, dir int) {
 		}
 	}
 	next := (cur + dir + len(avail)) % len(avail)
+	if st.focusPane != avail[next] {
+		st.detailScroll = 0
+	}
 	st.focusPane = avail[next]
 	clampCursor(st)
 	st.forceRedraw = true
@@ -614,10 +740,22 @@ func moveFocusedRow(st *uiState, delta int) {
 
 	cur := cursors[st.focusPane]
 	size := sizes[st.focusPane]
+	prev := *cur
 	if size > 0 {
 		*cur = (*cur + delta + size) % size
 	}
+	if *cur != prev {
+		st.detailScroll = 0
+	}
 	clampCursor(st)
+	st.forceRedraw = true
+}
+
+func scrollDetail(st *uiState, delta int) {
+	st.detailScroll += delta
+	if st.detailScroll < 0 {
+		st.detailScroll = 0
+	}
 	st.forceRedraw = true
 }
 
@@ -635,10 +773,67 @@ func indexOf(xs []string, v string) int {
 // loop running. State mutations flow through st; side effects (the
 // remote kill, tunnel up/down, status messages) are confined here.
 //
-// Precedence: an active confirmation popup eats every key until it
-// resolves (Y = run, anything else = cancel), so a stray arrow press
-// can't accidentally trigger a different action while a "kill?" is up.
+// Precedence (top wins):
+//   - help overlay: any key dismisses it (so `?` is a true toggle).
+//   - filter input mode: every byte feeds the filter buffer.
+//   - confirmation popup: only Y / N / Esc are meaningful.
+//   - normal dashboard navigation.
 func handleUIKey(b byte, st *uiState, jobs []*jobs.Record, tunnelNames []string, cfg *config.Config, kr *srvtty.KeyReader) bool {
+	if st.helpVisible {
+		// Any key dismisses the help screen. Ctrl-C / q still quit so
+		// the user isn't trapped if they hit the overlay by accident
+		// and want to abort.
+		st.helpVisible = false
+		st.forceRedraw = true
+		if b == 'q' || b == '\x03' {
+			return false
+		}
+		return true
+	}
+	if st.historyVisible {
+		// Any key dismisses; q / Ctrl-C still quits. Up/Down scroll the
+		// list when there's more than a screenful.
+		switch b {
+		case 'q', '\x03':
+			return false
+		case 0x1b: // Esc / arrow prefix
+			// Drain a possible arrow-key sequence so it doesn't leak
+			// into the next render. Plain Esc closes the overlay.
+			if next, ok := kr.ReadWithTimeout(20 * time.Millisecond); ok && next == '[' {
+				if dir, ok := kr.ReadWithTimeout(20 * time.Millisecond); ok {
+					switch dir {
+					case 'A':
+						if st.historyScroll > 0 {
+							st.historyScroll--
+						}
+					case 'B':
+						st.historyScroll++
+					}
+					st.forceRedraw = true
+					return true
+				}
+			}
+			st.historyVisible = false
+			st.forceRedraw = true
+			return true
+		case 'j':
+			st.historyScroll++
+			st.forceRedraw = true
+			return true
+		case 'k':
+			if st.historyScroll > 0 {
+				st.historyScroll--
+			}
+			st.forceRedraw = true
+			return true
+		}
+		st.historyVisible = false
+		st.forceRedraw = true
+		return true
+	}
+	if st.filterMode {
+		return handleFilterKey(b, st, kr)
+	}
 	if st.confirm != nil {
 		yes := b == 'y' || b == 'Y'
 		action := st.confirm.action
@@ -676,6 +871,24 @@ func handleUIKey(b byte, st *uiState, jobs []*jobs.Record, tunnelNames []string,
 		st.forceRedraw = true
 		st.snapAt = time.Time{}        // manual refresh -- bypass snapTTL
 		st.livenessFresh = time.Time{} // also re-probe SSH liveness
+	case '?':
+		st.helpVisible = true
+		st.forceRedraw = true
+	case 'H':
+		// Capital H reserved for the history overlay so lowercase 'h'
+		// keeps its established "move focus left" meaning.
+		st.historyVisible = true
+		st.historyScroll = 0
+		st.forceRedraw = true
+	case '/':
+		st.filterMode = true
+		st.forceRedraw = true
+	case 'L':
+		armJobLogFetch(st, row, jobs, cfg)
+	case '\x15': // Ctrl-U
+		scrollDetail(st, -5)
+	case '\x04': // Ctrl-D
+		scrollDetail(st, 5)
 	case '\t', 'l':
 		focusNextPane(st)
 	case 'h':
@@ -703,9 +916,176 @@ func handleUIKey(b byte, st *uiState, jobs []*jobs.Record, tunnelNames []string,
 			focusNextPane(st)
 		case 'D':
 			focusPrevPane(st)
+		case '5', '6':
+			if _, ok := kr.ReadWithTimeout(20 * time.Millisecond); ok {
+				if b3 == '5' {
+					scrollDetail(st, -5)
+				} else {
+					scrollDetail(st, 5)
+				}
+			}
 		}
 	}
 	return true
+}
+
+// handleFilterKey routes keys while the `/` filter modal is active.
+// Enter commits the query, Esc clears+exits, Backspace pops a rune,
+// any other printable byte appends. Arrow keys / Tab fall through to
+// nav: the user usually types a query then walks the filtered list,
+// so we don't want them to first press Enter every time.
+func handleFilterKey(b byte, st *uiState, kr *srvtty.KeyReader) bool {
+	switch b {
+	case '\r', '\n':
+		// Commit: leave filter mode but keep the query so the list
+		// stays narrowed while the user navigates.
+		st.filterMode = false
+		st.forceRedraw = true
+	case '\x1b': // Esc
+		// On ESC we have to disambiguate "bare Esc = clear filter" vs
+		// "Esc [ A = up arrow that bubbles into nav". Same 80ms probe
+		// the main handler uses.
+		b2, ok := kr.ReadWithTimeout(80 * time.Millisecond)
+		if !ok {
+			st.filterMode = false
+			st.filterQuery = ""
+			st.forceRedraw = true
+			return true
+		}
+		if b2 == '[' {
+			// Swallow the rest of the CSI sequence so it doesn't get
+			// re-injected as nav while we're still in filter mode.
+			kr.ReadWithTimeout(20 * time.Millisecond)
+			return true
+		}
+		st.filterMode = false
+		st.filterQuery = ""
+		st.forceRedraw = true
+	case '\x7f', '\b':
+		if r, size := lastRune(st.filterQuery); size > 0 {
+			_ = r
+			st.filterQuery = st.filterQuery[:len(st.filterQuery)-size]
+			st.forceRedraw = true
+		}
+	default:
+		if b >= 0x20 && b < 0x7f {
+			st.filterQuery += string(rune(b))
+			st.forceRedraw = true
+		}
+	}
+	return true
+}
+
+func lastRune(s string) (rune, int) {
+	if s == "" {
+		return 0, 0
+	}
+	r, size := utf8.DecodeLastRuneInString(s)
+	return r, size
+}
+
+// armJobLogFetch kicks off an asynchronous fetch of the selected job's
+// last N log lines. The goroutine sends the populated uiJobLog onto
+// st.jobLogCh; the main loop drains the channel each idle tick.
+//
+// Synchronously fetching here would block the UI for the duration of
+// the SSH round-trip (~100ms with a warm daemon pool, multiple seconds
+// when re-dialling cold). The user pressing L on the wrong row
+// shouldn't freeze the dashboard.
+func armJobLogFetch(st *uiState, row uiRow, js []*jobs.Record, cfg *config.Config) {
+	if row.kind != "job" || row.idx < 0 || row.idx >= len(js) {
+		return
+	}
+	j := js[row.idx]
+	st.jobLog = &uiJobLog{jobID: j.ID, fetching: true}
+	st.forceRedraw = true
+	if st.demoMode {
+		// Inject a few fake lines so the panel layout is exercisable
+		// in screenshots / tests without dialling a real remote.
+		ch := st.jobLogCh
+		go func() {
+			lines := []string{
+				"[demo] " + j.Cmd,
+				"[demo] starting...",
+				"[demo] ok 1/5",
+				"[demo] ok 2/5",
+				"[demo] (live fetch suppressed in demo mode)",
+			}
+			ch <- &uiJobLog{jobID: j.ID, lines: lines, fetchedAt: time.Now()}
+		}()
+		return
+	}
+	if j.Log == "" {
+		ch := st.jobLogCh
+		go func() {
+			ch <- &uiJobLog{jobID: j.ID, err: "no log path recorded for this job", fetchedAt: time.Now()}
+		}()
+		return
+	}
+	profile := j.Profile
+	logPath := j.Log
+	cmd := "tail -n 200 " + shellQuote(logPath)
+	ch := st.jobLogCh
+	go func() {
+		res, ok := daemon.TryRunCapture(profile, "", cmd)
+		out := &uiJobLog{jobID: j.ID, fetchedAt: time.Now()}
+		if !ok {
+			out.err = "daemon unavailable"
+			ch <- out
+			return
+		}
+		body := res.Stdout
+		if body == "" {
+			body = res.Stderr
+		}
+		body = strings.TrimRight(body, "\n")
+		if body == "" {
+			out.err = "log is empty"
+		} else {
+			out.lines = strings.Split(body, "\n")
+		}
+		ch <- out
+	}()
+}
+
+// shellQuote wraps s in single quotes so it survives unquoted shell
+// interpretation. Embedded single quotes are escaped with the
+// `'\”` idiom; we don't try to handle the (impossible) case of a
+// path containing a literal single quote AND a backslash run that
+// would need word-splitting.
+func shellQuote(s string) string {
+	if s == "" {
+		return "''"
+	}
+	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
+}
+
+// drainJobLogCh non-blockingly pulls any pending log results into
+// st.jobLog. Called by the main loop's idle tick so a slow fetch
+// doesn't have to coincide with a keypress to land on screen.
+func drainJobLogCh(st *uiState) bool {
+	if st == nil || st.jobLogCh == nil {
+		return false
+	}
+	got := false
+	for {
+		select {
+		case res := <-st.jobLogCh:
+			if res == nil {
+				continue
+			}
+			// Only adopt the result when it matches the currently
+			// requested job. The user may have moved on by the time
+			// the SSH call returned; honouring a stale result would
+			// flash the wrong log into the panel.
+			if st.jobLog != nil && st.jobLog.jobID == res.jobID {
+				st.jobLog = res
+				got = true
+			}
+		default:
+			return got
+		}
+	}
 }
 
 // armConfirmFor sets up a popup confirmation tailored to the current
@@ -1063,6 +1443,7 @@ func renderDashboardWithMCP(cfg *config.Config, jobs []*jobs.Record, tunnelNames
 		panelJobs(&sb, jobs, st)
 		panelMCP(&sb, mcpSnapshot, st)
 		if st != nil {
+			panelStatus(&sb, st)
 			panelFooter(&sb, st)
 		}
 	} else {
@@ -1081,6 +1462,7 @@ func renderDashboardWithMCP(cfg *config.Config, jobs []*jobs.Record, tunnelNames
 			panelTunnels(&leftTop, cfg, tunnelNames, st)
 			panelJobs(&leftTop, jobs, st)
 			panelMCP(&leftBot, mcpSnapshot, st)
+			panelStatus(&leftBot, st)
 			panelFooter(&leftBot, st)
 		})
 		topLines := splitDashboardLines(leftTop.String())
@@ -1109,10 +1491,88 @@ func renderDashboardWithMCP(cfg *config.Config, jobs []*jobs.Record, tunnelNames
 		panelFooter(&sb, st)
 	}
 	out := sb.String()
+	if st != nil && st.historyVisible {
+		return overlayHistoryPopup(out, st)
+	}
+	if st != nil && st.helpVisible {
+		return overlayHelpPopup(out, st)
+	}
 	if st != nil && st.confirm != nil {
 		return overlayConfirmPopup(out, st.confirm)
 	}
 	return out
+}
+
+// overlayHelpPopup renders the `?` help screen as a centred overlay.
+// Same transparent-outside-the-box scheme overlayConfirmPopup uses:
+// cells to the left / right of the help box are preserved from the
+// underlying dashboard so the user sees what the help is talking
+// about.
+func overlayHelpPopup(content string, st *uiState) string {
+	lines := splitDashboardLines(content)
+	visibleHeight := len(lines)
+	if dashboardHeight > 0 {
+		visibleHeight = dashboardHeight
+	}
+	if visibleHeight < 1 {
+		visibleHeight = 1
+	}
+	for len(lines) < visibleHeight {
+		lines = append(lines, strings.Repeat(" ", dashboardWidth))
+	}
+
+	var popup strings.Builder
+	renderHelpPopup(&popup, st)
+	popupLines := splitDashboardLines(popup.String())
+	if len(popupLines) == 0 {
+		return content
+	}
+	if len(popupLines) > visibleHeight {
+		popupLines = popupLines[:visibleHeight]
+	}
+	start := (visibleHeight - len(popupLines)) / 2
+	if start < 0 {
+		start = 0
+	}
+	for i, line := range popupLines {
+		lines[start+i] = overlayLineSegment(lines[start+i], line, dashboardWidth)
+	}
+	return strings.Join(lines, "\n") + "\n"
+}
+
+// overlayHistoryPopup renders the H key's history overlay using the
+// same shape as overlayHelpPopup. Reads from internal/history live so
+// the user sees commands they just ran.
+func overlayHistoryPopup(content string, st *uiState) string {
+	lines := splitDashboardLines(content)
+	visibleHeight := len(lines)
+	if dashboardHeight > 0 {
+		visibleHeight = dashboardHeight
+	}
+	if visibleHeight < 1 {
+		visibleHeight = 1
+	}
+	for len(lines) < visibleHeight {
+		lines = append(lines, strings.Repeat(" ", dashboardWidth))
+	}
+
+	var popup strings.Builder
+	renderHistoryPopup(&popup, st)
+	popupLines := splitDashboardLines(popup.String())
+	if len(popupLines) == 0 {
+		return content
+	}
+	if len(popupLines) > visibleHeight {
+		popupLines = popupLines[:visibleHeight]
+	}
+	start := (visibleHeight - len(popupLines)) / 2
+	if start < 0 {
+		start = 0
+	}
+	for i, line := range popupLines {
+		lines[start+i] = overlayLineSegment(lines[start+i], line, dashboardWidth)
+	}
+	return strings.Join(lines, "\n") + "\n"
 }
 
 func overlayConfirmPopup(content string, c *uiConfirm) string {
@@ -1388,8 +1848,26 @@ func renderStretchedDetail(sb *strings.Builder, cfg *config.Config, jobs []*jobs
 		bodyMax = 0
 	}
 	body := lines[1:bottomIdx]
+	hidden := 0
 	if len(body) > bodyMax {
-		body = body[:bodyMax]
+		maxStart := len(body) - bodyMax
+		if st != nil {
+			if st.detailScroll > maxStart {
+				st.detailScroll = maxStart
+			}
+			if st.detailScroll < 0 {
+				st.detailScroll = 0
+			}
+			start := st.detailScroll
+			body = body[start : start+bodyMax]
+			hidden = len(lines[1:bottomIdx]) - len(body)
+		} else {
+			body = body[:bodyMax]
+			hidden = len(lines[1:bottomIdx]) - len(body)
+		}
+	}
+	if hidden > 0 && len(body) > 0 {
+		body[len(body)-1] = detailScrollHint(st, hidden)
 	}
 	sb.WriteString(lines[0])
 	sb.WriteByte('\n')
@@ -1402,6 +1880,19 @@ func renderStretchedDetail(sb *strings.Builder, cfg *config.Config, jobs []*jobs
 	}
 	sb.WriteString(lines[bottomIdx])
 	sb.WriteString("\n\n")
+}
+
+func detailScrollHint(st *uiState, hidden int) string {
+	offset := 0
+	if st != nil {
+		offset = st.detailScroll
+	}
+	return boxedMetaLine(fmt.Sprintf("detail scroll %d, %d hidden", offset, hidden))
+}
+
+func boxedMetaLine(msg string) string {
+	return fmt.Sprintf("%s│%s %s %s│%s",
+		boxColor(false), ansi.Reset, padAnsiRight(dashMeta(msg), dashboardContentWidth), boxColor(false), ansi.Reset)
 }
 
 // splitDashboardLines splits panel output and drops the trailing
@@ -1610,12 +2101,16 @@ func kvPair(leftLabel, leftValue, rightLabel, rightValue string) string {
 
 func panelHeader(sb *strings.Builder, st *uiState) {
 	boxTop(sb, "srv")
+	mode := ansi.Dim + "live terminal view" + ansi.Reset
+	if st != nil && st.demoMode {
+		mode = ansi.Yellow + ansi.Bold + "DEMO" + ansi.Reset + ansi.Dim + " simulated data" + ansi.Reset
+	}
 	boxLine(sb, fitInlineParts(
 		[]string{
 			ansi.Bold + ansi.Magenta + "SRV UI" + ansi.Reset,
 			ansi.Dim + "remote control dashboard" + ansi.Reset,
 		},
-		ansi.Dim+"live terminal view"+ansi.Reset,
+		mode,
 		dashboardContentWidth,
 	))
 	if st == nil {
@@ -1624,7 +2119,9 @@ func panelHeader(sb *strings.Builder, st *uiState) {
 		fmt.Fprintln(sb)
 		return
 	}
-	boxLine(sb, fmt.Sprintf("keys  %stab/h/l%s pane   %s↑/↓%s row   %sr%s refresh   %sq%s quit",
+	boxLine(sb, fmt.Sprintf("keys  %stab/h/l%s pane   %s↑/↓%s row   %sCtrl-U/D%s detail   %s/%s filter   %s?%s help   %sq%s quit",
+		ansi.Yellow+ansi.Bold, ansi.Reset,
+		ansi.Yellow+ansi.Bold, ansi.Reset,
 		ansi.Yellow+ansi.Bold, ansi.Reset,
 		ansi.Yellow+ansi.Bold, ansi.Reset,
 		ansi.Yellow+ansi.Bold, ansi.Reset,
@@ -1871,6 +2368,9 @@ func panelOverview(sb *strings.Builder, cfg *config.Config, jobs []*jobs.Record,
 		if focus == "" {
 			focus = "none"
 		}
+		if st.demoMode {
+			focus += " demo"
+		}
 	}
 	hidden := 0
 	if st != nil {
@@ -1954,6 +2454,9 @@ func panelTunnels(sb *strings.Builder, cfg *config.Config, names []string, st *u
 		active, errs = tunnel.LoadStatuses()
 	}
 	title := fmt.Sprintf("tunnels %d", len(names))
+	if st != nil && len(names) > 0 {
+		title += fmt.Sprintf("  %d/%d", st.tunnelCursor+1, len(names))
+	}
 	boxTopWithHint(sb, title, "space toggle  x remove", focused)
 	nameW := 12
 	typeW := 7
@@ -2004,18 +2507,47 @@ func panelTunnels(sb *strings.Builder, cfg *config.Config, names []string, st *u
 	fmt.Fprintln(sb)
 }
 
+// filterJobs returns the subset of `js` whose ID or Cmd contains
+// `query` (case-insensitive substring). An empty query returns the
+// slice unchanged so the no-filter path doesn't allocate.
+func filterJobs(js []*jobs.Record, query string) []*jobs.Record {
+	q := strings.TrimSpace(strings.ToLower(query))
+	if q == "" {
+		return js
+	}
+	out := make([]*jobs.Record, 0, len(js))
+	for _, j := range js {
+		if strings.Contains(strings.ToLower(j.ID), q) ||
+			strings.Contains(strings.ToLower(j.Cmd), q) ||
+			strings.Contains(strings.ToLower(j.Profile), q) {
+			out = append(out, j)
+		}
+	}
+	return out
+}
+
 func panelJobs(sb *strings.Builder, jobs []*jobs.Record, st *uiState) {
 	hidden := 0
 	if st != nil {
 		hidden = st.hiddenJobs
 	}
-	if len(jobs) == 0 && hidden == 0 {
+	if len(jobs) == 0 && hidden == 0 && (st == nil || st.filterQuery == "") {
 		return
 	}
 	focused := st != nil && st.focusPane == "job"
 	title := fmt.Sprintf("jobs %d", len(jobs))
+	if st != nil && len(jobs) > 0 {
+		title += fmt.Sprintf("  %d/%d", st.jobCursor+1, len(jobs))
+	}
 	if hidden > 0 {
 		title = fmt.Sprintf("jobs %d + %d hidden", len(jobs), hidden)
+	}
+	if st != nil && st.filterQuery != "" {
+		q := st.filterQuery
+		if st.filterMode {
+			q += "▏" // a cursor glyph; the modal is currently capturing input
+		}
+		title += "  /" + q
 	}
 	start, end := 0, len(jobs)
 	if st != nil {
@@ -2026,7 +2558,11 @@ func panelJobs(sb *strings.Builder, jobs []*jobs.Record, st *uiState) {
 	}
 	boxTopWithHint(sb, title, "k kill", focused)
 	if len(jobs) == 0 {
-		boxLineFocused(sb, ansi.Dim+"nothing running; `srv jobs` lists completed entries"+ansi.Reset, focused)
+		msg := ansi.Dim + "nothing running; `srv jobs` lists completed entries" + ansi.Reset
+		if st != nil && st.filterQuery != "" {
+			msg = ansi.Dim + "no jobs match filter -- press Esc to clear" + ansi.Reset
+		}
+		boxLineFocused(sb, msg, focused)
 		boxBottomFocused(sb, focused)
 		fmt.Fprintln(sb)
 		return
@@ -2063,17 +2599,17 @@ func panelDetail(sb *strings.Builder, cfg *config.Config, jobs []*jobs.Record, t
 	switch row.kind {
 	case "tunnel":
 		if row.idx >= 0 && row.idx < len(tunnelNames) {
-			panelTunnelDetail(sb, tunnelNames[row.idx], cfg, st)
+			panelTunnelDetail(sb, fmt.Sprintf("tunnel detail  %d/%d", row.idx+1, len(tunnelNames)), tunnelNames[row.idx], cfg, st)
 			return
 		}
 	case "job":
 		if row.idx >= 0 && row.idx < len(jobs) {
-			panelJobDetail(sb, jobs[row.idx])
+			panelJobDetail(sb, fmt.Sprintf("job detail  %d/%d", row.idx+1, len(jobs)), jobs[row.idx], st)
 			return
 		}
 	case "mcp":
 		if row.idx >= 0 && row.idx < len(mcp.RecentTools) {
-			panelMCPDetail(sb, mcp.RecentTools[row.idx], mcp)
+			panelMCPDetail(sb, fmt.Sprintf("mcp call detail  %d/%d", row.idx+1, len(mcp.RecentTools)), mcp.RecentTools[row.idx], mcp)
 			return
 		}
 	}
@@ -2089,8 +2625,8 @@ func panelDetail(sb *strings.Builder, cfg *config.Config, jobs []*jobs.Record, t
 // the row reads "12345 (alive)" if that MCP server is still running,
 // or "12345 (previous session)" if it has since exited -- useful
 // when debugging "which Claude Code instance issued this call".
-func panelMCPDetail(sb *strings.Builder, tc mcplog.ToolCall, mcp mcplog.Status) {
-	boxTop(sb, "mcp call detail")
+func panelMCPDetail(sb *strings.Builder, title string, tc mcplog.ToolCall, mcp mcplog.Status) {
+	boxTop(sb, title)
 	boxLine(sb, kvLine("tool", ansi.Yellow+ansi.Bold+tc.Name+ansi.Reset))
 	boxLine(sb, kvLine("duration", ansi.Magenta+tc.Dur+ansi.Reset))
 	status := dashStatus("ok", ansi.Green)
@@ -2123,9 +2659,11 @@ func panelMCPDetail(sb *strings.Builder, tc mcplog.ToolCall, mcp mcplog.Status) 
 
 // panelJobDetail renders job details fit for the right column.
 // Same fields as the old full-screen renderJobDetail, just laid out
-// against the narrower width.
-func panelJobDetail(sb *strings.Builder, j *jobs.Record) {
-	boxTop(sb, "job detail")
+// against the narrower width. When the user has hit `L` on this job,
+// the last N log lines are appended below the COMMAND block so the
+// user can eyeball recent output without exiting the UI.
+func panelJobDetail(sb *strings.Builder, title string, j *jobs.Record, st *uiState) {
+	boxTop(sb, title)
 	boxLine(sb, kvLine("id", dashName(j.ID)))
 	boxLine(sb, kvLine("profile", ansi.Cyan+j.Profile+ansi.Reset))
 	boxLine(sb, kvLine("pid", strconv.Itoa(j.Pid)))
@@ -2145,8 +2683,36 @@ func panelJobDetail(sb *strings.Builder, j *jobs.Record) {
 	for _, line := range wrapText(j.Cmd, dashboardContentWidth-2) {
 		boxLine(sb, "  "+line)
 	}
+	// Log preview block. Rendered only when the user pressed L on
+	// this same job -- otherwise we keep the panel compact so the
+	// JOBS-bottom anchor doesn't drift around as the user navigates.
+	if st != nil && st.jobLog != nil && st.jobLog.jobID == j.ID {
+		boxLine(sb, "")
+		hdr := ansi.Dim + "LOG  " + ansi.Reset + ansi.Dim + "(last " + strconv.Itoa(len(st.jobLog.lines)) + " lines)" + ansi.Reset
+		if st.jobLog.fetching {
+			hdr = ansi.Dim + "LOG  fetching..." + ansi.Reset
+		} else if !st.jobLog.fetchedAt.IsZero() {
+			hdr += dashMeta("  " + fmtDuration(time.Since(st.jobLog.fetchedAt)) + " ago")
+		}
+		boxLine(sb, hdr)
+		switch {
+		case st.jobLog.err != "":
+			boxLine(sb, "  "+ansi.Red+st.jobLog.err+ansi.Reset)
+		case st.jobLog.fetching:
+			boxLine(sb, "  "+ansi.Dim+"loading remote log..."+ansi.Reset)
+		default:
+			// Render the *last* lines that fit so the freshest output
+			// is what the user sees. The DETAIL panel is height-bounded
+			// to leftTop -- letting an oversize log push the panel
+			// taller would break the JOBS-bottom alignment we just
+			// fixed.
+			for _, line := range st.jobLog.lines {
+				boxLine(sb, "  "+fitPlain(line, dashboardContentWidth-2))
+			}
+		}
+	}
 	boxLine(sb, "")
-	boxLine(sb, ansi.Dim+"press "+ansi.Yellow+ansi.Bold+"k"+ansi.Reset+ansi.Dim+" to kill"+ansi.Reset)
+	boxLine(sb, ansi.Dim+"press "+ansi.Yellow+ansi.Bold+"k"+ansi.Reset+ansi.Dim+" to kill   "+ansi.Yellow+ansi.Bold+"L"+ansi.Reset+ansi.Dim+" log preview"+ansi.Reset)
 	boxBottom(sb)
 	fmt.Fprintln(sb)
 }
@@ -2155,16 +2721,16 @@ func panelJobDetail(sb *strings.Builder, j *jobs.Record) {
 // column. Surfaces last-attempt errors prominently -- that's the
 // info the user most wants when something looks "stopped" but they
 // expected "running".
-func panelTunnelDetail(sb *strings.Builder, name string, cfg *config.Config, st *uiState) {
+func panelTunnelDetail(sb *strings.Builder, title, name string, cfg *config.Config, st *uiState) {
 	def := cfg.Tunnels[name]
 	if def == nil {
-		boxTop(sb, "tunnel detail")
+		boxTop(sb, title)
 		boxLine(sb, ansi.Red+"tunnel "+name+" not found in config"+ansi.Reset)
 		boxBottom(sb)
 		fmt.Fprintln(sb)
 		return
 	}
-	boxTop(sb, "tunnel detail")
+	boxTop(sb, title)
 	boxLine(sb, kvLine("name", dashName(name)))
 	boxLine(sb, kvLine("type", ansi.Magenta+def.Type+ansi.Reset))
 	boxLine(sb, kvLine("spec", dashPath(def.Spec)))
@@ -2206,7 +2772,11 @@ func panelMCP(sb *strings.Builder, mcp mcplog.Status, st *uiState) {
 		return
 	}
 	focused := st != nil && st.focusPane == "mcp"
-	boxTopWithHint(sb, fmt.Sprintf("mcp %d", len(mcp.RecentTools)), "read-only", focused)
+	title := fmt.Sprintf("mcp %d", len(mcp.RecentTools))
+	if st != nil && len(mcp.RecentTools) > 0 {
+		title += fmt.Sprintf("  %d/%d", st.mcpCursor+1, len(mcp.RecentTools))
+	}
+	boxTopWithHint(sb, title, "read-only", focused)
 	if len(mcp.ActivePIDs) == 0 {
 		boxLineFocused(sb, kvPair("state", dashStatus("idle", ansi.Dim), "last", fmtDuration(time.Since(mcp.LastActive))+" ago"), focused)
 	} else {
@@ -2277,12 +2847,20 @@ func visibleListRange(total, cursor, limit int) (start, end int) {
 	return start, start + limit
 }
 
+func panelStatus(sb *strings.Builder, st *uiState) {
+	if st == nil || st.statusMsg == "" {
+		return
+	}
+	boxTop(sb, "status")
+	boxLine(sb, st.statusMsg)
+	boxBottom(sb)
+	fmt.Fprintln(sb)
+}
+
 func panelFooter(sb *strings.Builder, st *uiState) {
 	boxTop(sb, "keys")
 	if st == nil {
 		boxLine(sb, ansi.Dim+"snapshot complete"+ansi.Reset)
-	} else if st.statusMsg != "" {
-		boxLine(sb, st.statusMsg)
 	} else {
 		focus := st.focusPane
 		if focus == "" {
@@ -2291,13 +2869,13 @@ func panelFooter(sb *strings.Builder, st *uiState) {
 		boxLine(sb, kvPair("focus", ansi.Yellow+ansi.Bold+strings.ToUpper(focus)+ansi.Reset, "mode", "live dashboard"))
 		switch focus {
 		case "tunnel":
-			boxLine(sb, keyHelp("↑/↓ move", "space up/down", "x remove", "tab next", "r refresh", "q quit"))
+			boxLine(sb, keyHelp("↑/↓ move", "space up/down", "x remove", "tab next", "? help"))
 		case "job":
-			boxLine(sb, keyHelp("↑/↓ move", "k kill", "tab next", "r refresh", "q quit"))
+			boxLine(sb, keyHelp("↑/↓ move", "k kill", "L log", "/ filter", "tab next", "? help"))
 		case "mcp":
-			boxLine(sb, keyHelp("↑/↓ move", "read-only", "tab next", "r refresh", "q quit"))
+			boxLine(sb, keyHelp("↑/↓ move", "read-only", "tab next", "? help"))
 		default:
-			boxLine(sb, keyHelp("tab choose pane", "r refresh", "q quit"))
+			boxLine(sb, keyHelp("tab choose pane", "? help", "q quit"))
 		}
 	}
 	boxBottom(sb)
@@ -2321,6 +2899,193 @@ func keyHelp(parts ...string) string {
 		}
 	}
 	return strings.Join(out, ansi.Dim+"  ·  "+ansi.Reset)
+}
+
+// renderHelpPopup draws the `?` help cheatsheet. Same box shape as
+// the confirmation popup so the user has a single visual vocabulary
+// for "modal thing on top of the dashboard". Content is grouped by
+// pane so the relevant keys for the current focus are first.
+func renderHelpPopup(sb *strings.Builder, st *uiState) {
+	rows := helpRows(st)
+	width := 0
+	for _, r := range rows {
+		if w := visualWidth(r) + 4; w > width {
+			width = w
+		}
+	}
+	title := "keyboard shortcuts"
+	if w := visualWidth(title) + 6; w > width {
+		width = w
+	}
+	if width < 40 {
+		width = 40
+	}
+	if width > dashboardWidth {
+		width = dashboardWidth
+	}
+	color := ansi.Bold + ansi.Cyan
+	top := "┌" + strings.Repeat("─", width-2) + "┐"
+	bot := "└" + strings.Repeat("─", width-2) + "┘"
+	fmt.Fprintf(sb, "%s%s%s\n", color, top, ansi.Reset)
+	titleCell := centerAnsiContent(color+title+ansi.Reset, width-2)
+	fmt.Fprintf(sb, "%s│%s%s%s│%s\n", color, ansi.Reset, titleCell, color, ansi.Reset)
+	fmt.Fprintf(sb, "%s│%s%s%s│%s\n", color, ansi.Reset, strings.Repeat(" ", width-2), color, ansi.Reset)
+	for _, r := range rows {
+		// Help rows already carry colour; left-pad to 2 spaces so the
+		// box wall doesn't kiss the first glyph.
+		padded := "  " + r
+		cell := padded + strings.Repeat(" ", max(0, width-2-visualWidth(padded)))
+		fmt.Fprintf(sb, "%s│%s%s%s│%s\n", color, ansi.Reset, cell, color, ansi.Reset)
+	}
+	fmt.Fprintf(sb, "%s│%s%s%s│%s\n", color, ansi.Reset, strings.Repeat(" ", width-2), color, ansi.Reset)
+	hint := ansi.Dim + "press any key to close" + ansi.Reset
+	cell := centerAnsiContent(hint, width-2)
+	fmt.Fprintf(sb, "%s│%s%s%s│%s\n", color, ansi.Reset, cell, color, ansi.Reset)
+	fmt.Fprintf(sb, "%s%s%s\n", color, bot, ansi.Reset)
+}
+
+// renderHistoryPopup draws a panel showing the last N CLI commands
+// recorded by internal/history. Read-only -- the model can't run from
+// here (no per-row action wiring), but having the panel beside the
+// other dashboards lets the user see "what did I just do" without
+// flipping shells. Up/Down (or j/k) scrolls when the list exceeds the
+// popup height.
+func renderHistoryPopup(sb *strings.Builder, st *uiState) {
+	const popupHeight = 18
+	width := dashboardWidth - 4
+	if width < 60 {
+		width = 60
+	}
+	if width > dashboardWidth {
+		width = dashboardWidth
+	}
+	color := ansi.Bold + ansi.Cyan
+	top := "┌" + strings.Repeat("─", width-2) + "┐"
+	bot := "└" + strings.Repeat("─", width-2) + "┘"
+	fmt.Fprintf(sb, "%s%s%s\n", color, top, ansi.Reset)
+	title := "command history (recent first)"
+	titleCell := centerAnsiContent(color+title+ansi.Reset, width-2)
+	fmt.Fprintf(sb, "%s│%s%s%s│%s\n", color, ansi.Reset, titleCell, color, ansi.Reset)
+	fmt.Fprintf(sb, "%s│%s%s%s│%s\n", color, ansi.Reset, strings.Repeat(" ", width-2), color, ansi.Reset)
+
+	entries, err := history.ReadAll()
+	rows := []string{}
+	if err != nil {
+		rows = []string{ansi.Red + "history read error: " + err.Error() + ansi.Reset}
+	} else if len(entries) == 0 {
+		rows = []string{ansi.Dim + "(no history yet -- run a remote command via srv)" + ansi.Reset}
+	} else {
+		// Newest first.
+		for i := len(entries) - 1; i >= 0; i-- {
+			e := entries[i]
+			mark := " "
+			markColor := ansi.Green
+			if e.Exit != 0 {
+				mark = "!"
+				markColor = ansi.Red
+			}
+			when := e.Time
+			if len(when) > 19 {
+				when = when[:19]
+			}
+			cmd := e.Cmd
+			maxCmd := width - 32
+			if maxCmd < 10 {
+				maxCmd = 10
+			}
+			if len(cmd) > maxCmd {
+				cmd = cmd[:maxCmd-3] + "..."
+			}
+			rows = append(rows, fmt.Sprintf("%s%s%s %s  %s%s%s  %s",
+				markColor, mark, ansi.Reset,
+				when,
+				ansi.Dim, e.Profile, ansi.Reset,
+				cmd))
+		}
+	}
+
+	// Scroll window.
+	visibleRows := popupHeight - 6 // 2 border + title + spacer + bottom hint + bot
+	if visibleRows < 4 {
+		visibleRows = 4
+	}
+	scroll := st.historyScroll
+	if scroll > len(rows)-visibleRows {
+		scroll = len(rows) - visibleRows
+	}
+	if scroll < 0 {
+		scroll = 0
+	}
+	st.historyScroll = scroll
+	end := scroll + visibleRows
+	if end > len(rows) {
+		end = len(rows)
+	}
+	window := rows[scroll:end]
+	for _, r := range window {
+		padded := "  " + r
+		cell := padded + strings.Repeat(" ", max(0, width-2-visualWidth(padded)))
+		fmt.Fprintf(sb, "%s│%s%s%s│%s\n", color, ansi.Reset, cell, color, ansi.Reset)
+	}
+	// Pad with blank rows so the popup keeps a stable height.
+	for i := len(window); i < visibleRows; i++ {
+		fmt.Fprintf(sb, "%s│%s%s%s│%s\n", color, ansi.Reset, strings.Repeat(" ", width-2), color, ansi.Reset)
+	}
+	fmt.Fprintf(sb, "%s│%s%s%s│%s\n", color, ansi.Reset, strings.Repeat(" ", width-2), color, ansi.Reset)
+	hint := ansi.Dim + "↑/↓ or j/k scroll  ·  any other key closes  ·  q quits" + ansi.Reset
+	cell := centerAnsiContent(hint, width-2)
+	fmt.Fprintf(sb, "%s│%s%s%s│%s\n", color, ansi.Reset, cell, color, ansi.Reset)
+	fmt.Fprintf(sb, "%s%s%s\n", color, bot, ansi.Reset)
+}
+
+// helpRows returns the cheatsheet lines, ordered with the rows most
+// relevant to the current focus first.
+func helpRows(st *uiState) []string {
+	yk := func(k, desc string) string {
+		return ansi.Yellow + ansi.Bold + k + ansi.Reset + "  " + desc
+	}
+	global := []string{
+		yk("tab/h/l", "switch focused pane"),
+		yk("↑/↓", "move cursor within pane"),
+		yk("Ctrl-U/D", "scroll DETAIL panel"),
+		yk("r", "force refresh snapshot"),
+		yk("/", "filter JOBS by id / cmd"),
+		yk("H", "history overlay (recent CLI commands)"),
+		yk("?", "this help screen"),
+		yk("q / Ctrl-C", "quit"),
+	}
+	focus := st.focusPane
+	if focus == "" {
+		focus = "(none)"
+	}
+	var perPane []string
+	switch focus {
+	case "tunnel":
+		perPane = []string{
+			ansi.Dim + "tunnel pane:" + ansi.Reset,
+			yk("space", "toggle tunnel up / down"),
+			yk("x", "remove tunnel definition"),
+		}
+	case "job":
+		perPane = []string{
+			ansi.Dim + "job pane:" + ansi.Reset,
+			yk("k", "send SIGTERM to selected job"),
+			yk("L", "preview last log lines in DETAIL"),
+		}
+	case "mcp":
+		perPane = []string{
+			ansi.Dim + "mcp pane:" + ansi.Reset,
+			ansi.Dim + "read-only -- no row actions" + ansi.Reset,
+		}
+	default:
+		perPane = []string{
+			ansi.Dim + "no pane focused -- press tab" + ansi.Reset,
+		}
+	}
+	rows := append([]string{ansi.Dim + "global:" + ansi.Reset}, global...)
+	rows = append(rows, "")
+	rows = append(rows, perPane...)
+	return rows
 }
 
 // renderConfirmPopup draws the action title and explanatory body
@@ -2347,30 +3112,30 @@ func renderConfirmPopup(sb *strings.Builder, c *uiConfirm) {
 	}
 	top := "┌" + strings.Repeat("─", width-2) + "┐"
 	bot := "└" + strings.Repeat("─", width-2) + "┘"
-	red := ansi.Bold + ansi.Red
+	color := confirmColor(c.title)
 	title := fitPlain(c.title, max(8, width-4))
-	fmt.Fprintf(sb, "%s%s%s\n", red, top, ansi.Reset)
-	titleCell := centerAnsiContent(red+title+ansi.Reset, width-2)
+	fmt.Fprintf(sb, "%s%s%s\n", color, top, ansi.Reset)
+	titleCell := centerAnsiContent(color+title+ansi.Reset, width-2)
 	fmt.Fprintf(sb, "%s│%s%s%s│%s\n",
-		red, ansi.Reset,
+		color, ansi.Reset,
 		titleCell,
-		red, ansi.Reset)
+		color, ansi.Reset)
 	fmt.Fprintf(sb, "%s│%s%s%s│%s\n",
-		red, ansi.Reset,
+		color, ansi.Reset,
 		strings.Repeat(" ", width-2),
-		red, ansi.Reset)
+		color, ansi.Reset)
 	for _, line := range c.body {
 		line = fitPlain(line, max(8, width-4))
 		lineCell := centerAnsiContent(line, width-2)
 		fmt.Fprintf(sb, "%s│%s%s%s│%s\n",
-			red, ansi.Reset,
+			color, ansi.Reset,
 			lineCell,
-			red, ansi.Reset)
+			color, ansi.Reset)
 	}
 	fmt.Fprintf(sb, "%s│%s%s%s│%s\n",
-		red, ansi.Reset,
+		color, ansi.Reset,
 		strings.Repeat(" ", width-2),
-		red, ansi.Reset)
+		color, ansi.Reset)
 	choice := ansi.Yellow + ansi.Bold + "[Y]" + ansi.Reset + " confirm    " +
 		ansi.Yellow + ansi.Bold + "[N/Esc]" + ansi.Reset + " cancel"
 	choiceWidth := visualWidth("[Y] confirm    [N/Esc] cancel")
@@ -2381,10 +3146,21 @@ func renderConfirmPopup(sb *strings.Builder, c *uiConfirm) {
 	}
 	choiceCell := centerAnsiContent(choice, width-2)
 	fmt.Fprintf(sb, "%s│%s%s%s│%s\n",
-		red, ansi.Reset,
+		color, ansi.Reset,
 		choiceCell,
-		red, ansi.Reset)
-	fmt.Fprintf(sb, "%s%s%s\n", red, bot, ansi.Reset)
+		color, ansi.Reset)
+	fmt.Fprintf(sb, "%s%s%s\n", color, bot, ansi.Reset)
+}
+
+func confirmColor(title string) string {
+	switch {
+	case strings.HasPrefix(title, "tunnel up "):
+		return ansi.Bold + ansi.Green
+	case strings.HasPrefix(title, "tunnel down "):
+		return ansi.Bold + ansi.Yellow
+	default:
+		return ansi.Bold + ansi.Red
+	}
 }
 
 // visualWidth returns the *visible* column count of s with ANSI

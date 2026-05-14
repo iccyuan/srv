@@ -12,10 +12,34 @@ import (
 	"srv/internal/progress"
 	"srv/internal/srvtty"
 	"srv/internal/sshx"
+	"strconv"
 	"strings"
+	"sync"
 
 	"github.com/pkg/sftp"
 )
+
+// defaultParallelWorkers caps how many files transfer concurrently
+// during a recursive push/pull. pkg/sftp's Client is goroutine-safe
+// and shares one SSH connection; each worker just shares the same
+// underlying channel multiplexer.
+//
+// Picked empirically: 4 saturates a single gigabit link on mixed-size
+// trees without overwhelming the SSH window. Override via the
+// SRV_TRANSFER_WORKERS env var (1..32).
+const defaultParallelWorkers = 4
+
+// parallelWorkers honours SRV_TRANSFER_WORKERS in the [1,32] range,
+// defaulting to defaultParallelWorkers when unset or invalid. Used by
+// uploadDir / downloadDir to size their goroutine pool.
+func parallelWorkers() int {
+	if v := strings.TrimSpace(os.Getenv("SRV_TRANSFER_WORKERS")); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n >= 1 && n <= 32 {
+			return n
+		}
+	}
+	return defaultParallelWorkers
+}
 
 // expandRemoteHome resolves a leading "~" by asking the remote `echo $HOME`
 // once and substituting. Cached on the *sshx.Client.
@@ -212,6 +236,9 @@ func Upload(c *sshx.Client, local, remote string) error {
 	return nil
 }
 
+// fileJob is one src->dst pair queued for parallel transfer.
+type fileJob struct{ src, dst string }
+
 func uploadDir(c *sshx.Client, local, remote string) error {
 	s, err := c.SFTP()
 	if err != nil {
@@ -220,7 +247,11 @@ func uploadDir(c *sshx.Client, local, remote string) error {
 	if err := s.MkdirAll(remote); err != nil {
 		return err
 	}
-	return filepath.Walk(local, func(p string, info os.FileInfo, err error) error {
+	// Two-phase walk: create every dir sequentially first so concurrent
+	// file uploads never race against a parent that doesn't exist yet.
+	// MkdirAll is idempotent so the cost is one round-trip per dir.
+	var files []fileJob
+	walkErr := filepath.Walk(local, func(p string, info os.FileInfo, err error) error {
 		if err != nil {
 			return err
 		}
@@ -233,7 +264,14 @@ func uploadDir(c *sshx.Client, local, remote string) error {
 		if info.IsDir() {
 			return s.MkdirAll(dst)
 		}
-		return Upload(c, p, dst)
+		files = append(files, fileJob{src: p, dst: dst})
+		return nil
+	})
+	if walkErr != nil {
+		return walkErr
+	}
+	return runParallel(files, parallelWorkers(), func(j fileJob) error {
+		return Upload(c, j.src, j.dst)
 	})
 }
 
@@ -405,6 +443,7 @@ func downloadDir(c *sshx.Client, remote, local string) error {
 	if err := os.MkdirAll(local, 0o755); err != nil {
 		return err
 	}
+	var files []fileJob
 	walker := s.Walk(remote)
 	for walker.Step() {
 		if err := walker.Err(); err != nil {
@@ -424,9 +463,70 @@ func downloadDir(c *sshx.Client, remote, local string) error {
 			}
 			continue
 		}
-		if err := Download(c, p, dst); err != nil {
-			return err
-		}
+		files = append(files, fileJob{src: p, dst: dst})
 	}
-	return nil
+	return runParallel(files, parallelWorkers(), func(j fileJob) error {
+		return Download(c, j.src, j.dst)
+	})
+}
+
+// runParallel fans `jobs` across `workers` goroutines calling `do(job)`.
+// First error wins: as soon as one worker returns non-nil, the rest
+// drain the channel quickly (still consuming jobs but skipping work)
+// so the caller's wait completes without leaking goroutines.
+//
+// Falls back to sequential when len(jobs) == 0 or workers <= 1, which
+// also keeps the test suite single-threaded for the small tree
+// fixtures used in transfer_test.go.
+func runParallel(jobs []fileJob, workers int, do func(fileJob) error) error {
+	if len(jobs) == 0 {
+		return nil
+	}
+	if workers < 1 {
+		workers = 1
+	}
+	if workers > len(jobs) {
+		workers = len(jobs)
+	}
+	if workers == 1 {
+		for _, j := range jobs {
+			if err := do(j); err != nil {
+				return err
+			}
+		}
+		return nil
+	}
+
+	jobCh := make(chan fileJob)
+	var (
+		wg       sync.WaitGroup
+		errOnce  sync.Once
+		firstErr error
+	)
+	setErr := func(e error) {
+		errOnce.Do(func() { firstErr = e })
+	}
+	for i := 0; i < workers; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for j := range jobCh {
+				// Skip remaining work after a peer reported an error --
+				// we still drain the channel so the producer's `<-jobCh`
+				// loop terminates, just stop spending bandwidth on it.
+				if firstErr != nil {
+					continue
+				}
+				if err := do(j); err != nil {
+					setErr(err)
+				}
+			}
+		}()
+	}
+	for _, j := range jobs {
+		jobCh <- j
+	}
+	close(jobCh)
+	wg.Wait()
+	return firstErr
 }

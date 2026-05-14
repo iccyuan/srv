@@ -53,3 +53,60 @@ func TestLocalHashFirstNShort(t *testing.T) {
 		t.Fatal("expected short-read error, got nil")
 	}
 }
+
+func TestRunParallelEmptyAndSequential(t *testing.T) {
+	// Empty input: no work, no error.
+	if err := runParallel(nil, 4, func(fileJob) error { return os.ErrInvalid }); err != nil {
+		t.Errorf("nil jobs: got %v, want nil", err)
+	}
+	// workers=1 short-circuits to sequential; verify by counting.
+	jobs := []fileJob{{src: "a"}, {src: "b"}, {src: "c"}}
+	count := 0
+	if err := runParallel(jobs, 1, func(fileJob) error {
+		count++
+		return nil
+	}); err != nil {
+		t.Errorf("sequential: %v", err)
+	}
+	if count != 3 {
+		t.Errorf("sequential count: got %d want 3", count)
+	}
+}
+
+func TestRunParallelFirstErrorWins(t *testing.T) {
+	jobs := []fileJob{{src: "a"}, {src: "b"}, {src: "fail"}, {src: "d"}, {src: "e"}}
+	calls := 0
+	myErr := os.ErrPermission
+	err := runParallel(jobs, 4, func(j fileJob) error {
+		calls++
+		if j.src == "fail" {
+			return myErr
+		}
+		return nil
+	})
+	if err != myErr {
+		t.Errorf("expected first error, got %v", err)
+	}
+	if calls == 0 {
+		t.Errorf("worker should have been invoked at least once")
+	}
+}
+
+func TestParallelWorkersEnv(t *testing.T) {
+	t.Setenv("SRV_TRANSFER_WORKERS", "")
+	if got := parallelWorkers(); got != defaultParallelWorkers {
+		t.Errorf("unset env: got %d want %d", got, defaultParallelWorkers)
+	}
+	t.Setenv("SRV_TRANSFER_WORKERS", "8")
+	if got := parallelWorkers(); got != 8 {
+		t.Errorf("env=8: got %d want 8", got)
+	}
+	t.Setenv("SRV_TRANSFER_WORKERS", "99")
+	if got := parallelWorkers(); got != defaultParallelWorkers {
+		t.Errorf("env out of range: got %d want default %d", got, defaultParallelWorkers)
+	}
+	t.Setenv("SRV_TRANSFER_WORKERS", "notanumber")
+	if got := parallelWorkers(); got != defaultParallelWorkers {
+		t.Errorf("env invalid: got %d want default %d", got, defaultParallelWorkers)
+	}
+}

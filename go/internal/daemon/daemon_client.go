@@ -356,12 +356,13 @@ func daemonClientStop() int {
 // of one tunnel. JSON-tagged for the daemon protocol; never written
 // to disk.
 type TunnelInfo struct {
-	Name    string `json:"name"`
-	Type    string `json:"type"`
-	Spec    string `json:"spec"`
-	Profile string `json:"profile,omitempty"`
-	Listen  string `json:"listen,omitempty"`
-	Started int64  `json:"started,omitempty"`
+	Name     string `json:"name"`
+	Type     string `json:"type"`
+	Spec     string `json:"spec"`
+	Profile  string `json:"profile,omitempty"`
+	Listen   string `json:"listen,omitempty"`
+	Started  int64  `json:"started,omitempty"`
+	OnDemand bool   `json:"on_demand,omitempty"`
 }
 
 // String makes TunnelInfo printable for diagnostics.

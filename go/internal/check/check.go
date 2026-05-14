@@ -264,9 +264,13 @@ func PrintDialError(err error, profile *config.Profile) {
 	}
 }
 
-// Cmd implements `srv check [--rtt [--count N] [--interval D]]`.
+// Cmd implements `srv check [--rtt [--count N] [--interval D]] [--rotate-key [--revoke-old]]`.
 func Cmd(args []string, cfg *config.Config, profileOverride string) error {
 	rtt := false
+	rotate := false
+	revokeOld := false
+	bandwidth := false
+	bwDuration := 5 * time.Second
 	count := 10
 	interval := 200 * time.Millisecond
 	for i := 0; i < len(args); i++ {
@@ -274,6 +278,21 @@ func Cmd(args []string, cfg *config.Config, profileOverride string) error {
 		switch {
 		case a == "--rtt":
 			rtt = true
+		case a == "--rotate-key":
+			rotate = true
+		case a == "--revoke-old":
+			revokeOld = true
+		case a == "--bandwidth":
+			bandwidth = true
+		case a == "--duration" && i+1 < len(args):
+			if d, err := time.ParseDuration(args[i+1]); err == nil && d > 0 {
+				bwDuration = d
+			}
+			i++
+		case strings.HasPrefix(a, "--duration="):
+			if d, err := time.ParseDuration(strings.TrimPrefix(a, "--duration=")); err == nil && d > 0 {
+				bwDuration = d
+			}
 		case a == "--count" && i+1 < len(args):
 			if n, err := strconv.Atoi(args[i+1]); err == nil && n > 0 {
 				count = n
@@ -302,6 +321,14 @@ func Cmd(args []string, cfg *config.Config, profileOverride string) error {
 	name, profile, err := config.Resolve(cfg, profileOverride)
 	if err != nil {
 		return clierr.Errf(1, "%v", err)
+	}
+
+	if rotate {
+		return RotateKey(profile, name, cfg, revokeOld)
+	}
+
+	if bandwidth {
+		return clierr.Code(RunBandwidthProbe(profile, name, bwDuration))
 	}
 
 	if rtt {

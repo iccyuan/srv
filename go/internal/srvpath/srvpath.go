@@ -43,6 +43,11 @@ func MCPLog() string { return filepath.Join(Dir(), "mcp.log") }
 // Append-only; rotated manually via `srv stats --clear`.
 func MCPStats() string { return filepath.Join(Dir(), "mcp-stats.jsonl") }
 
+// UIState returns the path to ui-state.json, where `srv ui` persists
+// its last cursor / focus position so the next invocation lands on
+// the same row instead of resetting to the default.
+func UIState() string { return filepath.Join(Dir(), "ui-state.json") }
+
 // ColorPresetsDir returns ~/.srv/init/, the directory the user drops
 // custom shell snippets into. Each *.sh file is one preset; the
 // filename without extension is what `srv color use <name>` accepts.

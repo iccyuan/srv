@@ -3,9 +3,11 @@ package mcp
 import (
 	"fmt"
 	"regexp"
+	"srv/internal/config"
 	"srv/internal/session"
 	"strconv"
 	"strings"
+	"sync"
 )
 
 // Pre-execution gates: high-risk command guard, sync-rejection
@@ -33,7 +35,7 @@ type riskyPattern struct {
 	re   *regexp.Regexp
 }
 
-var riskyPatterns = []riskyPattern{
+var defaultRiskyPatterns = []riskyPattern{
 	{"rm -rf", regexp.MustCompile(`(?i)\brm\s+(?:-[a-zA-Z]*[rR][a-zA-Z]*[fF]\b|-[a-zA-Z]*[fF][a-zA-Z]*[rR]\b|--recursive\s+--force|--force\s+--recursive|-[rRfF]\s+--(?:recursive|force)\b|--(?:recursive|force)\s+-[rRfF]\b)`)},
 	{"dd of=/...", regexp.MustCompile(`(?i)\bdd\s+(?:[^|;&\n]*\s)?(?:of=|if=/dev/(?:zero|random|urandom)\b)`)},
 	{"mkfs", regexp.MustCompile(`(?i)\bmkfs(?:\.[a-z0-9]+)?\b`)},
@@ -48,6 +50,79 @@ var riskyPatterns = []riskyPattern{
 	{"> /dev/disk", regexp.MustCompile(`>\s*/dev/(?:sd|nvme|disk|hd)`)},
 }
 
+// activePatterns is the effective rule set after merging defaults with
+// the user's GuardConfig. Recomputed each call via mergeGuardConfig so
+// edits to config.json take effect without restarting the MCP server.
+// The cache is small; recompiling user regexes on every guard check is
+// the cost we pay to keep this stateless.
+func activePatterns(cfg *config.Config) ([]riskyPattern, []*regexp.Regexp) {
+	if cfg == nil || cfg.Guard == nil {
+		return defaultRiskyPatterns, nil
+	}
+	gc := cfg.Guard
+	out := []riskyPattern{}
+	if !gc.DisableDefaults {
+		out = append(out, defaultRiskyPatterns...)
+	}
+	for _, r := range gc.Rules {
+		if r.Pattern == "" {
+			continue
+		}
+		re, err := regexp.Compile(r.Pattern)
+		if err != nil {
+			continue
+		}
+		name := r.Name
+		if name == "" {
+			name = r.Pattern
+		}
+		out = append(out, riskyPattern{name: name, re: re})
+	}
+	var allow []*regexp.Regexp
+	for _, p := range gc.Allow {
+		if p == "" {
+			continue
+		}
+		re, err := regexp.Compile(p)
+		if err != nil {
+			continue
+		}
+		allow = append(allow, re)
+	}
+	return out, allow
+}
+
+// guardConfigForTests overrides the active config so unit tests in
+// this package don't have to write to ~/.srv/config.json. Set via
+// SetGuardConfigForTests; reset to nil when done.
+var (
+	guardConfigForTestsMu sync.RWMutex
+	guardConfigForTests   *config.Config
+)
+
+// SetGuardConfigForTests pins a config to use as the source of guard
+// rules. Test-only seam; production code path reads via config.Load
+// inside guardCheckRisky.
+func SetGuardConfigForTests(c *config.Config) {
+	guardConfigForTestsMu.Lock()
+	guardConfigForTests = c
+	guardConfigForTestsMu.Unlock()
+}
+
+func loadGuardConfig() *config.Config {
+	guardConfigForTestsMu.RLock()
+	tc := guardConfigForTests
+	guardConfigForTestsMu.RUnlock()
+	if tc != nil {
+		return tc
+	}
+	c, err := config.Load()
+	if err != nil || c == nil {
+		return &config.Config{}
+	}
+	return c
+}
+
 // riskyMatch reports the name of the first risky pattern present in
 // `command`, or "" if none. A match counts only when its first byte
 // is in "code position" -- i.e. the shell would execute that byte
@@ -59,18 +134,51 @@ var riskyPatterns = []riskyPattern{
 // check would say yes and let it through, but real shells execute
 // $(...) contents regardless of surrounding double quotes.
 func riskyMatch(command string) string {
+	return riskyMatchWithRules(command, defaultRiskyPatterns, nil)
+}
+
+// riskyMatchWithRules is the inner form taking explicit rule set +
+// allow list so the CLI's `srv guard test "..."` can preview matches
+// against the user's *configured* set rather than the defaults.
+//
+// If any allow regex matches the command, the deny match is suppressed
+// and "" returned.
+func riskyMatchWithRules(command string, rules []riskyPattern, allow []*regexp.Regexp) string {
 	if command == "" {
 		return ""
 	}
 	code := codePositions(command)
-	for _, p := range riskyPatterns {
+	hit := ""
+	for _, p := range rules {
 		for _, loc := range p.re.FindAllStringIndex(command, -1) {
 			if loc[0] < len(code) && code[loc[0]] {
-				return p.name
+				hit = p.name
+				break
 			}
 		}
+		if hit != "" {
+			break
+		}
 	}
-	return ""
+	if hit == "" {
+		return ""
+	}
+	for _, a := range allow {
+		if a.MatchString(command) {
+			return ""
+		}
+	}
+	return hit
+}
+
+// RiskyMatchPublic exposes riskyMatchWithRules to the guard CLI so
+// `srv guard test "..."` and `srv guard rules dry-run "..."` reuse
+// the same engine the live MCP server uses, including the allow-list
+// short-circuit. Always reads the current config.
+func RiskyMatchPublic(command string) string {
+	cfg := loadGuardConfig()
+	rules, allow := activePatterns(cfg)
+	return riskyMatchWithRules(command, rules, allow)
 }
 
 // codePositions returns a per-byte classifier: out[i] is true when
@@ -174,7 +282,9 @@ func guardCheckRisky(tool, cmd string, confirm bool) *toolResult {
 	if !session.GuardOn() || confirm {
 		return nil
 	}
-	pat := riskyMatch(cmd)
+	cfg := loadGuardConfig()
+	rules, allow := activePatterns(cfg)
+	pat := riskyMatchWithRules(cmd, rules, allow)
 	if pat == "" {
 		return nil
 	}

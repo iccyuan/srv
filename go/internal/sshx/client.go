@@ -156,10 +156,37 @@ func dialOnce(profile *config.Profile, defaultUser string, mkConfig func(string)
 	}
 
 	c := &Client{Profile: profile, Conn: conn, chain: chain, stopCh: make(chan struct{})}
+	// If the profile asks for agent forwarding AND a local agent is
+	// reachable, register the route. Per-session RequestAgentForwarding
+	// is still required, so callers that want forwarding for a session
+	// must call MaybeRequestAgent(sess). Failures here are best-effort:
+	// a missing/unparseable agent socket shouldn't kill the dial.
+	if profile.GetAgentForwarding() {
+		if sock := os.Getenv("SSH_AUTH_SOCK"); sock != "" {
+			if ac, derr := net.Dial("unix", sock); derr == nil {
+				_ = agent.ForwardToAgent(conn, agent.NewClient(ac))
+			}
+		}
+	}
 	if interval := profile.GetKeepaliveInterval(); interval > 0 {
 		go c.runKeepalive(interval, profile.GetKeepaliveCount())
 	}
 	return c, nil
+}
+
+// MaybeRequestAgent enables agent forwarding for `sess` when the
+// profile has it on. Best-effort: agent.RequestAgentForwarding errors
+// are reported to stderr but don't fail the caller -- a remote that
+// refuses forwarding still gets to run the command, just without the
+// forwarded keys. Caller MUST invoke this BEFORE sess.Run / Shell /
+// Start, since the request is part of the channel-open handshake.
+func (c *Client) MaybeRequestAgent(sess *ssh.Session) {
+	if c == nil || c.Profile == nil || !c.Profile.GetAgentForwarding() {
+		return
+	}
+	if err := agent.RequestAgentForwarding(sess); err != nil {
+		fmt.Fprintf(os.Stderr, "srv: agent forwarding refused: %v\n", err)
+	}
 }
 
 // sshDialTCP replaces ssh.Dial("tcp", ...) so we can flip on OS-level
@@ -387,6 +414,10 @@ func (c *Client) RunInteractive(command string, cwd string, tty bool) (int, erro
 		return -1, err
 	}
 	defer sess.Close()
+	// Agent forwarding (when profile.agent_forwarding=true) applies to
+	// interactive runs: git push / pull on the remote, scp through the
+	// pivot, etc. No-op for profiles that left the flag off.
+	c.MaybeRequestAgent(sess)
 
 	if tty {
 		modes := ssh.TerminalModes{
@@ -443,6 +474,7 @@ func (c *Client) Shell(cwd string) (int, error) {
 		return -1, err
 	}
 	defer sess.Close()
+	c.MaybeRequestAgent(sess)
 
 	modes := ssh.TerminalModes{
 		ssh.ECHO:          1,
@@ -619,6 +651,76 @@ func forwardStreamReader(src io.Reader, kind StreamChunkKind, buf *bytes.Buffer,
 // RunStreamStdin runs a command on the remote with `stdin` providing the
 // child's stdin (e.g., a local `tar -cf -` for sync). Stdout and stderr go
 // to local stdout/stderr. Returns remote exit code.
+// RunCaptureStdin streams `stdin` to the remote command while capturing
+// its stdout/stderr into the returned RunCaptureResult. Used by callers
+// that need to feed a large input list (NUL-separated paths, JSON,
+// etc.) but also read structured output back -- bake-into-command
+// doesn't scale once the input runs to thousands of entries.
+//
+// Wraps the command with `cd <cwd>` the same way RunCapture does so
+// cwd handling is symmetric.
+func (c *Client) RunCaptureStdin(command string, cwd string, stdin io.Reader) (*RunCaptureResult, error) {
+	full := WrapWithCwd(command, cwd)
+	sess, err := c.Conn.NewSession()
+	if err != nil {
+		return nil, err
+	}
+	defer sess.Close()
+	var stdout, stderr bytes.Buffer
+	sess.Stdout = &stdout
+	sess.Stderr = &stderr
+	sess.Stdin = stdin
+	err = sess.Run(full)
+	exit := 0
+	if err != nil {
+		var ee *ssh.ExitError
+		if errors.As(err, &ee) {
+			exit = ee.ExitStatus()
+		} else {
+			return &RunCaptureResult{
+				Stdout:   stdout.String(),
+				Stderr:   stderr.String() + "\n" + err.Error(),
+				ExitCode: -1,
+				Cwd:      cwd,
+			}, nil
+		}
+	}
+	return &RunCaptureResult{
+		Stdout:   stdout.String(),
+		Stderr:   stderr.String(),
+		ExitCode: exit,
+		Cwd:      cwd,
+	}, nil
+}
+
+// RunStreamStdout runs `command` (wrapped with cwd if non-empty),
+// piping its stdout to the supplied io.Writer in real time. stderr
+// goes to os.Stderr so error noise still surfaces to the user.
+// Returns the remote exit code, matching RunStreamStdin's shape.
+//
+// Used by streaming receivers like sync --pull's TarDownloadStream
+// where the caller needs to consume stdout as it arrives rather
+// than buffering the whole result into memory.
+func (c *Client) RunStreamStdout(command string, cwd string, stdout io.Writer) (int, error) {
+	full := WrapWithCwd(command, cwd)
+	sess, err := c.Conn.NewSession()
+	if err != nil {
+		return -1, err
+	}
+	defer sess.Close()
+	sess.Stdout = stdout
+	sess.Stderr = os.Stderr
+	err = sess.Run(full)
+	if err != nil {
+		var ee *ssh.ExitError
+		if errors.As(err, &ee) {
+			return ee.ExitStatus(), nil
+		}
+		return -1, err
+	}
+	return 0, nil
+}
+
 func (c *Client) RunStreamStdin(command string, stdin io.Reader) (int, error) {
 	sess, err := c.Conn.NewSession()
 	if err != nil {

@@ -57,6 +57,13 @@ type Profile struct {
 	// up to a 30s cap. Default "500ms". Parsed via time.ParseDuration so
 	// "1s" / "200ms" / "2s500ms" all work.
 	DialBackoff string `json:"dial_backoff,omitempty"`
+	// AgentForwarding=true makes srv request ssh-agent forwarding for
+	// the interactive run paths (`srv -t <cmd>`, `srv shell`). Local
+	// SSH_AUTH_SOCK must be set for forwarding to actually function;
+	// the flag is a no-op when it isn't. Doesn't apply to non-TTY
+	// `srv <cmd>` or MCP paths because those rarely benefit and the
+	// per-session round-trip cost adds up.
+	AgentForwarding *bool `json:"agent_forwarding,omitempty"`
 	// Free-form bag for unknown keys forwarded from older Python configs.
 	Extra map[string]any `json:"-"`
 	// Name is the profile's lookup key in Config.Profiles. Populated by
@@ -114,6 +121,13 @@ func (p *Profile) GetDefaultCwd() string {
 	return p.DefaultCwd
 }
 
+// GetAgentForwarding reports whether `srv -t` / `srv shell` should
+// request ssh-agent forwarding for this profile. Defaults to false so
+// existing profiles see no behavior change.
+func (p *Profile) GetAgentForwarding() bool {
+	return p.AgentForwarding != nil && *p.AgentForwarding
+}
+
 func (p *Profile) GetDialAttempts() int {
 	if p.DialAttempts < 1 {
 		return 1
@@ -167,6 +181,71 @@ type Config struct {
 	// CLI exit) and tear down with `srv tunnel down`. Autostart entries
 	// come up automatically when the daemon starts.
 	Tunnels map[string]*TunnelDef `json:"tunnels,omitempty"`
+	// Hooks fires local shell commands on srv's command lifecycle events
+	// (pre-cd, post-cd, pre-sync, post-sync, pre-run, post-run, pre-push,
+	// post-push, pre-pull, post-pull). Keys are event names, values are
+	// commands run in order via the user's shell with SRV_* env vars.
+	Hooks map[string][]string `json:"hooks,omitempty"`
+	// JobNotify configures the daemon's "job finished" notifier (local
+	// OS toast + optional webhook). nil = disabled. Toggled via
+	// `srv jobs notify on|off`.
+	JobNotify *JobNotifyConfig `json:"job_notify,omitempty"`
+	// Guard customises the MCP high-risk-pattern allowlist / blocklist.
+	// nil = use the built-in default pattern set. Extra rules are
+	// appended on top of the defaults; allow patterns short-circuit
+	// any deny match for the same command (escape hatch for benign
+	// uses like `mkfs.btrfs --help`).
+	Guard *GuardConfig `json:"guard,omitempty"`
+	// Recipes are named multi-step playbooks: a sequence of remote
+	// commands with positional ($1..$N) and named (${KEY}) parameter
+	// substitution. Run via `srv recipe run <name> [args]`.
+	Recipes map[string]*Recipe `json:"recipes,omitempty"`
+}
+
+// Recipe is one named playbook. Steps run in order against the
+// profile resolved at run time (or the recipe's pinned profile when
+// set). A non-zero exit aborts the rest of the steps unless
+// `IgnoreErrors=true`.
+type Recipe struct {
+	Description  string   `json:"description,omitempty"`
+	Profile      string   `json:"profile,omitempty"`       // optional pin
+	Steps        []string `json:"steps"`                   // shell-quoted commands
+	IgnoreErrors bool     `json:"ignore_errors,omitempty"` // continue past failures
+}
+
+// GuardConfig overrides / extends the MCP guard's pattern set.
+// DisableDefaults=true skips the built-in patterns entirely so users
+// can replace the policy from scratch; left false, user rules append.
+type GuardConfig struct {
+	DisableDefaults bool        `json:"disable_defaults,omitempty"`
+	Rules           []GuardRule `json:"rules,omitempty"`
+	// Allow lists regex patterns that *unblock* commands matching the
+	// rule set. Useful for "allow `rm -rf ./tmp/...` from this profile
+	// only" without disabling the whole pattern.
+	Allow []string `json:"allow,omitempty"`
+}
+
+// GuardRule is one named pattern. Name is shown to the model in the
+// rejection text so it can choose a different approach without trial
+// and error.
+type GuardRule struct {
+	Name    string `json:"name"`
+	Pattern string `json:"pattern"`
+}
+
+// JobNotifyConfig captures the user's notification preferences for
+// detached job completion. Daemon-driven so notifications fire even
+// when the CLI that started the job has long since exited.
+type JobNotifyConfig struct {
+	// Local controls OS-native toast notifications. On macOS this uses
+	// osascript, Linux uses notify-send, Windows uses a tiny PowerShell
+	// MessageBox via the daemon process. Best-effort: missing tool -> log
+	// line + skip rather than failing the job.
+	Local bool `json:"local,omitempty"`
+	// Webhook is a URL the daemon POSTs to on each completion. Empty
+	// disables. Payload is a JSON object: { id, profile, cmd, pid, log,
+	// started, finished }. 10-second timeout; failure is logged once.
+	Webhook string `json:"webhook,omitempty"`
 }
 
 // TunnelDef is the saved-on-disk description of one named tunnel. The
@@ -184,6 +263,12 @@ type TunnelDef struct {
 	// Autostart=true brings the tunnel up automatically when the daemon
 	// starts (typical for "always-on" things like a db port-forward).
 	Autostart bool `json:"autostart,omitempty"`
+	// OnDemand=true makes the daemon open the local listener but defer
+	// the SSH dial until the first client connects. Saves SSH channels
+	// for tunnels that stay defined "just in case" but rarely see
+	// traffic. Local-direction only -- reverse tunnels need the SSH
+	// session up to set up the remote listener and can't be lazy.
+	OnDemand bool `json:"on_demand,omitempty"`
 }
 
 // HintsEnabled reports whether typo / post-failure hints should fire.
@@ -289,11 +374,29 @@ func GetCwd(profileName string, profile *Profile) string {
 	return profile.GetDefaultCwd()
 }
 
-// SetCwd persists a new cwd for (current session, profile).
+// SetCwd persists a new cwd for (current session, profile). Before
+// overwriting, the previous value is captured into rec.PrevCwds so
+// `srv cd -` can swap back to it (shell-style).
 func SetCwd(profileName, cwd string) error {
 	sid, rec := session.Touch()
+	if rec.PrevCwds == nil {
+		rec.PrevCwds = map[string]string{}
+	}
+	if old, ok := rec.Cwds[profileName]; ok && old != "" && old != cwd {
+		rec.PrevCwds[profileName] = old
+	}
 	rec.Cwds[profileName] = cwd
 	return session.SaveWith(sid, rec)
+}
+
+// GetPrevCwd returns the cwd this session was on before the most
+// recent `srv cd`. Empty when no prior cwd has been recorded.
+func GetPrevCwd(profileName string) string {
+	_, rec := session.Touch()
+	if rec.PrevCwds == nil {
+		return ""
+	}
+	return rec.PrevCwds[profileName]
 }
 
 // SetSessionProfile pins (or clears with empty string) the session profile.

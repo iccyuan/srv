@@ -77,12 +77,13 @@ func (s *daemonState) handleTunnelList(req Request) Response {
 	out := make([]TunnelInfo, 0, len(s.tunnels))
 	for _, at := range s.tunnels {
 		out = append(out, TunnelInfo{
-			Name:    at.name,
-			Type:    at.def.Type,
-			Spec:    at.def.Spec,
-			Profile: at.profile,
-			Listen:  at.listen,
-			Started: at.startedAt.Unix(),
+			Name:     at.name,
+			Type:     at.def.Type,
+			Spec:     at.def.Spec,
+			Profile:  at.profile,
+			Listen:   at.listen,
+			Started:  at.startedAt.Unix(),
+			OnDemand: at.def.OnDemand,
 		})
 	}
 	s.tunnelsMu.Unlock()
@@ -151,9 +152,29 @@ func (s *daemonState) startTunnel(name string, def *config.TunnelDef) (at *activ
 		return nil, fmt.Errorf("tunnel %q spec: %w", name, err)
 	}
 
-	client, profile, err := s.getClient(profileName)
-	if err != nil {
-		return nil, fmt.Errorf("dial profile %q: %w", profileName, err)
+	// On-demand only applies to local-direction forwarders. Reverse
+	// (`-R`) tunnels need the SSH session up to register the remote
+	// listener so the laziness model doesn't apply -- reject early
+	// rather than silently downgrade.
+	onDemand := def.OnDemand && def.Type != "remote"
+
+	// Eager path: dial up front so spec/profile errors surface
+	// immediately. Lazy path skips this so a defined-but-rarely-used
+	// tunnel costs nothing until its first client connects.
+	var (
+		client  *sshx.Client
+		profile *config.Profile
+	)
+	if !onDemand {
+		client, profile, err = s.getClient(profileName)
+		if err != nil {
+			return nil, fmt.Errorf("dial profile %q: %w", profileName, err)
+		}
+	} else {
+		// Still resolve profile for the listen-label string (host
+		// names show in `tunnel show`). The actual SSH dial happens
+		// on first accept inside RunLazyLocalForwarder.
+		profile = cfg.Profiles[profileName]
 	}
 
 	at = &activeTunnel{
@@ -177,8 +198,13 @@ func (s *daemonState) startTunnel(name string, def *config.TunnelDef) (at *activ
 	go func() {
 		defer close(at.done)
 		var runErr error
-		switch def.Type {
-		case "remote":
+		switch {
+		case onDemand:
+			runErr = sshx.RunLazyLocalForwarder(lp, rh, rp, func() (*sshx.Client, error) {
+				c, _, err := s.getClient(profileName)
+				return c, err
+			}, at.stopCh, nil)
+		case def.Type == "remote":
 			runErr = sshx.RunReverseForwarder(client, lp, rh, rp, at.stopCh, nil)
 		default:
 			runErr = sshx.RunLocalForwarder(client, lp, rh, rp, at.stopCh, nil)

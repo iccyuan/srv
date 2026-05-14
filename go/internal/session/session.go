@@ -40,8 +40,12 @@ import (
 // / `srv color off`. MCP runs are NOT affected -- the model wants
 // plain text, not ANSI escapes.
 type Record struct {
-	Profile     *string           `json:"profile"`
-	Cwds        map[string]string `json:"cwds"`
+	Profile *string           `json:"profile"`
+	Cwds    map[string]string `json:"cwds"`
+	// PrevCwds tracks the immediately-previous cwd per profile so `srv
+	// cd -` can swap to it the way shell `cd -` does. Maintained by
+	// config.SetCwd; never written to directly outside that helper.
+	PrevCwds    map[string]string `json:"prev_cwds,omitempty"`
 	Guard       bool              `json:"guard,omitempty"`
 	ColorPreset string            `json:"color_preset,omitempty"`
 	Started     string            `json:"started"`
