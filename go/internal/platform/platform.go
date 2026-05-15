@@ -29,7 +29,9 @@
 // which keeps the stub story short.
 package platform
 
-import "os/exec"
+import (
+	"os/exec"
+)
 
 // Process is the spawn + signal + liveness surface every long-lived
 // subprocess in srv goes through. The historical duplication --
@@ -137,6 +139,19 @@ type Opener interface {
 	Open(path string) error
 }
 
+// Shell builds an *exec.Cmd that runs `cmd` through the local OS's
+// native shell. Hooks (internal/hooks) use it to fire user-defined
+// pre/post-event commands without having to know whether they're
+// on cmd.exe / PowerShell / bash / zsh. Picks up the user's
+// preferred shell from $SHELL on Unix and $COMSPEC on Windows so
+// shell-specific syntax in the hook body works as the user expects.
+type Shell interface {
+	// Command returns an exec.Cmd whose argv invokes the OS's
+	// native shell with `cmd` as its body. Caller can still attach
+	// stdin/stdout/stderr/env before calling Start/Run.
+	Command(cmd string) *exec.Cmd
+}
+
 // Proc, Term, Sec, Stats, Notif are the package-level instances
 // callers reach for. Initialised exactly once per process by the
 // platform_<goos>.go init() that matches the build target. Tests
@@ -150,4 +165,5 @@ var (
 	Stats SystemStats
 	Notif Notifier
 	Open  Opener
+	Sh    Shell
 )

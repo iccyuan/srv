@@ -22,6 +22,7 @@ func init() {
 	Stats = linuxStats{}
 	Notif = linuxNotifier{}
 	Open = xdgOpener{}
+	Sh = unixShell{}
 }
 
 // linuxProcess extends unixProcessBase with /proc-based start-time

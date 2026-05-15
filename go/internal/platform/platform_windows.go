@@ -21,6 +21,22 @@ func init() {
 	Stats = windowsStats{}
 	Notif = windowsNotifier{}
 	Open = windowsOpener{}
+	Sh = windowsShell{}
+}
+
+// windowsShell uses COMSPEC (cmd.exe by default). PowerShell is a
+// more capable shell but its cold-start cost stings for the small
+// hook commands srv typically runs; cmd.exe is what `$COMSPEC`
+// resolves to on every supported Windows version and stays fast.
+// Users who want PS hooks can override $COMSPEC explicitly.
+type windowsShell struct{}
+
+func (windowsShell) Command(cmd string) *exec.Cmd {
+	shell := os.Getenv("COMSPEC")
+	if shell == "" {
+		shell = "cmd.exe"
+	}
+	return exec.Command(shell, "/C", cmd)
 }
 
 // windowsOpener routes through cmd.exe's start verb, which is the

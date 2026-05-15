@@ -10,6 +10,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"srv/internal/platform"
 	"strconv"
 	"strings"
 	"time"
@@ -496,14 +497,11 @@ func openBrowser(url string) error {
 }
 
 func openDefaultBrowser(url string) error {
-	switch runtime.GOOS {
-	case "windows":
-		return exec.Command("cmd", "/c", "start", "", url).Start()
-	case "darwin":
-		return exec.Command("open", url).Start()
-	default:
-		return exec.Command("xdg-open", url).Start()
-	}
+	// The 3-way GOOS switch this used to be is exactly what
+	// platform.Open.Open() does, so delegate. Keeps the
+	// per-OS launcher logic in one place; if a new platform's
+	// `xdg-open` equivalent gets added, this benefits for free.
+	return platform.Open.Open(url)
 }
 
 // tryAppModeBrowser returns an *exec.Cmd ready to launch a Chromium-

@@ -11,6 +11,7 @@ func init() {
 	Stats = darwinStats{}
 	Notif = darwinNotifier{}
 	Open = darwinOpener{}
+	Sh = unixShell{}
 }
 
 // darwinOpener uses the system `open` command -- the macOS-native

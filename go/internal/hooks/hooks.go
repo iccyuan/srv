@@ -21,9 +21,9 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
-	"runtime"
 	"sort"
 	"srv/internal/config"
+	"srv/internal/platform"
 	"strings"
 )
 
@@ -140,19 +140,9 @@ func lookup(event string) []string {
 }
 
 func buildShell(cmd string) *exec.Cmd {
-	if runtime.GOOS == "windows" {
-		// cmd.exe doesn't expand $VAR; use the shell that exists. PS is
-		// always there on supported windows; cmd.exe stays the fallback
-		// because PS startup time stings for tiny notifier hooks.
-		shell := os.Getenv("COMSPEC")
-		if shell == "" {
-			shell = "cmd.exe"
-		}
-		return exec.Command(shell, "/C", cmd)
-	}
-	shell := os.Getenv("SHELL")
-	if shell == "" {
-		shell = "/bin/sh"
-	}
-	return exec.Command(shell, "-c", cmd)
+	// Per-OS shell selection (COMSPEC vs SHELL, /C vs -c) is
+	// platform.Sh's job. This wrapper exists so the hooks package
+	// stays a thin user of the abstraction; nothing here cares
+	// which shell actually runs.
+	return platform.Sh.Command(cmd)
 }

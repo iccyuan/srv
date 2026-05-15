@@ -12,6 +12,7 @@ func init() {
 	// headless OpenBSD without it returns an exec error which the
 	// caller already logs. Same fallback as Linux.
 	Open = xdgOpener{}
+	Sh = unixShell{}
 }
 
 // bsdProcess extends unixProcessBase. FreeBSD has /compat/linux/proc

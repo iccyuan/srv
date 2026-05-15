@@ -132,3 +132,20 @@ type xdgOpener struct{}
 func (xdgOpener) Open(path string) error {
 	return exec.Command("xdg-open", path).Start()
 }
+
+// --- Shell (identical across unix-likes) -------------------------
+
+// unixShell honours the user's $SHELL preference (the same lookup
+// pattern OpenSSH uses for `ssh -t host '<cmd>'`), falling back to
+// /bin/sh when the env var is unset (cron jobs, minimal containers).
+// Posix shells all support -c so the same invocation works for
+// bash / zsh / dash / ash without per-shell branching.
+type unixShell struct{}
+
+func (unixShell) Command(cmd string) *exec.Cmd {
+	shell := os.Getenv("SHELL")
+	if shell == "" {
+		shell = "/bin/sh"
+	}
+	return exec.Command(shell, "-c", cmd)
+}
