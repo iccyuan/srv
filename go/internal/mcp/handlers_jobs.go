@@ -10,18 +10,66 @@ import (
 	"time"
 )
 
+// listJobView is the compacted job shape `handleListJobs` emits. The
+// raw jobs.Record can carry several-hundred-char command bodies
+// (think: the big system-probe scripts agents like to one-shot);
+// echoing them verbatim in list_jobs makes the response grow
+// linearly with history × cmd-length. We truncate cmd here to keep
+// the per-record cost bounded, and add a Finished field so the
+// model can distinguish historical entries (which 2.6.7+ retains
+// after wait_job / kill_job) from still-running ones.
+type listJobView struct {
+	ID       string `json:"id"`
+	Profile  string `json:"profile"`
+	Cmd      string `json:"cmd"`
+	Cwd      string `json:"cwd,omitempty"`
+	Pid      int    `json:"pid"`
+	Log      string `json:"log,omitempty"`
+	Started  string `json:"started,omitempty"`
+	Finished string `json:"finished,omitempty"`
+	Killed   bool   `json:"killed,omitempty"`
+	ExitCode *int   `json:"exit_code,omitempty"`
+}
+
+// listJobsCmdMax bounds the cmd field width in list_jobs responses.
+// 80 chars is wide enough for typical commands; longer scripts get
+// truncated with "... [+N chars]" so the model knows there's more
+// in the raw record if it really wants it (via list_jobs filtered
+// down to the one id, where the full cmd is acceptable token cost).
+const listJobsCmdMax = 80
+
 func handleListJobs(args map[string]any, cfg *config.Config, profileOverride string) toolResult {
 	rs := jobs.Load().Jobs
 	if profileOverride != "" {
-		out := rs[:0]
+		filtered := rs[:0]
 		for _, j := range rs {
 			if j.Profile == profileOverride {
-				out = append(out, j)
+				filtered = append(filtered, j)
 			}
 		}
-		rs = out
+		rs = filtered
 	}
-	return jsonResult(map[string]any{"jobs": rs})
+	views := make([]listJobView, 0, len(rs))
+	for _, j := range rs {
+		v := listJobView{
+			ID:       j.ID,
+			Profile:  j.Profile,
+			Cwd:      j.Cwd,
+			Pid:      j.Pid,
+			Log:      j.Log,
+			Started:  j.Started,
+			Finished: j.Finished,
+			Killed:   j.Killed,
+			ExitCode: j.ExitCode,
+		}
+		v.Cmd = j.Cmd
+		if len(v.Cmd) > listJobsCmdMax {
+			over := len(v.Cmd) - listJobsCmdMax
+			v.Cmd = v.Cmd[:listJobsCmdMax] + fmt.Sprintf(" ... [+%d chars]", over)
+		}
+		views = append(views, v)
+	}
+	return jsonResult(map[string]any{"jobs": views})
 }
 
 func handleTailLog(args map[string]any, cfg *config.Config, profileOverride string) toolResult {

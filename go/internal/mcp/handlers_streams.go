@@ -145,11 +145,63 @@ func handleTail(args map[string]any, cfg *config.Config, profileOverride string)
 		re = r
 	}
 
-	_, prof, errResult := resolveProfile(cfg, profileOverride)
+	profName, prof, errResult := resolveProfile(cfg, profileOverride)
 	if errResult != nil {
 		return *errResult
 	}
 
+	// One-shot path: no `-F`, no streaming, no timer. Earlier
+	// versions routed this through runBoundedStream which built a
+	// time.NewTimer(0) that fired instantly and killed the SSH
+	// channel before tail could even produce output -- the user
+	// saw `transport_error: ssh: unexpected packet in response to
+	// channel open`. Mirroring journal's split (follow==0 -> plain
+	// RunCapture) keeps the two streaming tools structurally
+	// consistent.
+	if follow == 0 {
+		cwd := config.GetCwd(profName, prof)
+		remoteCmd := fmt.Sprintf("tail -n %d %s", lines, srvtty.ShQuotePath(path))
+		res, _ := remote.RunCapture(prof, cwd, remoteCmd)
+		// Apply the local grep filter (if any) post-hoc: tail
+		// doesn't have -g, so we slice the captured text after.
+		stdout := res.Stdout
+		if re != nil {
+			var kept []string
+			for _, line := range strings.Split(stdout, "\n") {
+				if re.MatchString(line) {
+					kept = append(kept, line)
+				}
+			}
+			stdout = strings.Join(kept, "\n")
+		}
+		text := stdout
+		if res.Stderr != "" {
+			if text != "" {
+				text += "\n--- stderr ---\n"
+			}
+			text += res.Stderr
+		}
+		if len(text) > runTextMax {
+			text = text[:runTextMax] + fmt.Sprintf(
+				"\n\n... [truncated; lower `lines` or add a `grep` filter to slice] ...")
+		}
+		structured := map[string]any{
+			"path":           path,
+			"follow_seconds": 0,
+			"bytes_captured": len(text),
+			"lines_clamped":  linesClamped,
+			"end_reason":     "complete",
+			"exit_code":      res.ExitCode,
+		}
+		return toolResult{
+			Content:           []toolContent{{Type: "text", Text: text}},
+			IsError:           res.ExitCode != 0,
+			StructuredContent: structured,
+		}
+	}
+
+	// Follow mode: bounded streaming. Dial direct, time-out via
+	// client close, stream chunks via progress notifications.
 	c, err := sshx.Dial(prof)
 	if err != nil {
 		return textErr(fmt.Sprintf("dial: %v", err))
@@ -175,7 +227,15 @@ func handleTail(args map[string]any, cfg *config.Config, profileOverride string)
 		"lines_clamped":  linesClamped,
 		"end_reason":     "timer",
 	}
-	if res.RunErr != nil && !errors.Is(res.RunErr, os.ErrClosed) {
+	// Timer-close ends the SSH session abruptly, which surfaces as
+	// either os.ErrClosed OR "wait: remote command exited without
+	// exit status or exit signal" depending on which side raced
+	// who. Both are the documented success exit for bounded follow;
+	// we surface transport_error only for genuinely-other errors
+	// (dial failures, unexpected eof on the underlying conn) the
+	// model has any business worrying about.
+	if res.RunErr != nil && !errors.Is(res.RunErr, os.ErrClosed) &&
+		!strings.Contains(res.RunErr.Error(), "exited without exit status") {
 		structured["transport_error"] = res.RunErr.Error()
 	}
 	return toolResult{
