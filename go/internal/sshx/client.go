@@ -148,7 +148,10 @@ func dialOnce(profile *config.Profile, defaultUser string, mkConfig func(string)
 		hopCfg := mkConfig(hopUser)
 		var hop *ssh.Client
 		if len(chain) == 0 {
-			hop, err = sshDialTCP(hopAddr, hopCfg, timeout)
+			// First jump: only the outermost dial gets the proxy
+			// treatment. Inner hops travel through the SSH channel
+			// above and can't (shouldn't) reroute via proxy again.
+			hop, err = sshDialTCP(profile, hopAddr, hopCfg, timeout)
 		} else {
 			hop, err = dialThrough(chain[len(chain)-1], hopAddr, hopCfg, timeout)
 		}
@@ -163,7 +166,9 @@ func dialOnce(profile *config.Profile, defaultUser string, mkConfig func(string)
 	targetCfg := mkConfig(defaultUser)
 	var conn *ssh.Client
 	if len(chain) == 0 {
-		conn, err = sshDialTCP(targetAddr, targetCfg, timeout)
+		// Direct connection (no ProxyJump). This is the only place
+		// proxy applies when there's no jump chain.
+		conn, err = sshDialTCP(profile, targetAddr, targetCfg, timeout)
 	} else {
 		conn, err = dialThrough(chain[len(chain)-1], targetAddr, targetCfg, timeout)
 	}
@@ -207,18 +212,34 @@ func (c *Client) MaybeRequestAgent(sess *ssh.Session) {
 }
 
 // sshDialTCP replaces ssh.Dial("tcp", ...) so we can flip on OS-level
-// TCP keepalive (SO_KEEPALIVE) on the underlying socket. SSH-level
-// keepalive (runKeepalive) covers the application layer; TCP-level
-// catches dead conns at the kernel before bytes get queued forever.
-// 15s is a friendly compromise between "notice fast" and "don't add
-// chatter on healthy idle pools".
-func sshDialTCP(addr string, cfg *ssh.ClientConfig, timeout time.Duration) (*ssh.Client, error) {
-	d := net.Dialer{Timeout: timeout}
-	raw, err := d.Dial("tcp", addr)
+// TCP keepalive (SO_KEEPALIVE) on the underlying socket AND optionally
+// route the first TCP dial through an HTTP-CONNECT or SOCKS5 proxy.
+// SSH-level keepalive (runKeepalive) covers the application layer;
+// TCP-level catches dead conns at the kernel before bytes get queued
+// forever. 15s is a friendly compromise between "notice fast" and
+// "don't add chatter on healthy idle pools".
+//
+// Proxy is enabled by setting profile.Proxy to a socks5:// or http://
+// URL. Only the outer dial goes through; ProxyJump hops thread their
+// connections through the SSH channel above, not through the proxy.
+func sshDialTCP(profile *config.Profile, addr string, cfg *ssh.ClientConfig, timeout time.Duration) (*ssh.Client, error) {
+	var raw net.Conn
+	var err error
+	if profile != nil && profile.Proxy != "" {
+		raw, err = dialThroughProxy(profile.Proxy, addr, timeout)
+	} else {
+		d := net.Dialer{Timeout: timeout}
+		raw, err = d.Dial("tcp", addr)
+	}
 	if err != nil {
 		return nil, err
 	}
 	if tcp, ok := raw.(*net.TCPConn); ok {
+		// Whether we reached the proxy or the target directly, the
+		// underlying socket is *net.TCPConn so the keepalive knobs
+		// apply uniformly. Through-proxy connections benefit just as
+		// much: a dead corporate proxy will get caught by SO_KEEPALIVE
+		// after ~15s rather than blocking writes indefinitely.
 		_ = tcp.SetKeepAlive(true)
 		_ = tcp.SetKeepAlivePeriod(15 * time.Second)
 	}

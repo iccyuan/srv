@@ -105,6 +105,23 @@ type Profile struct {
 	// allows. Hard-clamped to [1,16] at use time so a stray big
 	// number can't exhaust local fd or sshd's MaxStartups budget.
 	PoolSize int `json:"pool_size,omitempty"`
+	// Proxy routes the SSH TCP dial through an HTTP-CONNECT or SOCKS5
+	// proxy. URL forms:
+	//
+	//   socks5://[user:pass@]host:port    RFC 1928 + 1929
+	//   http://[user:pass@]host:port      HTTP CONNECT + Basic auth
+	//
+	// Applies to the FIRST TCP dial only: when combined with Jump
+	// (ProxyJump), the first hop reaches its destination through this
+	// proxy and subsequent hops travel over the SSH channel chain. The
+	// proxy is bypassed for direct daemon-RPC sockets and SFTP-on-
+	// existing-conn calls since those don't open new TCP sessions.
+	//
+	// Empty string means no proxy (the historical behaviour and
+	// default). Failures during the proxy handshake surface as dial
+	// errors -- they don't fall back to direct connect, because that
+	// would defeat a corporate egress policy that blocks the bypass.
+	Proxy string `json:"proxy,omitempty"`
 	// Free-form bag for unknown keys forwarded from older Python configs.
 	Extra map[string]any `json:"-"`
 	// Name is the profile's lookup key in Config.Profiles. Populated by

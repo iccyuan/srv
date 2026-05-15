@@ -389,6 +389,8 @@ func applyProfileSet(p *config.Profile, key, value string) {
 	case "pool_size":
 		n, _ := strconv.Atoi(value)
 		p.PoolSize = n
+	case "proxy":
+		p.Proxy = value
 	case "agent_forwarding":
 		p.AgentForwarding = asBool()
 	case "connect_timeout":
