@@ -1,14 +1,13 @@
 package tunnel
 
 import (
+	"errors"
 	"fmt"
-	"os"
 	"sort"
 	"srv/internal/clierr"
 	"srv/internal/config"
 	"srv/internal/daemon"
 	"srv/internal/sshx"
-	"srv/internal/tunnelproc"
 	"time"
 )
 
@@ -205,17 +204,9 @@ func cmdShow(args []string, cfg *config.Config) error {
 	return nil
 }
 
-// cmdUp brings a saved tunnel up. Routing:
-//
-//   - def.Independent=true -> spawn `srv _tunnel_run <name>` as a
-//     detached process. The tunnel survives daemon restarts; status
-//     flows through ~/.srv/tunnels/<name>.json.
-//   - otherwise            -> daemon RPC `tunnel_up`. The daemon owns
-//     the goroutine so the tunnel outlives this CLI process but dies
-//     with the daemon.
-//
-// daemon.Ensure() runs in the daemon-hosted branch only -- the
-// independent path doesn't need the daemon.
+// cmdUp brings a saved tunnel up by delegating to whichever
+// TunnelHost the def selects. The host returns a UpInfo describing
+// where the listener landed; we render it for the user.
 func cmdUp(args []string) error {
 	if len(args) < 1 {
 		return clierr.Errf(2, "usage: srv tunnel up <name>")
@@ -229,100 +220,53 @@ func cmdUp(args []string) error {
 	if !ok {
 		return clierr.Errf(1, "tunnel %q not defined", name)
 	}
-	if def.Independent {
-		if err := tunnelproc.Spawn(name); err != nil {
-			return clierr.Errf(1, "%v", err)
-		}
-		// Poll for the status file so we can report "listening on
-		// <addr>" instead of leaving the user guessing whether the
-		// subprocess actually came up. ~2s budget covers the SSH
-		// handshake on slow links; the spawn itself is async.
-		for i := 0; i < 40; i++ {
-			if st, _ := tunnelproc.ReadStatus(name); st != nil {
-				fmt.Printf("tunnel %q up (listening on %s, pid %d)\n", name, st.Listen, st.PID)
-				return nil
-			}
-			time.Sleep(50 * time.Millisecond)
-		}
-		fmt.Printf("tunnel %q spawned (status file not yet visible; check ~/.srv/tunnels/%s.log)\n", name, name)
-		return nil
-	}
-
-	if !daemon.Ensure() {
-		return clierr.Errf(1, "could not start daemon; tunnel up needs the daemon to host the listener")
-	}
-	conn := daemon.DialSock(2 * time.Second)
-	if conn == nil {
-		return clierr.Errf(1, "daemon unreachable")
-	}
-	defer conn.Close()
-	resp, err := daemon.Call(conn, daemon.Request{Op: "tunnel_up", Name: name}, 10*time.Second)
+	info, err := hostFor(def).Up(name, def)
 	if err != nil {
-		return clierr.Errf(1, "daemon call: %v", err)
+		return clierr.Errf(1, "%v", err)
 	}
-	if resp == nil || !resp.OK {
-		msg := "daemon refused"
-		if resp != nil && resp.Err != "" {
-			msg = resp.Err
-		}
-		return clierr.Errf(1, "tunnel up %s: %s", name, msg)
-	}
-	if resp.Listen != "" {
-		fmt.Printf("tunnel %q up (listening on %s)\n", name, resp.Listen)
+	if info.Listen != "" && info.PID > 0 {
+		fmt.Printf("tunnel %q up (listening on %s, pid %d)\n", name, info.Listen, info.PID)
+	} else if info.Listen != "" {
+		fmt.Printf("tunnel %q up (listening on %s)\n", name, info.Listen)
 	} else {
-		fmt.Printf("tunnel %q up\n", name)
+		fmt.Printf("tunnel %q spawned (status file not yet visible; check ~/.srv/tunnels/%s.log)\n", name, name)
 	}
 	return nil
 }
 
-// cmdDown stops a saved tunnel. We try the independent-process
-// path FIRST regardless of what def.Independent says -- a tunnel
-// may have been started independent and then had its config flag
-// flipped, and we'd rather stop whichever process actually has the
-// listener than leave a stray one running. The daemon RPC then runs
-// as a second pass to catch the daemon-hosted case.
+// cmdDown stops a saved tunnel by fanning out across every
+// TunnelHost: at least one of them runs the tunnel; the others
+// return ErrNotHosted and we treat that as "ask the next host."
+// This handles the edge case where def.Independent flipped between
+// up and down -- the actually-running host gets to stop the
+// listener even if the current def disagrees about where it should
+// be hosted.
 func cmdDown(args []string) error {
 	if len(args) < 1 {
 		return clierr.Errf(2, "usage: srv tunnel down <name>")
 	}
 	name := args[0]
-	stoppedIndependent := false
-	if st, _ := tunnelproc.ReadStatus(name); st != nil {
-		if err := tunnelproc.Stop(name); err == nil {
-			stoppedIndependent = true
-		} else {
-			fmt.Fprintf(os.Stderr, "srv tunnel: independent stop failed: %v\n", err)
+	stopped := false
+	var lastErr error
+	for _, h := range allHosts() {
+		err := h.Down(name)
+		if err == nil {
+			stopped = true
+			continue
 		}
+		if errors.Is(err, ErrNotHosted) {
+			continue
+		}
+		// Real failure from a host that DID claim ownership. Hold
+		// onto it -- we'll surface this only if no other host
+		// managed to stop the tunnel.
+		lastErr = err
 	}
-	conn := daemon.DialSock(2 * time.Second)
-	if conn == nil {
-		if stoppedIndependent {
-			fmt.Printf("tunnel %q stopped\n", name)
-			return nil
+	if !stopped {
+		if lastErr != nil {
+			return clierr.Errf(1, "tunnel down %s: %v", name, lastErr)
 		}
-		return clierr.Errf(1, "daemon not running (nothing to stop)")
-	}
-	defer conn.Close()
-	resp, err := daemon.Call(conn, daemon.Request{Op: "tunnel_down", Name: name}, 5*time.Second)
-	if err != nil {
-		if stoppedIndependent {
-			fmt.Printf("tunnel %q stopped\n", name)
-			return nil
-		}
-		return clierr.Errf(1, "daemon call: %v", err)
-	}
-	if resp == nil || !resp.OK {
-		if stoppedIndependent {
-			// Daemon didn't know about this tunnel (it was
-			// independent), but we did stop the actual process.
-			fmt.Printf("tunnel %q stopped\n", name)
-			return nil
-		}
-		msg := "daemon refused"
-		if resp != nil && resp.Err != "" {
-			msg = resp.Err
-		}
-		return clierr.Errf(1, "tunnel down %s: %s", name, msg)
+		return clierr.Errf(1, "tunnel %q not running anywhere", name)
 	}
 	fmt.Printf("tunnel %q stopped\n", name)
 	return nil
@@ -346,48 +290,33 @@ func LoadErrors() map[string]string {
 	return errs
 }
 
-// LoadStatuses fans out across BOTH tunnel-hosting paths and
-// returns the union: daemon-hosted entries via the daemon RPC,
-// independent-process entries via ~/.srv/tunnels/*.json. Names
-// collide gracefully -- independent wins because if both report a
-// listener for the same name, the independent one's status file
-// was written by the actually-running process; the daemon's view
-// of "I started one too" is stale until its forwarder loop notices.
+// LoadStatuses unions every TunnelHost's view into a single
+// (active, errs) pair. Iteration order in allHosts() determines
+// overlay semantics: later hosts overwrite earlier ones on name
+// collision, so independent (returned second by allHosts) wins
+// over daemon -- the independent path's status file was written by
+// the actually-running process, while the daemon's view of "I
+// started one too" could be stale until its forwarder loop notices.
 //
-// Callers that need both (CLI `tunnel list`, the UI dashboard)
-// should prefer this over reaching into either path directly.
+// Per-host List errors are not bubbled up because the function's
+// contract is "best-effort enumeration"; a host that's temporarily
+// down (daemon not running) is just absent from the result, not a
+// hard failure for the whole call.
 func LoadStatuses() (active map[string]daemon.TunnelInfo, errs map[string]string) {
 	active = map[string]daemon.TunnelInfo{}
 	errs = map[string]string{}
-	conn := daemon.DialSock(500 * time.Millisecond)
-	if conn != nil {
-		defer conn.Close()
-		resp, err := daemon.Call(conn, daemon.Request{Op: "tunnel_list"}, 2*time.Second)
-		if err == nil && resp != nil && resp.OK {
-			for _, t := range resp.Tunnels {
-				active[t.Name] = t
-			}
-			for n, msg := range resp.TunnelErrors {
-				errs[n] = msg
-			}
+	for _, h := range allHosts() {
+		a, e, _ := h.List()
+		for k, v := range a {
+			active[k] = v
 		}
-	}
-	// Independent-process layer: walk the status files and overlay.
-	// Failures here are silent because a missing tunnels dir or an
-	// unparseable status file shouldn't break `tunnel list`.
-	if ind, err := tunnelproc.ListStatuses(); err == nil {
-		for name, st := range ind {
-			active[name] = daemon.TunnelInfo{
-				Name:    name,
-				Type:    st.Type,
-				Spec:    st.Spec,
-				Profile: st.Profile,
-				Listen:  st.Listen,
-				Started: st.Started,
-			}
-			// If both paths reported an error for this name, the
-			// independent path is now considered authoritative
-			// "running", so clear any stale daemon error.
+		for n, msg := range e {
+			errs[n] = msg
+		}
+		// Drop any error entry for a name that's now active under
+		// this (or any prior) host -- "currently up" beats "last
+		// attempt failed" in the list view.
+		for name := range a {
 			delete(errs, name)
 		}
 	}

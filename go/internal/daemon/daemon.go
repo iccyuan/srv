@@ -517,55 +517,79 @@ func daemonData(resp Response) any {
 	return data
 }
 
+// opHandler is the per-request signature every daemon op satisfies.
+// All return a single Response; the streaming op (stream_run) lives
+// outside the registry because it writes multiple frames and is
+// dispatched separately in handleConn.
+type opHandler func(s *daemonState, req Request) Response
+
+// opRegistry maps protocol-level op names to their method values.
+// New ops register by appending an entry here -- there's no central
+// switch statement to maintain anymore, so the cost of adding an op
+// is exactly: write the method, add one map entry. Mirrors the
+// registry pattern internal/mcp already uses for its tool surface.
+var opRegistry = map[string]opHandler{
+	"ping":             (*daemonState).handlePing,
+	"status":           (*daemonState).handleStatus,
+	"shutdown":         (*daemonState).handleShutdown,
+	"ls":               (*daemonState).handleLs,
+	"cd":               (*daemonState).handleCd,
+	"pwd":              (*daemonState).handlePwd,
+	"run":              (*daemonState).handleRun,
+	"tunnel_up":        (*daemonState).handleTunnelUp,
+	"tunnel_down":      (*daemonState).handleTunnelDown,
+	"tunnel_list":      (*daemonState).handleTunnelList,
+	"sudo_cache_get":   (*daemonState).handleSudoCacheGet,
+	"sudo_cache_set":   (*daemonState).handleSudoCacheSet,
+	"sudo_cache_clear": (*daemonState).handleSudoCacheClear,
+	"disconnect":       (*daemonState).handleDisconnect,
+	"disconnect_all":   (*daemonState).handleDisconnectAll,
+}
+
 func (s *daemonState) dispatch(req Request) (resp Response) {
 	defer func() {
 		if r := recover(); r != nil {
 			resp = Response{OK: false, Err: fmt.Sprintf("daemon panic: %v", r)}
 		}
 	}()
-	switch req.Op {
-	case "ping":
-		return Response{OK: true}
-	case "status":
-		s.mu.Lock()
-		profs := make([]string, 0, len(s.pool))
-		for k := range s.pool {
-			profs = append(profs, k)
-		}
-		s.mu.Unlock()
-		return Response{
-			OK:       true,
-			Profiles: profs,
-			Uptime:   int64(time.Since(s.startedAt).Seconds()),
-		}
-	case "shutdown":
-		return Response{OK: true}
-	case "ls":
-		return s.handleLs(req)
-	case "cd":
-		return s.handleCd(req)
-	case "pwd":
-		return s.handlePwd(req)
-	case "run":
-		return s.handleRun(req)
-	case "tunnel_up":
-		return s.handleTunnelUp(req)
-	case "tunnel_down":
-		return s.handleTunnelDown(req)
-	case "tunnel_list":
-		return s.handleTunnelList(req)
-	case "sudo_cache_get":
-		return s.handleSudoCacheGet(req)
-	case "sudo_cache_set":
-		return s.handleSudoCacheSet(req)
-	case "sudo_cache_clear":
-		return s.handleSudoCacheClear(req)
-	case "disconnect":
-		return s.handleDisconnect(req)
-	case "disconnect_all":
-		return s.handleDisconnectAll(req)
+	h, ok := opRegistry[req.Op]
+	if !ok {
+		return Response{OK: false, Err: "unknown op: " + req.Op}
 	}
-	return Response{OK: false, Err: "unknown op: " + req.Op}
+	return h(s, req)
+}
+
+// handlePing is the cheapest op -- callers use it to detect daemon
+// liveness before deciding whether to spawn a fresh one. No state
+// access; doesn't even need to hold s.mu.
+func (s *daemonState) handlePing(req Request) Response {
+	return Response{OK: true}
+}
+
+// handleStatus reports uptime + per-profile pool occupancy. Used by
+// `srv daemon status` and the UI dashboard. Returns a list of
+// profile names that have at least one pooled connection.
+func (s *daemonState) handleStatus(req Request) Response {
+	s.mu.Lock()
+	profs := make([]string, 0, len(s.pool))
+	for k := range s.pool {
+		profs = append(profs, k)
+	}
+	s.mu.Unlock()
+	return Response{
+		OK:       true,
+		Profiles: profs,
+		Uptime:   int64(time.Since(s.startedAt).Seconds()),
+	}
+}
+
+// handleShutdown returns the ack response. The actual stop-signal
+// fires in handleConn after the response has been written, so the
+// client gets a clean reply before the socket goes away. Kept as a
+// no-op handler here so the registry has uniform coverage of all
+// op names -- the special-case logic stays in handleConn.
+func (s *daemonState) handleShutdown(req Request) Response {
+	return Response{OK: true}
 }
 
 // acquireClient checks out one SSH connection from the per-profile
