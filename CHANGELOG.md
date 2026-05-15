@@ -1,5 +1,40 @@
 # Changelog
 
+## [Go 2.6.7] - 2026-05-15
+
+### Added
+- **断点续传的流式命令**:`srv tail` 单文件用 `tail -F -c +<N>` 按字节续传(多文件回退到 `-n 0` 不重放 backlog);`srv journal -f` 用 ISO 时间戳重续(`--since=<ts>` + 边界行去重)。重连后不再从头打印 -n N 条 backlog,丢失窗口最小化。
+- **每 profile 加密套件/MAC/KEX/HostKey 锁定**:新增 `ciphers` / `macs` / `key_exchanges` / `host_key_algorithms` 字段,空缺保持库默认。x86 AES-NI 上锁 `aes128-gcm@openssh.com` 比默认 chacha20-poly1305 大宗传输 2-3 倍。
+- **daemon 单飞 `run` 去重**:并发同 `(profile, cwd, command)` 请求合并成一次 SSH session。MCP 并发 4 个相同 `ls /` 现在只跑一次。
+- **可选 wire-level gzip**:`compress_streams: true` 时 `RunCapture` 在远端把 stdout 通过 `set -o pipefail; ... | gzip -c -1` 压缩、本地解。stderr 不动;远端缺 gzip 自动回退明文。跨境/移动网络的大输出明显省流量。
+- **大文件并行分片传输**:文件 ≥ 32MB 且无可续传 partial 时,push/pull 走 N 路并行 WriteAt/ReadAt 同时填 SSH 窗口。高 RTT 链路 3-5× 提升。`SRV_TRANSFER_CHUNK_{THRESHOLD,BYTES,PARALLEL}` 可调。
+- **daemon 预热(`autoconnect`)**:profile 上设 `autoconnect: true`,daemon 启动并行 dial 进池。首条命令从 ~200-800ms 握手降到 0-RTT。
+- **每 profile 多 SSH 连接池**:`pool_size: N`(默认 1,上限 16)。`acquireClient` 按 inflight 最少调度,池空闲超 `connIdleTTL` 单独回收一个槽不影响其他;高并发 MCP / 大 sync 场景填满 TCP 窗口。
+- **at-rest 加密(opt-in)**:`SRV_AT_REST_ENCRYPT=1` 后 `history.jsonl` 和 `mcp-replay.jsonl` 用 AES-256-GCM 逐行加密。密钥 `~/.srv/secret/key`(Linux 0600 / Windows 限制 DACL 到当前 SID)。读侧自动检测明文/密文混存,平滑迁移。
+- **Tunnel 独立进程模式**:`independent: true` 让 `srv tunnel up` 起 `srv _tunnel_run <name>` 独立子进程(状态 `~/.srv/tunnels/<name>.json` + 日志 `<name>.log`)。daemon 重启不杀该 tunnel。`cmdDown` fan-out 同时尝试 daemon-hosted + independent。
+- **Windows 一等公民**:6 个 gap 补齐 —— TCP loopback fallback(老 Win10 / Server 2016 没 AF_UNIX)、SIGWINCH 等价物(250ms 轮询)、PID + 创建时间防 PID 复用、`~/.srv/secret/key` 明确 DACL 到当前 SID(NTFS)、`CTRL_BREAK_EVENT` 优雅停 tunnel、显式 ENABLE_VIRTUAL_TERMINAL_PROCESSING。
+- **新 `internal/platform` 包**:7 个接口(Process / Console / Crypto / SystemStats / Notifier / Opener / Shell)+ 每 OS 一个文件。加新 OS = 写一个 `platform_<goos>.go`,不改任何已有文件。HZ 检测覆盖 100/250/1000 三种主流 Linux 内核;MemAvailable 缺失自动回退 MemFree+Buffers+Cached;容器场景文档化。
+
+### Changed
+- **删除 mosh / UDP 传输**:整个 `internal/moshx` 包删除(~1.7k 行),`srv mosh` / `srv mosh-server` 命令、README "Mosh-style UDP" 段、help 表条目全部移除。项目方向坚定 TCP-only。
+- **STATS 面板重写**:从 SSH 远端采样改为本地采样(`/proc` on Linux,sysctl + vm_stat on macOS,PowerShell CIM on Windows);从单点 scatter 改为 Braille 字符的连续折线图(Bresenham 插值,2×4 子像素密度);移除颜色"新点"标记。
+- **UI 引入 Source 接口**:`srv ui` 和 `srv ui demo` 走同一份渲染代码,只在 Source 实现层分歧(live vs demo);demo 自然变成 live 路径的 screenshot fixture。
+- **Tunnel 加 `TunnelHost` 策略接口**:cmdUp / cmdDown / LoadStatuses 不再 3 处独立 branch on `def.Independent`;改为 `hostFor(def)` 选 strategy + `allHosts()` fan-out + `ErrNotHosted` sentinel。加第三种宿主(systemd unit / launchd plist / k8s pod)只需写一个 struct + 一行加进 allHosts。
+- **Daemon op 改 registry**:`dispatch()` 15 路 switch 换成 `map[string]opHandler{...}`。加新 op = 一个 method + 一行 map。和 MCP 包的工具 registry 风格一致。
+- **`hooks.buildShell` / `install.openDefaultBrowser` 迁移到 platform 包**:前者用 `platform.Sh.Command()`,后者直接用 `platform.Open.Open()` 去除和 `launcher.openLocal` 的重复。
+
+### Fixed
+- **STATS 面板各种 UI bug**:JOBS 标题闪烁(切片别名)、TUNNELS/JOBS/GROUPS 空时消失、对齐错位、DETAIL 高度不固定。
+- **测试 `TestListStatusesSkipsDeadPIDs` 硬编码 PID=1 在 Linux CI 失败**:Linux PID 1 是 init/systemd,永远活着。改为 `exec.Command("sh", "-c", "")` 起子进程后用其退出后的 PID。
+- **Stream resume Suppress 一次性边界去重**:journal 重连后第一行如果和上次最后一行 byte-for-byte 相同则跳过(journalctl `--since` 含边界秒,会重发那行)。
+
+### Notes
+- 几乎所有新 feature 都是 lazy + opt-in(`autoconnect` / `compress_streams` / `pool_size` / `independent` / `SRV_AT_REST_ENCRYPT`),默认行为不变,老用户零感知。
+- platform 拆分后跨平台代码不再有 `runtime.GOOS` 分支泄漏到业务代码;新加 OS 一个文件搞定。
+- 这版的重构跨度是历史最大:从 mosh 完全移除到 platform 接口化、Tunnel 策略化、Daemon registry 化,等于把第二季度积累的设计债集中清算了一次。
+
+---
+
 ## [Go 2.6.6] - 2026-05-10
 
 ### Added

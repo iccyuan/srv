@@ -22,7 +22,7 @@ import (
 
 // Version is overridable at build time via -ldflags "-X main.Version=...".
 // goreleaser sets it from the git tag on release builds.
-var Version = "2.6.6"
+var Version = "2.6.7"
 
 // mcpMode is true while the process is acting as a stdio MCP server.
 // fatal() reads it to panic instead of os.Exit so a stray error
