@@ -5,6 +5,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"srv/internal/platform"
 	"srv/internal/srvpath"
 	"time"
 )
@@ -37,10 +38,12 @@ func Ensure() bool {
 	return false
 }
 
-// spawnDaemonDetached starts `srv daemon` as a background process that
-// outlives the parent. Stdio is detached so the parent can exit cleanly.
-// Platform-specific attrs (Setsid on Unix, DETACHED_PROCESS on Windows)
-// in daemon_spawn_unix.go / daemon_spawn_windows.go.
+// spawnDaemonDetached starts `srv daemon` as a background process
+// that outlives the parent. Stdio is detached so the parent can exit
+// cleanly. Per-OS detach attributes (Setsid on Unix, DETACHED_PROCESS
+// on Windows) are applied via platform.Proc.Detach -- both daemon
+// and tunnelproc use the same implementation so a fix in one place
+// fixes both.
 func spawnDaemonDetached() error {
 	self, err := os.Executable()
 	if err != nil {
@@ -56,13 +59,10 @@ func spawnDaemonDetached() error {
 		cmd.Stdout = nil
 		cmd.Stderr = nil
 	}
-	applyDetachAttrs(cmd)
+	platform.Proc.Detach(cmd)
 	if err := cmd.Start(); err != nil {
 		return err
 	}
-	// Don't Wait(); the OS will reap. On Unix, with Setsid the child is
-	// a new session and survives parent exit. On Windows, DETACHED_PROCESS
-	// + breakaway-from-job achieves the same.
 	go func() { _ = cmd.Process.Release() }()
 	return nil
 }

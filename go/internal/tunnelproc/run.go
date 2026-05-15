@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/signal"
 	"srv/internal/config"
+	"srv/internal/platform"
 	"srv/internal/sshx"
 	"strconv"
 	"syscall"
@@ -74,7 +75,7 @@ func Run(name string) error {
 	// uses pidAliveMatch to spot PID reuse: if our PID's creation
 	// time has changed by then, the listing code knows the original
 	// process is gone and we're a ghost.
-	myStart, _ := pidStartTime(os.Getpid())
+	myStart, _ := platform.Proc.PIDStartTime(os.Getpid())
 	st := Status{
 		Name:     name,
 		Type:     def.Type,

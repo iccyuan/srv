@@ -35,6 +35,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"srv/internal/platform"
 	"srv/internal/srvpath"
 	"sync"
 )
@@ -127,12 +128,11 @@ func loadOrCreateKey() ([]byte, error) {
 	}
 	// Tighten the file ACL beyond what 0600 conveys on this platform.
 	// On Unix that's a no-op (POSIX mode already covers it); on
-	// Windows we apply an explicit DACL that grants only the current
-	// user SID full control, denying inheritance from the parent. The
-	// helper is platform-shimmed; failure is non-fatal so a missing
-	// privilege (e.g. running under a stripped-down service account)
-	// can't break key creation entirely.
-	if err := hardenKeyFile(path); err != nil {
+	// Windows the platform impl applies an explicit DACL granting
+	// only the current user's SID. Failure is non-fatal so a missing
+	// privilege (e.g. a stripped-down service account) doesn't break
+	// key creation entirely.
+	if err := platform.Sec.HardenKeyFile(path); err != nil {
 		fmt.Fprintf(os.Stderr, "srv: atrest: harden key acl: %v\n", err)
 	}
 	return buf, nil

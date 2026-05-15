@@ -20,6 +20,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"srv/internal/config"
+	"srv/internal/platform"
 	"srv/internal/srvpath"
 )
 
@@ -179,7 +180,7 @@ func Spawn(name string) error {
 			cmd.Stderr = f
 		}
 	}
-	applyDetachAttrs(cmd)
+	platform.Proc.Detach(cmd)
 	if err := cmd.Start(); err != nil {
 		return fmt.Errorf("spawn _tunnel_run: %v", err)
 	}
@@ -202,79 +203,57 @@ func Stop(name string) error {
 	if st == nil {
 		return fmt.Errorf("tunnel %q not running as independent process", name)
 	}
-	proc, err := os.FindProcess(st.PID)
-	if err != nil {
-		return fmt.Errorf("find pid %d: %v", st.PID, err)
-	}
-	if err := signalTerminate(proc); err != nil {
-		// On Windows FindProcess always succeeds but the kill may
-		// fail if the pid is already gone. Treat "process gone" as
-		// success and clean up the status file.
-		if !pidAlive(st.PID) {
+	if err := platform.Proc.SignalTerminate(st.PID); err != nil {
+		// Kill / ctrl-break may fail if the pid is already gone.
+		// Treat "process gone" as success and clean up the status
+		// file rather than leaving the user with a confusing error.
+		if !platform.Proc.PIDAlive(st.PID) {
 			RemoveStatus(name)
 			return nil
 		}
 		return fmt.Errorf("signal pid %d: %v", st.PID, err)
 	}
-	// Best-effort wait for the file to disappear. We don't strictly
-	// need this for correctness (the next list call would clean a
-	// stale file), but echoing "stopped" only after the file is
-	// actually gone gives the user a synchronous confirmation.
+	// Best-effort wait for the subprocess's deferred RemoveStatus to
+	// fire so the user gets synchronous confirmation. Stale-file
+	// cleanup at the end covers cases where shutdown was abrupt
+	// (Kill fallback) and the subprocess didn't get to run defers.
 	for i := 0; i < 40; i++ {
 		if _, err := os.Stat(StatusPath(name)); os.IsNotExist(err) {
 			return nil
 		}
-		if !pidAlive(st.PID) {
+		if !platform.Proc.PIDAlive(st.PID) {
 			RemoveStatus(name)
 			return nil
 		}
 		sleepMillis(50)
 	}
-	// Force-cleanup the file if the subprocess didn't.
 	RemoveStatus(name)
 	return nil
 }
 
-// pidAlive returns true if a process with the given PID is currently
-// running. Cross-platform: on Unix, signal 0 to a non-existent PID
-// returns ESRCH; on Windows, OpenProcess with QUERY_LIMITED rights
-// (which is what os.FindProcess does internally) returns an error
-// for dead PIDs. Encapsulated here so the rest of the package
-// doesn't have to care.
-func pidAlive(pid int) bool {
-	if pid <= 0 {
-		return false
-	}
-	return pidAliveImpl(pid)
-}
-
-// pidAliveMatch wraps pidAlive with a creation-time check. When
-// expectedStart is 0 (lookup failed or pre-feature status file), it
-// degrades to PID-only. When non-zero, the running PID's actual
-// creation time must match within 2 seconds (round-trip / clock-
-// skew slack), otherwise we conclude the PID was reused by an
-// unrelated process and report dead. Catches the classic
-// long-uptime-host PID-wrap case without false positives from
-// reasonable clock jitter.
+// pidAliveMatch combines platform.Proc's PIDAlive + PIDStartTime
+// into a single "is this status file's recorded process really
+// still ours?" check. When expectedStart is 0 (lookup failed at
+// write time, or a pre-feature status file), it degrades to a
+// PID-only liveness probe. When non-zero, the running PID's actual
+// creation time must match within 2 seconds (clock-skew slack);
+// any larger drift means the PID was recycled by an unrelated
+// process and we report dead.
 func pidAliveMatch(pid int, expectedStart int64) bool {
-	if !pidAlive(pid) {
+	if !platform.Proc.PIDAlive(pid) {
 		return false
 	}
 	if expectedStart == 0 {
 		return true
 	}
-	got, ok := pidStartTime(pid)
+	got, ok := platform.Proc.PIDStartTime(pid)
 	if !ok {
-		// Platform can't tell us -- fall back to "alive enough".
 		return true
 	}
 	diff := got - expectedStart
 	if diff < 0 {
 		diff = -diff
 	}
-	// 2 seconds. The kernel's reported start time is monotonic for
-	// a single process, so any drift this large means a different
-	// process owns the PID now.
 	return diff < int64(2*1e9)
 }
 

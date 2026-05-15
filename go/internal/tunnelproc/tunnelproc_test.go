@@ -3,6 +3,7 @@ package tunnelproc
 import (
 	"os"
 	"path/filepath"
+	"srv/internal/platform"
 	"strings"
 	"testing"
 	"time"
@@ -125,7 +126,7 @@ func TestPIDStartRoundtripForOurOwnPID(t *testing.T) {
 	// platforms we implemented). macOS/BSD return (0, false) which
 	// is also a valid answer -- the test just asserts whatever we
 	// got is internally consistent.
-	got, ok := pidStartTime(os.Getpid())
+	got, ok := platform.Proc.PIDStartTime(os.Getpid())
 	if !ok {
 		t.Skip("platform doesn't expose process start time (fallback path)")
 	}
@@ -140,7 +141,7 @@ func TestPIDStartRoundtripForOurOwnPID(t *testing.T) {
 }
 
 func TestPIDAliveMatchAcceptsCorrectStart(t *testing.T) {
-	start, ok := pidStartTime(os.Getpid())
+	start, ok := platform.Proc.PIDStartTime(os.Getpid())
 	if !ok {
 		t.Skip("no pidStartTime support")
 	}
@@ -150,7 +151,7 @@ func TestPIDAliveMatchAcceptsCorrectStart(t *testing.T) {
 }
 
 func TestPIDAliveMatchRejectsWrongStart(t *testing.T) {
-	start, ok := pidStartTime(os.Getpid())
+	start, ok := platform.Proc.PIDStartTime(os.Getpid())
 	if !ok {
 		t.Skip("no pidStartTime support")
 	}

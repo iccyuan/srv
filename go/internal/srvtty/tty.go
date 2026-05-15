@@ -12,11 +12,32 @@ import (
 	"encoding/base64"
 	"fmt"
 	"os"
+	"srv/internal/platform"
 	"strings"
 	"time"
 
 	"golang.org/x/term"
 )
+
+// WatchWindowResize and EnableLocalVTOutput are thin wrappers around
+// the platform package so callers that already speak srvtty don't
+// have to learn a second namespace for tty-shaped helpers. The
+// actual per-OS implementations live in internal/platform; srvtty
+// is the user-facing facade.
+
+// WatchWindowResize forwards local terminal-size changes to the
+// supplied callback. See platform.Console.WatchWindowResize for the
+// per-OS implementation notes.
+func WatchWindowResize(onResize func(cols, rows int)) func() {
+	return platform.Term.WatchWindowResize(onResize)
+}
+
+// EnableLocalVTOutput ensures the local console renders ANSI escape
+// sequences. Returns a restore closure. See
+// platform.Console.EnableLocalVTOutput for the per-OS details.
+func EnableLocalVTOutput() func() {
+	return platform.Term.EnableLocalVTOutput()
+}
 
 // IsStdinTTY returns true when stdin is connected to a terminal.
 func IsStdinTTY() bool {
