@@ -7,6 +7,7 @@ import (
 	"srv/internal/config"
 	"srv/internal/sshx"
 	"strconv"
+	"sync"
 	"time"
 )
 
@@ -250,6 +251,53 @@ func (s *daemonState) startAutostartTunnels() {
 		}
 		fmt.Fprintf(os.Stderr, "daemon: autostarted tunnel %q\n", name)
 	}
+}
+
+// startAutoconnectProfiles dials every profile flagged
+// autoconnect=true into the daemon's SSH pool, in parallel, so the
+// first user request against them is 0-RTT instead of paying the
+// cold-handshake cost. Failures are logged but never block daemon
+// startup -- a profile pointing at a down host shouldn't keep cd /
+// ls / run from working against every other profile.
+//
+// Lives next to startAutostartTunnels because both are "act on
+// config-flagged entries at daemon boot" routines; they're
+// independent but share the same shape and the same don't-let-one-
+// failure-block-the-rest policy.
+func (s *daemonState) startAutoconnectProfiles() {
+	cfg, err := config.Load()
+	if err != nil || cfg == nil {
+		return
+	}
+	// Parallel dial: the whole point is to not serialize cold
+	// handshakes. Two profiles taking 500ms each finish in 500ms,
+	// not 1000ms. WaitGroup is only for diagnostics ("warmed N
+	// profiles in T ms"); we don't actually need to wait before
+	// returning since the daemon's accept loop is already running.
+	var wg sync.WaitGroup
+	started := time.Now()
+	var attempted int
+	for name, prof := range cfg.Profiles {
+		if !prof.GetAutoconnect() {
+			continue
+		}
+		attempted++
+		wg.Add(1)
+		go func(name string) {
+			defer wg.Done()
+			if _, _, err := s.getClient(name); err != nil {
+				fmt.Fprintf(os.Stderr, "daemon: autoconnect %q failed: %v\n", name, err)
+				return
+			}
+			fmt.Fprintf(os.Stderr, "daemon: autoconnected %q\n", name)
+		}(name)
+	}
+	if attempted == 0 {
+		return
+	}
+	wg.Wait()
+	fmt.Fprintf(os.Stderr, "daemon: autoconnect: %d profile(s) warmed in %v\n",
+		attempted, time.Since(started).Round(time.Millisecond))
 }
 
 // stopAllTunnels signals every active tunnel to shut down. Used from

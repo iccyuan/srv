@@ -86,6 +86,15 @@ type Profile struct {
 	// on for cross-region / mobile-tethered links where `srv ls -R /`
 	// or `cat large-log` would otherwise drag.
 	CompressStreams *bool `json:"compress_streams,omitempty"`
+	// Autoconnect=true asks the daemon to dial this profile into its
+	// connection pool at startup, before any user request arrives. The
+	// usual lazy-dial pattern pays the SSH handshake (~200-800ms) on
+	// the very first call after a fresh daemon boot; pre-warm flips
+	// that to 0-RTT for the profiles users actually live in. Failures
+	// during pre-warm are logged but never block daemon startup -- a
+	// down host shouldn't keep cd / ls / run from working against
+	// every other profile.
+	Autoconnect *bool `json:"autoconnect,omitempty"`
 	// Free-form bag for unknown keys forwarded from older Python configs.
 	Extra map[string]any `json:"-"`
 	// Name is the profile's lookup key in Config.Profiles. Populated by
@@ -141,6 +150,14 @@ func (p *Profile) GetCompressSync() bool {
 // for when it pays off and when it costs.
 func (p *Profile) GetCompressStreams() bool {
 	return p.CompressStreams != nil && *p.CompressStreams
+}
+
+// GetAutoconnect reports whether the daemon should pre-warm this
+// profile's SSH connection at startup. Default false -- the lazy
+// dial pattern is the right tradeoff for profiles touched once a
+// week; flip it on for the one or two profiles you use constantly.
+func (p *Profile) GetAutoconnect() bool {
+	return p.Autoconnect != nil && *p.Autoconnect
 }
 
 func (p *Profile) GetDefaultCwd() string {

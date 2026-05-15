@@ -304,6 +304,15 @@ func Cmd(args []string) error {
 	// shouldn't keep ls / cd / run from working.
 	go state.startAutostartTunnels()
 
+	// Pre-warm SSH connections for profiles flagged autoconnect=true.
+	// The lazy-dial pattern means the first request on a fresh daemon
+	// pays the ~200-800ms handshake before any user-visible work
+	// happens; pre-warm flips that to 0-RTT for the profiles the user
+	// flagged as "I live here". Failures are logged but never block
+	// startup -- a down host shouldn't keep the rest of the daemon
+	// idle.
+	go state.startAutoconnectProfiles()
+
 	// Background job-completion watcher: fires local toast + webhook
 	// for detached jobs whose remote `.exit` marker just appeared.
 	// Bails out cheaply when no JobNotify is configured.

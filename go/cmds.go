@@ -382,6 +382,10 @@ func applyProfileSet(p *config.Profile, key, value string) {
 		p.Compression = asBool()
 	case "compress_sync":
 		p.CompressSync = asBool()
+	case "compress_streams":
+		p.CompressStreams = asBool()
+	case "autoconnect":
+		p.Autoconnect = asBool()
 	case "agent_forwarding":
 		p.AgentForwarding = asBool()
 	case "connect_timeout":
@@ -604,6 +608,8 @@ func cmdStatus(cfg *config.Config, profileOverride string) error {
 	multiplex := profile.Multiplex == nil || *profile.Multiplex
 	fmt.Printf("defaults: multiplex=%v  compression=%v  connect_timeout=%ds\n",
 		multiplex, profile.GetCompression(), profile.GetConnectTimeout())
+	fmt.Printf("warmup  : autoconnect=%v  compress_streams=%v\n",
+		profile.GetAutoconnect(), profile.GetCompressStreams())
 	return nil
 }
 
