@@ -95,6 +95,16 @@ type Profile struct {
 	// down host shouldn't keep cd / ls / run from working against
 	// every other profile.
 	Autoconnect *bool `json:"autoconnect,omitempty"`
+	// PoolSize caps the number of concurrent SSH connections the daemon
+	// will keep open for this profile. Default 1 (the historical
+	// behaviour: one connection per profile, all sessions multiplexed
+	// over its channels). Crank to 4-8 for profiles that drive high
+	// concurrency (parallel MCP storms, big sync trees, busy `srv ui`
+	// dashboards) -- multi-conn fills more of the underlying TCP
+	// bandwidth-delay product than a single connection's SSH window
+	// allows. Hard-clamped to [1,16] at use time so a stray big
+	// number can't exhaust local fd or sshd's MaxStartups budget.
+	PoolSize int `json:"pool_size,omitempty"`
 	// Free-form bag for unknown keys forwarded from older Python configs.
 	Extra map[string]any `json:"-"`
 	// Name is the profile's lookup key in Config.Profiles. Populated by
@@ -158,6 +168,21 @@ func (p *Profile) GetCompressStreams() bool {
 // week; flip it on for the one or two profiles you use constantly.
 func (p *Profile) GetAutoconnect() bool {
 	return p.Autoconnect != nil && *p.Autoconnect
+}
+
+// GetPoolSize returns the clamped concurrent-connection cap. Default 1
+// preserves historical single-conn behaviour; values outside [1,16]
+// are clamped silently because a stray 0 or 999 in the JSON would
+// otherwise be hard to diagnose.
+func (p *Profile) GetPoolSize() int {
+	n := p.PoolSize
+	if n < 1 {
+		return 1
+	}
+	if n > 16 {
+		return 16
+	}
+	return n
 }
 
 func (p *Profile) GetDefaultCwd() string {
@@ -315,6 +340,21 @@ type TunnelDef struct {
 	// traffic. Local-direction only -- reverse tunnels need the SSH
 	// session up to set up the remote listener and can't be lazy.
 	OnDemand bool `json:"on_demand,omitempty"`
+	// Independent=true makes `srv tunnel up <name>` spawn a dedicated
+	// `srv _tunnel_run` subprocess to host this tunnel instead of
+	// parking it inside the long-lived daemon. The trade is:
+	//   - Independent: daemon restarts don't disturb the tunnel, but
+	//     each independent tunnel costs its own SSH connection +
+	//     ~20MB Go runtime; status flows through ~/.srv/tunnels/<name>.json
+	//     instead of the daemon's tunnel_list RPC.
+	//   - Daemon-hosted (default): tunnels share the daemon's SSH
+	//     pool and lifecycle; restarting the daemon for a config
+	//     change tears every tunnel down.
+	// Default is daemon-hosted (the historical behaviour); flip this
+	// on for tunnels you treat as critical infrastructure (db
+	// forwards, observability bridges) that mustn't die during a
+	// daemon restart.
+	Independent bool `json:"independent,omitempty"`
 }
 
 // HintsEnabled reports whether typo / post-failure hints should fire.

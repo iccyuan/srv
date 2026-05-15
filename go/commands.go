@@ -28,6 +28,7 @@ import (
 	"srv/internal/syncx"
 	"srv/internal/theme"
 	"srv/internal/tunnel"
+	"srv/internal/tunnelproc"
 	"srv/internal/ui"
 	"time"
 
@@ -215,6 +216,12 @@ var subcommands = []subcommand{
 	}},
 	{name: "_ls", hidden: true, handler: func(c cmdCtx) error { return completion.LsCmd(c.args, c.cfg, c.profileOverride) }},
 	{name: "_remote_path", hidden: true, handler: func(c cmdCtx) error { return completion.RemotePathCmd(c.args, c.cfg, c.profileOverride) }},
+	{name: "_tunnel_run", noConfig: true, hidden: true, handler: func(c cmdCtx) error {
+		if len(c.args) < 1 {
+			return fmt.Errorf("usage: srv _tunnel_run <name>")
+		}
+		return tunnelproc.Run(c.args[0])
+	}},
 }
 
 // subcommandMap and reservedSubcommands are populated by init() rather

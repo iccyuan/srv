@@ -24,6 +24,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"srv/internal/atrest"
 	"srv/internal/srvio"
 	"srv/internal/srvpath"
 	"strings"
@@ -87,6 +88,18 @@ func Append(e Entry) {
 		f.Close()
 		return
 	}
+	// At-rest encryption is opt-in: when SRV_AT_REST_ENCRYPT=1 each
+	// line gets wrapped in AES-GCM via internal/atrest. Reads
+	// auto-detect, so flipping the env mid-stream doesn't corrupt
+	// the file. Encryption failures fall back to plaintext so a
+	// missing key file can't break history bookkeeping silently.
+	if atrest.Enabled() {
+		if enc, encErr := atrest.EncryptLine(b); encErr == nil {
+			b = enc
+		} else {
+			fmt.Fprintf(os.Stderr, "srv: history encrypt failed (writing plain): %v\n", encErr)
+		}
+	}
 	b = append(b, '\n')
 	if _, err := f.Write(b); err != nil {
 		fmt.Fprintf(os.Stderr, "srv: history write: %v\n", err)
@@ -107,11 +120,22 @@ func maybeRotate(path string) {
 		return
 	}
 	keep := entries[len(entries)-MaxEntries:]
+	encrypt := atrest.Enabled()
 	var buf strings.Builder
 	for _, e := range keep {
 		b, err := json.Marshal(e)
 		if err != nil {
 			continue
+		}
+		// Honour the current encryption setting on the freshly-written
+		// rotated file. Mixing plaintext + ciphertext is fine for
+		// reads (auto-detect), but rotating to plaintext when the
+		// flag is on would leak just-archived history every time
+		// the size threshold tripped.
+		if encrypt {
+			if enc, encErr := atrest.EncryptLine(b); encErr == nil {
+				b = enc
+			}
 		}
 		buf.Write(b)
 		buf.WriteByte('\n')
@@ -140,8 +164,20 @@ func readAll(path string) ([]Entry, error) {
 		line, err := br.ReadString('\n')
 		trimmed := strings.TrimSpace(line)
 		if trimmed != "" {
+			// atrest.DecryptLine returns the input unchanged when
+			// the line isn't in our wrapped format, so old plaintext
+			// rows continue to read fine alongside encrypted ones.
+			plain, decErr := atrest.DecryptLine([]byte(trimmed))
+			if decErr != nil {
+				// Tampered or undecryptable -- skip the row rather
+				// than aborting the whole listing.
+				if err == io.EOF {
+					break
+				}
+				continue
+			}
 			var e Entry
-			if jerr := json.Unmarshal([]byte(trimmed), &e); jerr == nil {
+			if jerr := json.Unmarshal(plain, &e); jerr == nil {
 				out = append(out, e)
 			}
 		}

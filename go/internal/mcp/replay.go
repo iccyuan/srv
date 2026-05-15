@@ -7,6 +7,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"srv/internal/atrest"
 	"srv/internal/srvio"
 	"srv/internal/srvpath"
 	"strings"
@@ -57,6 +58,18 @@ func appendReplay(e replayEntry) error {
 	b, err := json.Marshal(e)
 	if err != nil {
 		return err
+	}
+	// MCP replay entries carry the full tool args + result blob,
+	// which is the most sensitive thing srv puts on disk -- creds in
+	// command strings, paths in pull results, etc. When
+	// SRV_AT_REST_ENCRYPT=1 each row is wrapped via internal/atrest
+	// so a casual `cat ~/.srv/mcp-replay.jsonl` won't leak any of
+	// it. Reader auto-detects so mixed plaintext+encrypted files
+	// stay queryable.
+	if atrest.Enabled() {
+		if enc, encErr := atrest.EncryptLine(b); encErr == nil {
+			b = enc
+		}
 	}
 	b = append(b, '\n')
 	f, err := os.OpenFile(path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o600)
@@ -112,9 +125,15 @@ func ReadReplay() ([]replayEntry, error) {
 	for {
 		line, err := br.ReadString('\n')
 		if t := strings.TrimSpace(line); t != "" {
-			var e replayEntry
-			if jerr := json.Unmarshal([]byte(t), &e); jerr == nil {
-				out = append(out, e)
+			// Plaintext lines pass through; encrypted ones get
+			// AES-GCM-opened against the key file. Bad rows skip
+			// rather than abort the whole listing.
+			plain, decErr := atrest.DecryptLine([]byte(t))
+			if decErr == nil {
+				var e replayEntry
+				if jerr := json.Unmarshal(plain, &e); jerr == nil {
+					out = append(out, e)
+				}
 			}
 		}
 		if err == io.EOF {

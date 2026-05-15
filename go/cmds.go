@@ -386,6 +386,9 @@ func applyProfileSet(p *config.Profile, key, value string) {
 		p.CompressStreams = asBool()
 	case "autoconnect":
 		p.Autoconnect = asBool()
+	case "pool_size":
+		n, _ := strconv.Atoi(value)
+		p.PoolSize = n
 	case "agent_forwarding":
 		p.AgentForwarding = asBool()
 	case "connect_timeout":

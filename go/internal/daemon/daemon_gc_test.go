@@ -14,7 +14,7 @@ import (
 
 func newGCTestState() *daemonState {
 	return &daemonState{
-		pool:      map[string]*pooledClient{},
+		pool:      map[string][]*pooledClient{},
 		lsCache:   map[string]*lsCacheEntry{},
 		stopCh:    make(chan struct{}),
 		tunnels:   map[string]*activeTunnel{},

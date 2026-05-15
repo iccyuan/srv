@@ -18,6 +18,7 @@ import (
 	"srv/internal/sshx"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -127,6 +128,12 @@ type streamChunk struct {
 type pooledClient struct {
 	client   *sshx.Client
 	lastUsed time.Time
+	// inflight = currently-open SSH sessions running through this
+	// connection. acquireClient picks the lowest-inflight connection
+	// from the per-profile slot; release() decrements when the
+	// caller's session is done. Atomic so the hot read inside
+	// acquireClient doesn't have to grab a mutex.
+	inflight atomic.Int32
 }
 
 type lsCacheEntry struct {
@@ -135,8 +142,12 @@ type lsCacheEntry struct {
 }
 
 type daemonState struct {
-	mu        sync.Mutex
-	pool      map[string]*pooledClient
+	mu sync.Mutex
+	// pool now holds a slice per profile -- up to PoolSize SSH
+	// connections share the work for one profile when concurrency
+	// warrants it. acquireClient picks least-inflight; lazy growth
+	// up to the cap, idle-GC trims back down.
+	pool      map[string][]*pooledClient
 	lsCache   map[string]*lsCacheEntry // key: profile + "\x00" + target
 	listener  net.Listener
 	startedAt time.Time
@@ -284,7 +295,7 @@ func Cmd(args []string) error {
 	fmt.Fprintln(os.Stderr, "srv daemon listening at", sockPath)
 
 	state := &daemonState{
-		pool:        map[string]*pooledClient{},
+		pool:        map[string][]*pooledClient{},
 		lsCache:     map[string]*lsCacheEntry{},
 		listener:    listener,
 		startedAt:   time.Now(),
@@ -490,83 +501,175 @@ func (s *daemonState) dispatch(req Request) (resp Response) {
 	return Response{OK: false, Err: "unknown op: " + req.Op}
 }
 
-// getClient returns a pooled (or freshly dialed) Client for the named
-// profile. Errors propagate to the caller; the dialed client stays in the
-// pool until idle-collected.
+// acquireClient checks out one SSH connection from the per-profile
+// pool, returning the client + profile + a release closure that the
+// caller MUST defer-call when the work is done. Inflight tracking
+// drives "least-loaded" selection across the slice of connections we
+// hold per profile -- when one connection is busy with N open
+// channels and another is idle, future acquirers route to the idle
+// one.
 //
-// The Dial step happens OUTSIDE the daemon mutex -- a slow handshake (or
-// a hanging dial when the remote is unreachable) must NOT block other
-// requests like `status` or `shutdown` that just want to read map state.
-func (s *daemonState) getClient(profileName string) (*sshx.Client, *config.Profile, error) {
+// Growth: if every existing connection is in use (inflight > 0) and
+// the pool size is below the profile's GetPoolSize() cap, we dial a
+// fresh one. Below the cap with idle conns we just reuse. At the cap
+// and all busy, the lowest-inflight one is picked anyway (SSH
+// multiplexes channels on a single TCP/encrypted connection, so this
+// is degraded throughput, not blocking).
+//
+// Shrinkage is the GC's job -- this function never closes anything.
+func (s *daemonState) acquireClient(profileName string) (*sshx.Client, *config.Profile, func(), error) {
 	cfg, err := config.Load()
 	if err != nil || cfg == nil {
-		return nil, nil, fmt.Errorf("load config: %v", err)
+		return nil, nil, nil, fmt.Errorf("load config: %v", err)
 	}
 	if profileName == "" {
 		profileName = cfg.DefaultProfile
 	}
 	profile, ok := cfg.Profiles[profileName]
 	if !ok {
-		return nil, nil, fmt.Errorf("profile %q not found", profileName)
+		return nil, nil, nil, fmt.Errorf("profile %q not found", profileName)
 	}
 	profile.Name = profileName
+	poolSize := profile.GetPoolSize()
 
-	// Fast path: already pooled. Health-check connections that have been
-	// idle longer than `poolHealthThreshold` -- the per-Client keepalive
-	// goroutine handles drops on actively-used connections, but a long-
-	// idle pooled conn can be silently dead (NAT timeout, server-side
-	// idle kill) and we'd hand the caller a zombie. One round-trip ping
-	// is cheap insurance.
+	// Fast path: reuse an existing pooled conn. Pick the lowest-
+	// inflight one; if multiple tie, prefer the most recently used so
+	// a known-good connection wins over a long-idle one that might
+	// have NAT-timed-out under us.
 	s.mu.Lock()
-	pc, ok := s.pool[profileName]
-	s.mu.Unlock()
-	if ok && pc.client != nil && pc.client.Conn != nil {
-		alive := true
-		if time.Since(pc.lastUsed) > poolHealthThreshold {
-			if _, _, err := pc.client.Conn.SendRequest("keepalive@openssh.com", true, nil); err != nil {
-				alive = false
-			}
+	pcs := s.pool[profileName]
+	var best *pooledClient
+	for _, pc := range pcs {
+		if pc.client == nil || pc.client.Conn == nil {
+			continue
 		}
-		if alive {
-			s.mu.Lock()
-			pc.lastUsed = time.Now()
-			s.mu.Unlock()
-			return pc.client, profile, nil
+		if best == nil ||
+			pc.inflight.Load() < best.inflight.Load() ||
+			(pc.inflight.Load() == best.inflight.Load() && pc.lastUsed.After(best.lastUsed)) {
+			best = pc
 		}
-		// Stale -- evict and re-dial below.
-		s.mu.Lock()
-		if cur, ok := s.pool[profileName]; ok && cur == pc {
-			delete(s.pool, profileName)
-		}
+	}
+	canGrow := len(pcs) < poolSize
+	// Idle-conn health check: if we'd hand out a conn that's been
+	// idle past poolHealthThreshold, ping it first. Same logic as
+	// before the multi-conn refactor, just lifted out so each pool
+	// slot can be re-validated independently.
+	if best != nil && best.inflight.Load() == 0 && time.Since(best.lastUsed) > poolHealthThreshold {
 		s.mu.Unlock()
-		_ = pc.client.Close()
+		if _, _, err := best.client.Conn.SendRequest("keepalive@openssh.com", true, nil); err != nil {
+			// Stale -- drop from pool and fall through to dial.
+			s.mu.Lock()
+			s.evictFromSlot(profileName, best)
+			pcs = s.pool[profileName]
+			canGrow = len(pcs) < poolSize
+			s.mu.Unlock()
+			_ = best.client.Close()
+			best = nil
+			// Re-scan for a healthy alternative.
+			s.mu.Lock()
+			for _, pc := range s.pool[profileName] {
+				if pc.client == nil || pc.client.Conn == nil {
+					continue
+				}
+				if best == nil || pc.inflight.Load() < best.inflight.Load() {
+					best = pc
+				}
+			}
+		} else {
+			s.mu.Lock()
+		}
+	}
+	// Decision matrix:
+	//   1. We have a healthy conn AND (it's idle OR pool is at cap) -> reuse
+	//   2. We have a healthy conn AND pool can grow AND all conns are busy -> dial new
+	//   3. Pool empty / no healthy conn -> dial new
+	if best != nil && (best.inflight.Load() == 0 || !canGrow) {
+		best.inflight.Add(1)
+		best.lastUsed = time.Now()
+		s.mu.Unlock()
+		return s.leaseRelease(best, profile)
+	}
+	s.mu.Unlock()
+
+	// Slow path: dial without holding the mutex. Other requests
+	// (status, ls on a different profile, disconnect) stay responsive
+	// during a slow handshake.
+	c, derr := sshx.Dial(profile)
+	if derr != nil {
+		return nil, profile, nil, derr
 	}
 
-	// Slow path: dial without holding s.mu. Other requests stay responsive.
-	c, err := sshx.Dial(profile)
-	if err != nil {
-		return nil, profile, err
-	}
-
-	// Reacquire and install. Race: another request for the same profile
-	// could have raced us to dial; in that case discard our duplicate.
+	// Install the new conn. Re-check the cap because peer goroutines
+	// could have grown the pool while we were dialing; if we lost
+	// the race, drop the surplus dial and reuse whatever's there.
 	s.mu.Lock()
-	if existing, ok := s.pool[profileName]; ok && existing.client != nil && existing.client.Conn != nil {
-		existing.lastUsed = time.Now()
+	if cur := s.pool[profileName]; len(cur) >= poolSize {
 		s.mu.Unlock()
 		_ = c.Close()
-		return existing.client, profile, nil
+		// Recurse once: someone else just grew the pool, so the
+		// fast path will find a usable conn.
+		return s.acquireClient(profileName)
 	}
-	s.pool[profileName] = &pooledClient{client: c, lastUsed: time.Now()}
+	pc := &pooledClient{client: c, lastUsed: time.Now()}
+	pc.inflight.Add(1)
+	s.pool[profileName] = append(s.pool[profileName], pc)
 	s.mu.Unlock()
-	return c, profile, nil
+	return s.leaseRelease(pc, profile)
+}
+
+// leaseRelease wraps a checked-out pooledClient with the release
+// closure callers defer. Decrementing the counter is atomic; touching
+// lastUsed needs the mutex because the GC reads it while holding mu.
+func (s *daemonState) leaseRelease(pc *pooledClient, profile *config.Profile) (*sshx.Client, *config.Profile, func(), error) {
+	return pc.client, profile, func() {
+		pc.inflight.Add(-1)
+		s.mu.Lock()
+		pc.lastUsed = time.Now()
+		s.mu.Unlock()
+	}, nil
+}
+
+// evictFromSlot removes one pooledClient from the per-profile slice.
+// Caller MUST hold s.mu. Does NOT close the client -- caller decides
+// whether to close it (e.g. health-check failure closes; disconnect-
+// all closes; GC closes).
+func (s *daemonState) evictFromSlot(profileName string, target *pooledClient) {
+	pcs := s.pool[profileName]
+	for i, pc := range pcs {
+		if pc == target {
+			s.pool[profileName] = append(pcs[:i], pcs[i+1:]...)
+			break
+		}
+	}
+	if len(s.pool[profileName]) == 0 {
+		delete(s.pool, profileName)
+	}
+}
+
+// getClient is the back-compat shim for callers that hold a client
+// for an indefinite duration (tunnel forwarders, autoconnect dial-
+// probes). It acquires a lease and immediately releases it -- the
+// caller gets the bare client but inflight isn't tracked, so multi-
+// conn routing won't avoid the same conn for new sessions.
+//
+// New callers should use acquireClient with `defer release()`. This
+// shim exists so the multi-conn refactor was incremental rather than
+// rewriting every old callsite at once.
+func (s *daemonState) getClient(profileName string) (*sshx.Client, *config.Profile, error) {
+	c, p, release, err := s.acquireClient(profileName)
+	if err != nil {
+		return nil, p, err
+	}
+	release()
+	return c, p, nil
 }
 
 func (s *daemonState) handleLs(req Request) Response {
-	c, profile, err := s.getClient(req.Profile)
+	c, profile, release, err := s.acquireClient(req.Profile)
 	if err != nil {
 		return Response{OK: false, Err: err.Error()}
 	}
+	defer release()
 	// Use the caller's cwd (sent in the request); fall back to default for
 	// safety only.
 	cwd := req.Cwd
@@ -661,10 +764,11 @@ func (s *daemonState) prefetchSubdirs(profileName, parent string, entries []stri
 			fmt.Fprintln(os.Stderr, "daemon prefetch panic:", r)
 		}
 	}()
-	c, _, err := s.getClient(profileName)
+	c, _, release, err := s.acquireClient(profileName)
 	if err != nil {
 		return
 	}
+	defer release()
 	parent = strings.TrimRight(parent, "/") + "/"
 	prefetched := 0
 	for _, e := range entries {
@@ -691,10 +795,11 @@ func (s *daemonState) prefetchSubdirs(profileName, parent string, entries []stri
 // cache; reuse it for the daemon's in-memory cache too. (Defined there.)
 
 func (s *daemonState) handleCd(req Request) Response {
-	c, _, err := s.getClient(req.Profile)
+	c, _, release, err := s.acquireClient(req.Profile)
 	if err != nil {
 		return Response{OK: false, Err: err.Error()}
 	}
+	defer release()
 	current := req.Cwd
 	if current == "" {
 		current = "~"
@@ -759,11 +864,12 @@ func (s *daemonState) handleStreamRun(req Request, wr *bufio.Writer, wrMu *sync.
 		_ = emit(streamChunk{K: "fail", Err: why})
 	}
 
-	c, _, err := s.getClient(req.Profile)
+	c, _, release, err := s.acquireClient(req.Profile)
 	if err != nil {
 		fail(err.Error())
 		return
 	}
+	defer release()
 	sess, err := c.Conn.NewSession()
 	if err != nil {
 		fail("new session: " + err.Error())
@@ -862,11 +968,12 @@ func (s *daemonState) handleRun(req Request) Response {
 		close(entry.done)
 	}()
 
-	c, _, err := s.getClient(req.Profile)
+	c, _, release, err := s.acquireClient(req.Profile)
 	if err != nil {
 		entry.resp = Response{OK: false, Err: err.Error()}
 		return entry.resp
 	}
+	defer release()
 	cwd := req.Cwd
 	res, err := c.RunCapture(req.Command, cwd)
 	if err != nil {
@@ -907,11 +1014,24 @@ func (s *daemonState) runGC() {
 
 func (s *daemonState) gc() {
 	now := time.Now()
+	var toClose []*sshx.Client
 	s.mu.Lock()
-	for name, pc := range s.pool {
-		if now.Sub(pc.lastUsed) > connIdleTTL {
-			_ = pc.client.Close()
+	for name, pcs := range s.pool {
+		// Keep busy conns; close idle ones individually. An idle slot
+		// inside a 4-conn pool can be GC'd without taking the other 3
+		// down with it.
+		kept := pcs[:0]
+		for _, pc := range pcs {
+			if pc.inflight.Load() == 0 && now.Sub(pc.lastUsed) > connIdleTTL {
+				toClose = append(toClose, pc.client)
+				continue
+			}
+			kept = append(kept, pc)
+		}
+		if len(kept) == 0 {
 			delete(s.pool, name)
+		} else {
+			s.pool[name] = kept
 		}
 	}
 	// Drop expired ls cache entries. Without this the map's keys grow
@@ -925,6 +1045,15 @@ func (s *daemonState) gc() {
 	}
 	idle := now.Sub(s.lastReq) > daemonIdleTTL
 	s.mu.Unlock()
+	// Close the evicted conns outside the mutex -- Close() can block
+	// on a slow socket teardown and we shouldn't hold up new
+	// acquires for that. Nil-guarded so test fixtures that build
+	// bare pooledClient values (no real SSH) don't panic.
+	for _, c := range toClose {
+		if c != nil {
+			_ = c.Close()
+		}
+	}
 	// Idle-shutdown only when there's nothing the daemon is uniquely
 	// hosting. Active tunnels live inside the daemon process: if we
 	// exit, every forwarder dies and nothing auto-restarts them
@@ -959,22 +1088,26 @@ func waitDaemonGone(maxWait time.Duration) {
 	}
 }
 
-// evictPooledClient drops the pooled SSH connection for `profileName`
-// without waiting for the idle-TTL GC. Used by the tunnel forwarder
-// after a transport crash so the next dial of the same profile
-// builds a fresh connection instead of reusing the dead one.
+// evictPooledClient drops every pooled SSH connection for
+// `profileName` without waiting for the idle-TTL GC. Used by the
+// tunnel forwarder after a transport crash so the next dial of the
+// same profile builds a fresh connection instead of reusing the
+// dead one. With multi-conn pools, all slots for the profile are
+// closed; a transport crash typically takes the whole connection
+// down anyway, but if one slot survived the next acquire will dial
+// fresh capacity into the empty pool.
 func (s *daemonState) evictPooledClient(profileName string) {
 	if profileName == "" {
 		return
 	}
 	s.mu.Lock()
-	pc, ok := s.pool[profileName]
-	if ok {
-		delete(s.pool, profileName)
-	}
+	pcs := s.pool[profileName]
+	delete(s.pool, profileName)
 	s.mu.Unlock()
-	if ok && pc.client != nil {
-		_ = pc.client.Close()
+	for _, pc := range pcs {
+		if pc.client != nil {
+			_ = pc.client.Close()
+		}
 	}
 }
 
@@ -992,24 +1125,23 @@ func (s *daemonState) handleDisconnect(req Request) Response {
 		return Response{OK: false, Err: "profile required"}
 	}
 	s.mu.Lock()
-	pc, ok := s.pool[req.Profile]
-	if ok {
-		delete(s.pool, req.Profile)
-	}
+	pcs := s.pool[req.Profile]
+	delete(s.pool, req.Profile)
 	cachePrefix := req.Profile + "\x00"
-	evictedCache := 0
 	for k := range s.lsCache {
 		if strings.HasPrefix(k, cachePrefix) {
 			delete(s.lsCache, k)
-			evictedCache++
 		}
 	}
 	s.mu.Unlock()
-	if ok && pc.client != nil {
-		_ = pc.client.Close()
+	hadAny := len(pcs) > 0
+	for _, pc := range pcs {
+		if pc.client != nil {
+			_ = pc.client.Close()
+		}
 	}
 	return Response{
-		OK:  ok,
+		OK:  hadAny,
 		Err: "", // ok=false here just means "wasn't connected"; not a failure
 	}
 }
@@ -1022,11 +1154,11 @@ func (s *daemonState) handleDisconnectAll(req Request) Response {
 	s.mu.Lock()
 	freed := make([]string, 0, len(s.pool))
 	pooled := make([]*pooledClient, 0, len(s.pool))
-	for name, pc := range s.pool {
+	for name, pcs := range s.pool {
 		freed = append(freed, name)
-		pooled = append(pooled, pc)
+		pooled = append(pooled, pcs...)
 	}
-	s.pool = map[string]*pooledClient{}
+	s.pool = map[string][]*pooledClient{}
 	// Wipe the full ls cache -- it was keyed on the profiles we
 	// just disconnected (plus possibly cold ones that haven't been
 	// pooled lately). Rebuild on demand.
@@ -1048,8 +1180,12 @@ func (s *daemonState) closeAll() {
 	s.stopAllTunnels()
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	for _, pc := range s.pool {
-		_ = pc.client.Close()
+	for _, pcs := range s.pool {
+		for _, pc := range pcs {
+			if pc.client != nil {
+				_ = pc.client.Close()
+			}
+		}
 	}
 	s.pool = nil
 }
