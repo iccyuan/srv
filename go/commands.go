@@ -20,7 +20,6 @@ import (
 	"srv/internal/launcher"
 	"srv/internal/mcp"
 	"srv/internal/mcpstats"
-	"srv/internal/moshx"
 	"srv/internal/project"
 	"srv/internal/recipe"
 	"srv/internal/session"
@@ -147,8 +146,6 @@ var subcommands = []subcommand{
 	{name: "hooks", handler: func(c cmdCtx) error { return hooks.Cmd(c.args, c.cfg) }},
 	{name: "history", handler: func(c cmdCtx) error { return history.Cmd(c.args, session.ID()) }},
 	{name: "recipe", handler: func(c cmdCtx) error { return recipe.Cmd(c.args, c.cfg, c.profileOverride) }},
-	{name: "mosh", handler: func(c cmdCtx) error { return moshx.ClientCmd(c.args, c.cfg, c.profileOverride) }},
-	{name: "mosh-server", noConfig: true, hidden: true, handler: func(c cmdCtx) error { return moshx.ServerCmd(c.args) }},
 
 	// Integrations / settings.
 	{name: "mcp", handler: func(c cmdCtx) error {

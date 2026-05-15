@@ -147,12 +147,6 @@ Integrations:
   srv recipe [list|show|save|rm|run]     named multi-step playbooks; positional $1..$9
                                          and named ${KEY} substitution. Steps separated
                                          by ;; in 'save -- step1 ;; step2'.
-  srv mosh [--cmd "..."] [args]          mosh-style UDP session: SSH bootstraps a
-                                         remote srv mosh-server, then traffic moves
-                                         to AES-GCM UDP that survives NAT rebind / Wi-Fi
-                                         to cellular. v1 limits: no predictive echo, no
-                                         cross-process session resume, server side is
-                                         Linux-only (uses /dev/ptmx).
   srv color [on|off|use [name]|list|status]
                                          CLI run colour, on by default (any platform).
                                          srv color off to disable per-shell. drop *.sh
@@ -317,11 +311,6 @@ Supervisor / 资源限制(对 srv run 和 srv -d 都生效):
                                          每次 tools/call 完整参数+结果回放
   srv recipe [list|show|save|rm|run]     命名多步剧本,支持 $1..$9 和 ${KEY} 替换。
                                          save -- s1 ;; s2 用 ;; 切分步骤。
-  srv mosh [--cmd "..."] [args]          mosh 风格 UDP 会话:SSH 引导远端
-                                         srv mosh-server,之后切到 AES-GCM UDP,
-                                         NAT 重绑/换网仍能续连。v1 限制:无预测
-                                         本地回显,不跨进程续会话,服务端仅支持
-                                         Linux(用 /dev/ptmx)。
   srv color [on|off|use [name]|list|status]
                                          CLI 远端命令彩色,默认开启(所有平台)。
                                          srv color off 关掉当前 shell;预设放
