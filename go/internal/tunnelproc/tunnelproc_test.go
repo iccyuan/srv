@@ -2,12 +2,52 @@ package tunnelproc
 
 import (
 	"os"
+	"os/exec"
 	"path/filepath"
+	"runtime"
 	"srv/internal/platform"
 	"strings"
 	"testing"
 	"time"
 )
+
+// freshDeadPID synthesises a PID that's recently exited so the
+// "dead" branch of ListStatuses is exercised cleanly. Hardcoding a
+// low number doesn't work -- PID 1 is init on Linux, PID 4 is
+// System on Windows, and even bumping to 32767 isn't safe in
+// containers / build sandboxes that have process trees in that
+// range. Spawning a no-op subprocess and waiting for it is the only
+// way to be sure.
+//
+// There's a tiny race window where the kernel might re-allocate
+// the returned PID to another process between cmd.Wait() and our
+// caller's PIDAlive check, but that window is microseconds wide on
+// a normal system and the test re-checks via platform.Proc.PIDAlive
+// before relying on the value.
+func freshDeadPID(t *testing.T) int {
+	t.Helper()
+	var cmd *exec.Cmd
+	if runtime.GOOS == "windows" {
+		// cmd.exe exit 0 is the cheapest no-op subprocess on
+		// Windows; spawns fast, exits immediately.
+		cmd = exec.Command("cmd", "/c", "exit", "0")
+	} else {
+		// sh -c '' on Unix is similarly cheap. Avoid /bin/true
+		// because Alpine's busybox-symlinked /bin/true may not
+		// exist on every build environment.
+		cmd = exec.Command("sh", "-c", "")
+	}
+	if err := cmd.Run(); err != nil {
+		t.Skipf("can't synthesise dead pid: %v", err)
+	}
+	pid := cmd.Process.Pid
+	// Defensive: in case the kernel did recycle the PID instantly,
+	// skip the test rather than flake on it.
+	if platform.Proc.PIDAlive(pid) {
+		t.Skipf("synthesised pid %d was recycled too fast; rerun", pid)
+	}
+	return pid
+}
 
 // withSrvHome rewires SRV_HOME so each test gets its own tunnels/
 // directory. Without the override, tests would race against the
@@ -70,17 +110,13 @@ func TestListStatusesSkipsDeadPIDs(t *testing.T) {
 	if err := WriteStatus(live); err != nil {
 		t.Fatal(err)
 	}
-	// Dead PID: a value extremely unlikely to be in use right now.
-	// Stay under 2^16 so it's at least plausible on every platform,
-	// but high enough that any reasonable initial PID is past it.
-	dead := Status{Name: "dead", Spec: "9001", PID: 1, Started: time.Now().Unix()}
-	if dead.PID == os.Getpid() {
-		// Extremely unlikely (we'd have to be PID 1 ourselves), but
-		// guard so the test isn't flaky in container init.
-		t.Skip("test pid happens to be 1; can't construct a dead-pid case")
-	}
-	// Force-write the dead-pid status without ListStatuses cleaning
-	// it up first.
+	// Dead PID: synthesize one by spawning a quick-exit subprocess
+	// and using its just-released PID. The original implementation
+	// hardcoded 1 as "unlikely to be alive," which was wrong on
+	// Linux (PID 1 is always init/systemd) and caused the CI
+	// failure that prompted this fix.
+	deadPID := freshDeadPID(t)
+	dead := Status{Name: "dead", Spec: "9001", PID: deadPID, Started: time.Now().Unix()}
 	if err := WriteStatus(dead); err != nil {
 		t.Fatal(err)
 	}
