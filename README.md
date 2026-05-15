@@ -76,7 +76,7 @@ srv "ps aux | grep nginx"    # 带管道的命令需要本地 shell 引号
 | 诊断与本地辅助 | `check`, `doctor`, `disconnect` |
 | 集成、服务与界面 | `mcp`, `guard`, `color`, `daemon`, `ui` |
 | 历史与钩子 | `history`, `hooks` |
-| 剧本与 UDP | `recipe`, `mosh` |
+| 剧本 | `recipe` |
 
 常用全局选项：
 
@@ -460,33 +460,6 @@ srv recipe save deploy --desc "rolling deploy" -- \
   'tail -n 20 /var/log/${SVC}.log'
 srv recipe run deploy SVC=myapp
 ```
-
-### Mosh-style UDP 会话 (`srv mosh`)
-
-实验性:仿照 mosh 的设计,在 SSH 之上再叠一层 AES-GCM 加密的 UDP 传输。SSH 只负责一次引导握手,之后流量走 UDP,客户端 NAT 重绑 / Wi-Fi → 流量网切换都不会断会话(在同一进程内)。
-
-**v1 的边界(请阅读再用):**
-
-- 远端必须有 `srv` 二进制,且系统是 Linux(server 端 PTY 通过 `/dev/ptmx` + `TIOCSPTLCK`/`TIOCGPTN` ioctl 拿,macOS/BSD/Windows 的 server 端不支持 —— 客户端在所有 OS 上都能用)。
-- 不实现 mosh 的预测本地回显;键入延迟就是网络真实延迟。
-- 不实现 mosh 的终端状态同步协议;输出按帧流式传送,断线缓冲只到 RTO 上限。
-- 不支持跨进程续会话(关掉 `srv mosh` 再开就是新会话,旧服务端 30 分钟空闲后超时退出)。
-- 真实可用场景:`tail -f`、`top`、交互式 shell —— 都验证了。
-
-| 命令 | 作用 |
-|---|---|
-| `srv mosh` | 启动一个 mosh 风格的 shell。默认运行远端 `$SHELL -l`。 |
-| `srv mosh --cmd "<远端命令>"` | 只跑一条命令(类似 `srv -t`),但走 UDP 传输。 |
-| `srv mosh --idle 1h` | 服务器端无流量 1h 后自动退出(默认 30m)。 |
-| `srv mosh-server` | 内部子命令,只在 SSH 引导阶段被远端 shell 启动,不是用户直接调用的。 |
-
-实现细节(感兴趣的话):
-
-- 单帧:`[12B nonce][密文][16B GCM tag]`。Nonce = 4 字节方向标签(`CTOS`/`STOC`)+ 8 字节单调计数器,所以一个 32B 密钥能放心地在两个方向上各自计数不冲突。
-- 帧载荷:`seq(8B) ack(8B) kind(1B) body`。`seq=0` 用于 ACK-only / Bye,不占序号空间。
-- 接收端按 seq 严格保序投递;丢包通过 RTO 重传(默认 200ms 起始,封顶 2s,指数退避)。
-- 漫游靠两个机制:GCM 验证保证只有持密钥方能伪装客户端;服务端在 GCM 通过后立即采纳新源地址。
-- 加密代码 + 漫游测试:`internal/moshx/transport_test.go`(含一个 in-process 漫游用例)。
 
 ### 命令历史
 
