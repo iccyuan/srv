@@ -120,6 +120,58 @@ func TestStatusFilePathHonoursSrvHome(t *testing.T) {
 	}
 }
 
+func TestPIDStartRoundtripForOurOwnPID(t *testing.T) {
+	// Querying our own PID must succeed on Linux + Windows (the
+	// platforms we implemented). macOS/BSD return (0, false) which
+	// is also a valid answer -- the test just asserts whatever we
+	// got is internally consistent.
+	got, ok := pidStartTime(os.Getpid())
+	if !ok {
+		t.Skip("platform doesn't expose process start time (fallback path)")
+	}
+	// A live process's start time must be in the past (nanos < now).
+	if got >= time.Now().UnixNano() {
+		t.Errorf("pid_start %d is in the future vs now %d", got, time.Now().UnixNano())
+	}
+	// And not absurdly far in the past (an hour is generous).
+	if time.Now().UnixNano()-got > int64(time.Hour) {
+		t.Errorf("pid_start %d is more than an hour ago; we just started", got)
+	}
+}
+
+func TestPIDAliveMatchAcceptsCorrectStart(t *testing.T) {
+	start, ok := pidStartTime(os.Getpid())
+	if !ok {
+		t.Skip("no pidStartTime support")
+	}
+	if !pidAliveMatch(os.Getpid(), start) {
+		t.Error("our own pid + start time should match")
+	}
+}
+
+func TestPIDAliveMatchRejectsWrongStart(t *testing.T) {
+	start, ok := pidStartTime(os.Getpid())
+	if !ok {
+		t.Skip("no pidStartTime support")
+	}
+	// Pretend the recorded start was way in the past -- PID reuse
+	// case. Liveness must report dead because the PID survived but
+	// the recorded process didn't.
+	off := start - int64(time.Hour)
+	if pidAliveMatch(os.Getpid(), off) {
+		t.Error("mismatched start time should report dead")
+	}
+}
+
+func TestPIDAliveMatchFallsBackOnZeroStart(t *testing.T) {
+	// Status files written before this feature have PIDStart=0;
+	// pidAliveMatch must degrade to PID-only liveness instead of
+	// rejecting them outright.
+	if !pidAliveMatch(os.Getpid(), 0) {
+		t.Error("legacy status with PIDStart=0 should keep matching by PID alone")
+	}
+}
+
 func TestFormatStartedAgo(t *testing.T) {
 	now := time.Now().Unix()
 	cases := []struct {

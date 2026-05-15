@@ -521,6 +521,20 @@ func (c *Client) RunInteractive(command string, cwd string, tty bool) (int, erro
 		if restore != nil {
 			defer restore()
 		}
+		// Explicit VT-output enable on Windows so ANSI escape codes
+		// from the remote render as colour/cursor moves rather than
+		// visible garbage. No-op on Unix and on modern Windows
+		// terminals that already enabled the bit.
+		restoreVT := srvtty.EnableLocalVTOutput()
+		defer restoreVT()
+		// Forward local window-size changes to the remote PTY so
+		// vim/htop/less keep redrawing at the right dimensions when
+		// the user resizes their terminal mid-session. SIGWINCH on
+		// Unix, polled GetConsoleScreenBufferInfo on Windows.
+		stopResize := srvtty.WatchWindowResize(func(cols, rows int) {
+			_ = sess.WindowChange(rows, cols)
+		})
+		defer stopResize()
 	}
 
 	sess.Stdout = os.Stdout
@@ -577,6 +591,18 @@ func (c *Client) Shell(cwd string) (int, error) {
 	if restore != nil {
 		defer restore()
 	}
+	// VT-output enable for ANSI escape rendering on Windows; no-op
+	// on Unix and on terminals that already have the flag set.
+	restoreVT := srvtty.EnableLocalVTOutput()
+	defer restoreVT()
+	// Window-size forwarding: same rationale as RunInteractive's PTY
+	// branch. Without this the shell renders at the size it was
+	// requested with, and a maximize-window action mid-session leaves
+	// half the screen unused.
+	stopResize := srvtty.WatchWindowResize(func(cols, rows int) {
+		_ = sess.WindowChange(rows, cols)
+	})
+	defer stopResize()
 
 	sess.Stdin = os.Stdin
 	sess.Stdout = os.Stdout

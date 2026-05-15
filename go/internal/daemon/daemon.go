@@ -241,6 +241,61 @@ func daemonSocketPath() string {
 	return filepath.Join(srvpath.Dir(), "daemon.sock")
 }
 
+// daemonPortPath holds the TCP loopback port number when we couldn't
+// bind a unix socket -- the old-Windows / Server 2016 fallback path
+// described in daemonListen's comment.
+func daemonPortPath() string {
+	return filepath.Join(srvpath.Dir(), "daemon.port")
+}
+
+// daemonListen picks a transport for the daemon listener. Unix
+// domain socket is the preferred path (cheaper, naturally
+// user-private, no port allocation); TCP loopback is the fallback
+// for hosts that don't support AF_UNIX. Windows 10 1803+ and Server
+// 2019+ have native AF_UNIX, so the fast path covers everything
+// modern; older Win10 / Server 2016 boxes are the audience for the
+// fallback.
+//
+// Security note: TCP loopback is technically reachable by any local
+// user on the same machine. We accept that exposure for the
+// fallback case because it only fires when unix sockets are flat-out
+// unavailable, and the alternative is "daemon can't run at all".
+// Users on shared hosts that need AF_UNIX semantics should upgrade
+// the OS.
+func daemonListen() (net.Listener, transportInfo, error) {
+	sockPath := daemonSocketPath()
+	if l, err := net.Listen("unix", sockPath); err == nil {
+		_ = os.Chmod(sockPath, 0o600)
+		// Clean up any stale port file from a previous TCP-fallback
+		// daemon run; readers prefer unix when present so a stale
+		// port file is at best confusing, at worst hides a stale-
+		// port issue behind a working unix socket.
+		_ = os.Remove(daemonPortPath())
+		return l, transportInfo{kind: "unix", addr: sockPath}, nil
+	}
+	// Unix socket failed -- fall back to TCP loopback with an
+	// ephemeral port. ":0" lets the kernel pick; we write the
+	// resolved port to a file so clients know where to dial.
+	l, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		return nil, transportInfo{}, fmt.Errorf("listen tcp: %v", err)
+	}
+	port := l.Addr().(*net.TCPAddr).Port
+	if err := os.WriteFile(daemonPortPath(), []byte(fmt.Sprintf("%d", port)), 0o600); err != nil {
+		_ = l.Close()
+		return nil, transportInfo{}, fmt.Errorf("write port file: %v", err)
+	}
+	return l, transportInfo{kind: "tcp", addr: fmt.Sprintf("127.0.0.1:%d", port)}, nil
+}
+
+// transportInfo carries the chosen listener's identity through to
+// the daemon's logging + cleanup paths. kind is "unix" or "tcp";
+// addr is the human-readable address we just bound.
+type transportInfo struct {
+	kind string
+	addr string
+}
+
 // Cmd starts the daemon listener (foreground). Ctrl-C stops it
 // cleanly and unlinks the socket file.
 func Cmd(args []string) error {
@@ -275,9 +330,9 @@ func Cmd(args []string) error {
 	}
 	sockPath := daemonSocketPath()
 	_ = os.MkdirAll(filepath.Dir(sockPath), 0o755)
-	// Best-effort cleanup of stale socket.
+	// Best-effort cleanup of stale socket / port file. Ping covers
+	// both transports because the client side also tries both.
 	if _, err := os.Stat(sockPath); err == nil {
-		// Try a quick ping; if unreachable, remove.
 		if !Ping() {
 			_ = os.Remove(sockPath)
 		} else {
@@ -285,14 +340,21 @@ func Cmd(args []string) error {
 			return fmt.Errorf("")
 		}
 	}
+	if _, err := os.Stat(daemonPortPath()); err == nil {
+		if !Ping() {
+			_ = os.Remove(daemonPortPath())
+		} else {
+			fmt.Fprintln(os.Stderr, "daemon already running (TCP fallback)")
+			return fmt.Errorf("")
+		}
+	}
 
-	listener, err := net.Listen("unix", sockPath)
+	listener, transport, err := daemonListen()
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "daemon listen:", err)
 		return fmt.Errorf("")
 	}
-	_ = os.Chmod(sockPath, 0o600)
-	fmt.Fprintln(os.Stderr, "srv daemon listening at", sockPath)
+	fmt.Fprintf(os.Stderr, "srv daemon listening at %s (%s)\n", transport.addr, transport.kind)
 
 	state := &daemonState{
 		pool:        map[string][]*pooledClient{},
@@ -345,7 +407,12 @@ func Cmd(args []string) error {
 			select {
 			case <-state.stopCh:
 				state.closeAll()
+				// Clean up whichever transport we used. Best-effort
+				// on each -- a missing file is fine, an unremovable
+				// file is also non-fatal (next daemon's startup
+				// cleans).
 				_ = os.Remove(sockPath)
+				_ = os.Remove(daemonPortPath())
 				return nil
 			default:
 				fmt.Fprintln(os.Stderr, "daemon accept:", err)

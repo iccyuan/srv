@@ -125,6 +125,16 @@ func loadOrCreateKey() ([]byte, error) {
 	if _, err := f.Write(buf); err != nil {
 		return nil, fmt.Errorf("atrest: write key: %v", err)
 	}
+	// Tighten the file ACL beyond what 0600 conveys on this platform.
+	// On Unix that's a no-op (POSIX mode already covers it); on
+	// Windows we apply an explicit DACL that grants only the current
+	// user SID full control, denying inheritance from the parent. The
+	// helper is platform-shimmed; failure is non-fatal so a missing
+	// privilege (e.g. running under a stripped-down service account)
+	// can't break key creation entirely.
+	if err := hardenKeyFile(path); err != nil {
+		fmt.Fprintf(os.Stderr, "srv: atrest: harden key acl: %v\n", err)
+	}
 	return buf, nil
 }
 

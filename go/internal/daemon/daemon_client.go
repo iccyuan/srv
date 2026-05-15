@@ -8,18 +8,34 @@ import (
 	"net"
 	"os"
 	"srv/internal/sshx"
+	"strings"
 	"time"
 )
 
-// Dial connects to the daemon socket with a short timeout. Returns
-// nil + nil error if no daemon is reachable (the caller falls back to
-// direct dial). Returns an error for unexpected failures.
+// DialSock opens a connection to the daemon's RPC listener. It tries
+// the unix socket first (the historical and preferred transport),
+// and falls back to the TCP loopback port persisted at
+// ~/.srv/daemon.port when unix sockets are unavailable -- the path
+// the daemon picked at startup based on what the kernel supports.
+//
+// Returns nil (no error) when no daemon is reachable so callers can
+// uniformly fall through to a direct SSH dial.
 func DialSock(timeout time.Duration) net.Conn {
-	conn, err := net.DialTimeout("unix", daemonSocketPath(), timeout)
-	if err != nil {
-		return nil
+	if conn, err := net.DialTimeout("unix", daemonSocketPath(), timeout); err == nil {
+		return conn
 	}
-	return conn
+	// Fall back to TCP loopback if a port file is present. We don't
+	// dial TCP unconditionally because that would mask real "no
+	// daemon" cases as long-timeout connection refused.
+	if b, err := os.ReadFile(daemonPortPath()); err == nil {
+		port := strings.TrimSpace(string(b))
+		if port != "" {
+			if conn, err := net.DialTimeout("tcp", "127.0.0.1:"+port, timeout); err == nil {
+				return conn
+			}
+		}
+	}
+	return nil
 }
 
 // Ping returns true if a daemon is alive at the socket path.

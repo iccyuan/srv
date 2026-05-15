@@ -38,6 +38,16 @@ func StatusPath(name string) string {
 // Status mirrors daemon.TunnelInfo so callers that already speak
 // that shape can union daemon-hosted + independent into one map
 // without an extra translation layer.
+//
+// PIDStart is the OS-reported creation time of the subprocess in
+// unix nanoseconds, used to detect PID reuse: if a host runs long
+// enough for PIDs to wrap, a crashed tunnel's status file might
+// otherwise report "alive" for some unrelated new process. With
+// PIDStart we also verify the running process's creation time
+// matches what we wrote, catching the reuse case. Zero means the
+// platform-specific lookup failed (e.g. macOS without /proc) and
+// we fall back to PID-only liveness, which is the historical
+// behaviour.
 type Status struct {
 	Name     string `json:"name"`
 	Type     string `json:"type"`
@@ -47,6 +57,7 @@ type Status struct {
 	Started  int64  `json:"started,omitempty"`
 	OnDemand bool   `json:"on_demand,omitempty"`
 	PID      int    `json:"pid"`
+	PIDStart int64  `json:"pid_start,omitempty"`
 }
 
 // WriteStatus persists `st` to ~/.srv/tunnels/<name>.json. Created
@@ -122,10 +133,10 @@ func ListStatuses() (map[string]*Status, error) {
 		if rerr != nil || st == nil {
 			continue
 		}
-		if !pidAlive(st.PID) {
-			// Stale file from a previous crash. Remove so future
-			// listings stay accurate; not fatal if remove fails
-			// (e.g. perms).
+		if !pidAliveMatch(st.PID, st.PIDStart) {
+			// Stale file from a previous crash or a recycled PID.
+			// Remove so future listings stay accurate; not fatal
+			// if remove fails (e.g. perms).
 			RemoveStatus(name)
 			continue
 		}
@@ -143,9 +154,10 @@ func ListStatuses() (map[string]*Status, error) {
 func Spawn(name string) error {
 	if _, err := ReadStatus(name); err == nil {
 		// Pre-existing status -- check liveness. If the prior PID
-		// is dead, ListStatuses would have removed the file, but
-		// we're called per-name here so we re-check explicitly.
-		if st, _ := ReadStatus(name); st != nil && pidAlive(st.PID) {
+		// is dead (or reused since), ListStatuses would have
+		// removed the file, but we're called per-name here so we
+		// re-check explicitly.
+		if st, _ := ReadStatus(name); st != nil && pidAliveMatch(st.PID, st.PIDStart) {
 			return fmt.Errorf("tunnel %q already running (pid %d)", name, st.PID)
 		}
 		RemoveStatus(name)
@@ -234,6 +246,36 @@ func pidAlive(pid int) bool {
 		return false
 	}
 	return pidAliveImpl(pid)
+}
+
+// pidAliveMatch wraps pidAlive with a creation-time check. When
+// expectedStart is 0 (lookup failed or pre-feature status file), it
+// degrades to PID-only. When non-zero, the running PID's actual
+// creation time must match within 2 seconds (round-trip / clock-
+// skew slack), otherwise we conclude the PID was reused by an
+// unrelated process and report dead. Catches the classic
+// long-uptime-host PID-wrap case without false positives from
+// reasonable clock jitter.
+func pidAliveMatch(pid int, expectedStart int64) bool {
+	if !pidAlive(pid) {
+		return false
+	}
+	if expectedStart == 0 {
+		return true
+	}
+	got, ok := pidStartTime(pid)
+	if !ok {
+		// Platform can't tell us -- fall back to "alive enough".
+		return true
+	}
+	diff := got - expectedStart
+	if diff < 0 {
+		diff = -diff
+	}
+	// 2 seconds. The kernel's reported start time is monotonic for
+	// a single process, so any drift this large means a different
+	// process owns the PID now.
+	return diff < int64(2*1e9)
 }
 
 // DefFromConfig fetches the tunnel def from the user's config. Used

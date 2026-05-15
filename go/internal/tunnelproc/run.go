@@ -68,14 +68,22 @@ func Run(name string) error {
 		listen = net.JoinHostPort("127.0.0.1", strconv.Itoa(lp))
 	}
 
+	// Capture our own process creation time NOW, before any of the
+	// dial / listen work, so the recorded value is as close to the
+	// kernel's reported start time as we can get. A reader later
+	// uses pidAliveMatch to spot PID reuse: if our PID's creation
+	// time has changed by then, the listing code knows the original
+	// process is gone and we're a ghost.
+	myStart, _ := pidStartTime(os.Getpid())
 	st := Status{
-		Name:    name,
-		Type:    def.Type,
-		Spec:    def.Spec,
-		Profile: profileName,
-		Listen:  listen,
-		Started: time.Now().Unix(),
-		PID:     os.Getpid(),
+		Name:     name,
+		Type:     def.Type,
+		Spec:     def.Spec,
+		Profile:  profileName,
+		Listen:   listen,
+		Started:  time.Now().Unix(),
+		PID:      os.Getpid(),
+		PIDStart: myStart,
 	}
 	if err := WriteStatus(st); err != nil {
 		return fmt.Errorf("write status: %v", err)
