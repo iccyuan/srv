@@ -13,9 +13,9 @@ import (
 	"os/exec"
 	"path"
 	"path/filepath"
-	"runtime"
 	"srv/internal/clierr"
 	"srv/internal/config"
+	"srv/internal/platform"
 	"srv/internal/remote"
 	"srv/internal/transfer"
 	"strings"
@@ -58,16 +58,10 @@ func Open(args []string, cfg *config.Config, profileOverride string) error {
 }
 
 // openLocal hands `p` to the platform's default-app launcher.
-// Internal -- callers use Open instead.
+// Internal -- callers use Open instead. The per-OS dispatch lives
+// in internal/platform/platform_<goos>.go; this is a thin facade.
 func openLocal(p string) error {
-	switch runtime.GOOS {
-	case "windows":
-		return exec.Command("cmd", "/c", "start", "", p).Start()
-	case "darwin":
-		return exec.Command("open", p).Start()
-	default:
-		return exec.Command("xdg-open", p).Start()
-	}
+	return platform.Open.Open(p)
 }
 
 // Code implements `srv code [<remote_path>]`. Launches VS Code (or

@@ -11,9 +11,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
-	"os/exec"
-	"runtime"
 	"srv/internal/jobs"
+	"srv/internal/platform"
 	"time"
 )
 
@@ -43,29 +42,20 @@ func ForJob(j *jobs.Record) Payload {
 	}
 }
 
-// LocalToast pops a native OS notification. Best-effort -- missing
-// tool returns an error the caller logs.
+// LocalToast pops a native OS notification by delegating to the
+// platform package's Notifier. The OS-specific implementations
+// (osascript on darwin, notify-send on linux, PowerShell Popup on
+// windows) live in internal/platform/platform_<goos>_notify.go;
+// this function just formats the title + body strings.
 //
-//   - macOS:   osascript display notification
-//   - Linux:   notify-send (libnotify-bin)
-//   - Windows: PowerShell Wscript.Shell.Popup (no third-party module needed)
+// Best-effort: a missing notifier tool returns an error the caller
+// logs. The webhook side (see Webhook below) keeps working
+// regardless, so a headless server with no libnotify still emits
+// the post-job notification through that channel.
 func LocalToast(p Payload) error {
 	title := "srv: job " + p.ID + " finished"
 	body := fmt.Sprintf("%s @ %s", truncate(p.Cmd, 80), p.Profile)
-	switch runtime.GOOS {
-	case "darwin":
-		script := fmt.Sprintf(`display notification %q with title %q`, body, title)
-		return exec.Command("osascript", "-e", script).Run()
-	case "linux":
-		return exec.Command("notify-send", "-a", "srv", title, body).Run()
-	case "windows":
-		ps := fmt.Sprintf(
-			`$w=New-Object -ComObject WScript.Shell;$w.Popup(%q,5,%q,64) | Out-Null`,
-			body, title,
-		)
-		return exec.Command("powershell", "-NoProfile", "-WindowStyle", "Hidden", "-Command", ps).Run()
-	}
-	return fmt.Errorf("no local notifier on %s", runtime.GOOS)
+	return platform.Notif.Toast(title, body)
 }
 
 // Webhook POSTs the payload to url. 10s timeout; 2xx is success.

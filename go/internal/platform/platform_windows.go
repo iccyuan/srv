@@ -18,6 +18,22 @@ func init() {
 	Proc = windowsProcess{}
 	Term = windowsConsole{}
 	Sec = windowsCrypto{}
+	Stats = windowsStats{}
+	Notif = windowsNotifier{}
+	Open = windowsOpener{}
+}
+
+// windowsOpener routes through cmd.exe's start verb, which is the
+// equivalent of xdg-open / `open` on Windows: spawn the registered
+// handler for the URL/file's type and detach. The empty string
+// before `path` is cmd's required "window title" argument when
+// `path` happens to be quoted; without it, a quoted path like
+// "C:\Some Path\file.txt" gets interpreted AS the window title and
+// the file is never opened.
+type windowsOpener struct{}
+
+func (windowsOpener) Open(path string) error {
+	return exec.Command("cmd", "/c", "start", "", path).Start()
 }
 
 // --- Process -----------------------------------------------------

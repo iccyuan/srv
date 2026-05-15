@@ -91,13 +91,63 @@ type Crypto interface {
 	HardenKeyFile(path string) error
 }
 
-// Proc, Term, Sec are the package-level instances callers reach
-// for. Initialised exactly once per process by the platform_<goos>.go
-// init() that matches the build target. Tests may overwrite these
-// to inject stubs; restore the original value via defer to keep the
-// rest of the suite running against the real implementation.
+// SystemStats samples the local machine's CPU load + memory
+// percentage. Used by the `srv ui` dashboard's STATS panel; each OS
+// uses its native interface (/proc on Linux, sysctl+vm_stat on
+// macOS, Get-CimInstance on Windows). Implementations should set
+// Err on failure and return the partial sample so the UI can render
+// a "stats unavailable: <err>" line instead of going blank.
+type SystemStats interface {
+	Sample() Sample
+}
+
+// Sample carries one CPU + memory measurement. CPULoad is the
+// 1-minute load average on Unix or LoadPercentage/100 on Windows
+// (which doesn't map exactly but is the closest cheap signal). When
+// Err is non-empty the other fields may be zero or partial; the UI
+// renders Err inline below the chart.
+type Sample struct {
+	CPULoad    float64
+	MemPercent float64
+	Err        string
+}
+
+// Notifier pops a native OS notification. Best-effort: missing
+// notifier tools (notify-send not installed, osascript disabled,
+// PowerShell missing) return an error the caller logs. Used by the
+// daemon's job-completion watcher and any future "long task done"
+// callsite.
+type Notifier interface {
+	// Toast displays title + body via the OS's native notification
+	// path. Returns an error iff the OS-side tool failed.
+	Toast(title, body string) error
+}
+
+// Opener hands a path (or URL) to the OS's default-app launcher.
+// `srv open` and `srv code` use this to spawn the user's browser /
+// editor / explorer for a remote resource that's been materialised
+// locally. Implementations spawn the launcher and return without
+// waiting -- the foreground program doesn't block on the spawned
+// app.
+type Opener interface {
+	// Open hands `path` (file path or URL) to the OS's default-app
+	// launcher. Returns the exec error if the launcher itself
+	// failed to start; whether the launcher then succeeded at
+	// opening the file is the launcher's business.
+	Open(path string) error
+}
+
+// Proc, Term, Sec, Stats, Notif are the package-level instances
+// callers reach for. Initialised exactly once per process by the
+// platform_<goos>.go init() that matches the build target. Tests
+// may overwrite these to inject stubs; restore the original value
+// via defer to keep the rest of the suite running against the real
+// implementation.
 var (
-	Proc Process
-	Term Console
-	Sec  Crypto
+	Proc  Process
+	Term  Console
+	Sec   Crypto
+	Stats SystemStats
+	Notif Notifier
+	Open  Opener
 )
