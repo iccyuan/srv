@@ -107,7 +107,16 @@ func buildRunText(res *sshx.RunCaptureResult, cwd string) (string, int) {
 			truncated,
 		)
 	}
-	text += fmt.Sprintf("\n[exit %d cwd %s]", res.ExitCode, cwd)
+	// Don't spell out "exit 0" on success: Codex (and other MCP
+	// clients with pattern-matching log analysis) read the word
+	// "exit" as a failure signal even when followed by 0. Use
+	// [ok cwd ...] for the success case; reserve [exit N cwd ...]
+	// for the actually-non-zero codes where the word is accurate.
+	if res.ExitCode == 0 {
+		text += fmt.Sprintf("\n[ok cwd %s]", cwd)
+	} else {
+		text += fmt.Sprintf("\n[exit %d cwd %s]", res.ExitCode, cwd)
+	}
 	return text, truncated
 }
 

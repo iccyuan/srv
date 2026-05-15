@@ -34,6 +34,18 @@ type Record struct {
 	// when the remote `.exit` marker appears. Empty for still-running
 	// jobs.
 	Finished string `json:"finished,omitempty"`
+	// ExitCode is the captured remote exit code, set together with
+	// Finished. nil means "still running or not yet recorded" --
+	// pointer rather than int so 0 (clean completion) and "unset"
+	// stay distinguishable. The MCP path's tail_log uses Finished
+	// != "" to decide "this job is historical but I can still cat
+	// the log file"; ExitCode is the structured detail callers can
+	// surface to the user.
+	ExitCode *int `json:"exit_code,omitempty"`
+	// Killed marks records that were terminated via srv kill / MCP
+	// kill_job rather than completing on their own. Helps the UI
+	// and `srv jobs` distinguish "done" from "we cut it short."
+	Killed bool `json:"killed,omitempty"`
 	// Notified is true after the daemon has fired notifications
 	// (local toast + webhook) for this job's completion. Persisted
 	// so daemon restarts don't re-notify already-handled jobs.

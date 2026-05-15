@@ -79,6 +79,7 @@ Detached jobs (background on remote, log to ~/.srv-jobs/<id>.log):
   srv jobs notify on             enable OS toast on job completion
   srv jobs notify webhook URL    POST JSON to URL on completion
   srv jobs notify test           fire a sample notification
+  srv jobs prune [<id>]          drop finished records (all, or just one id)
   srv logs <id> [-f]             cat (or tail -f) the remote log
   srv kill <id>                  SIGTERM the remote process and forget it
 
@@ -246,6 +247,7 @@ const helpZH = `srv - 跨平台 SSH 远端命令工具,持久 cwd / 连接复用
   srv jobs notify on             job 完成时弹本地 OS 通知
   srv jobs notify webhook URL    job 完成时 POST JSON 到 URL
   srv jobs notify test           发一次测试通知
+  srv jobs prune [<id>]          删除已完成的 job 记录(全部或指定 id)
   srv logs <id> [-f]             cat(或 tail -f)远端日志
   srv kill <id>                  SIGTERM 远端进程并丢弃记录
 

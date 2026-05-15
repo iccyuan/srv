@@ -179,7 +179,10 @@ func TestBuildRunText_NoTruncation(t *testing.T) {
 	if !strings.Contains(text, "hello\nworld") {
 		t.Errorf("missing stdout: %q", text)
 	}
-	if !strings.Contains(text, "[exit 0 cwd /home/user]") {
+	// ExitCode 0 now renders as "ok" rather than "exit 0" so MCP
+	// clients with pattern-matching log analysis don't read the
+	// word "exit" as a failure signal on every successful command.
+	if !strings.Contains(text, "[ok cwd /home/user]") {
 		t.Errorf("missing footer: %q", text)
 	}
 }
@@ -209,7 +212,7 @@ func TestBuildRunText_TruncatesAtCap(t *testing.T) {
 	if !strings.Contains(text, "1234 bytes truncated") {
 		t.Errorf("missing truncation marker: %q", text[:200])
 	}
-	if !strings.Contains(text, "[exit 0 cwd /x]") {
+	if !strings.Contains(text, "[ok cwd /x]") {
 		t.Errorf("missing footer (truncated case): %q", text[len(text)-80:])
 	}
 }

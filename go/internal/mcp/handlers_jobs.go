@@ -120,20 +120,25 @@ tail -n %d %s
 				exitCode = n
 			}
 		}
-		// Job finished -- prune from local registry so list_jobs
-		// doesn't keep advertising it. The .log / .exit files on
-		// the remote stay; users can still tail historical logs
-		// manually if they want.
-		out := jf.Jobs[:0]
-		for _, x := range jf.Jobs {
-			if x.ID != j.ID {
-				out = append(out, x)
-			}
-		}
-		jf.Jobs = out
+		// Job finished -- record the outcome but KEEP the entry so
+		// follow-up tail_log calls can still surface the historical
+		// log. Earlier versions pruned the row here, which caused
+		// "no such job" on every post-completion tail_log even
+		// though the .log file was right where it had always been.
+		// Explicit cleanup is now `srv jobs prune` (CLI) or
+		// kill_job (still prunes, since the user is explicitly
+		// asking to discard).
+		j.Finished = time.Now().Format(time.RFC3339)
+		ec := exitCode
+		j.ExitCode = &ec
 		_ = jobs.Save(jf)
 	} else if strings.HasPrefix(statusLine, "STATUS=killed") {
 		status = "killed"
+		// External kill detected -- mark so subsequent list_jobs /
+		// tail_log calls can distinguish from a clean completion.
+		j.Finished = time.Now().Format(time.RFC3339)
+		j.Killed = true
+		_ = jobs.Save(jf)
 	} else if strings.HasPrefix(statusLine, "STATUS=running") {
 		status = "running"
 	}
@@ -183,13 +188,12 @@ func handleKillJob(args map[string]any, cfg *config.Config, profileOverride stri
 	}
 	cmd := fmt.Sprintf("kill -%s %d 2>/dev/null && echo killed || echo 'no such pid'", sig, j.Pid)
 	res, _ := remote.RunCapture(prof, "", cmd)
-	out := jf.Jobs[:0]
-	for _, x := range jf.Jobs {
-		if x.ID != j.ID {
-			out = append(out, x)
-		}
-	}
-	jf.Jobs = out
+	// Mark the job as killed but keep the record so tail_log still
+	// works for post-mortem inspection. The CLI `srv kill` is the
+	// place users go for explicit cleanup; MCP's kill_job is more
+	// often "please stop this, I'll look at the log after."
+	j.Finished = time.Now().Format(time.RFC3339)
+	j.Killed = true
 	_ = jobs.Save(jf)
 	text := strings.TrimSpace(res.Stdout)
 	if text == "" {
