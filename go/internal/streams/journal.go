@@ -69,7 +69,62 @@ func Journal(args []string, cfg *config.Config, profileOverride string) error {
 			fmt.Fprint(os.Stdout, line)
 		}
 	}
-	return StreamWithReconnect(profile, remoteCmd, onChunk)
+	return StreamWithReconnectResumable(profile, &journalResumer{base: jc}, onChunk)
+}
+
+// journalResumer rebuilds the journalctl invocation across reconnects.
+// On the first attempt it issues the user's command verbatim; on each
+// reconnect it overrides --since with the timestamp parsed off the
+// last seen stdout line. The first stdout chunk after the reconnect is
+// matched against the cached lastLine and dropped when identical --
+// journalctl --since=<ts> is inclusive of the boundary second, so the
+// seam line is otherwise printed twice.
+//
+// We extract the timestamp from the `-o short-iso` prefix the journal
+// command always carries (`2026-05-15T10:30:45+0800 host ...`). When
+// no timestamp has been observed yet, the resumer falls back to the
+// user's original --since (or no --since), so a reconnect that
+// happens before the first line still works.
+type journalResumer struct {
+	base     JournalCmd
+	sinceISO string // last observed ISO timestamp, "" until first line
+	lastLine string // last stdout line, used for boundary dedupe
+}
+
+// journalISOTimestampPattern matches the leading "2026-05-15T10:30:45+0800"
+// timestamp short-iso always prints. Anchored at the start so a
+// timestamp appearing in the middle of a payload won't fool us.
+var journalISOTimestampPattern = regexp.MustCompile(`^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}[+-]\d{4}`)
+
+func (j *journalResumer) Cmd() string {
+	cmd := j.base
+	if j.sinceISO != "" {
+		// Override --since regardless of whether the user originally
+		// supplied one; we want to resume from where we stopped, not
+		// from the user's original window-start.
+		cmd.Since = j.sinceISO
+		// Also force --lines=0 so the resume doesn't re-emit the
+		// original -n N backlog all over again.
+		cmd.Lines = 0
+	}
+	return cmd.ToRemoteCommand()
+}
+
+func (j *journalResumer) Observe(kind sshx.StreamChunkKind, line string) {
+	if kind != sshx.StreamStdout {
+		return
+	}
+	if m := journalISOTimestampPattern.FindString(line); m != "" {
+		j.sinceISO = m
+	}
+	j.lastLine = line
+}
+
+func (j *journalResumer) Suppress(kind sshx.StreamChunkKind, line string) bool {
+	if kind != sshx.StreamStdout {
+		return false
+	}
+	return line == j.lastLine
 }
 
 // JournalCmd holds the parsed flags ready to be assembled into a

@@ -3,6 +3,7 @@ package sshx
 import (
 	"bufio"
 	"bytes"
+	"compress/gzip"
 	"errors"
 	"fmt"
 	"io"
@@ -80,12 +81,28 @@ func DialOpts(profile *config.Profile, opts DialOptions) (*Client, error) {
 	}
 
 	mkConfig := func(user string) *ssh.ClientConfig {
-		return &ssh.ClientConfig{
-			User:            user,
-			Auth:            auths,
-			HostKeyCallback: hkc,
-			Timeout:         timeout,
+		cfg := &ssh.ClientConfig{
+			User:              user,
+			Auth:              auths,
+			HostKeyCallback:   hkc,
+			Timeout:           timeout,
+			HostKeyAlgorithms: profile.HostKeyAlgorithms,
 		}
+		// Pin crypto algorithms only when the profile explicitly listed
+		// some -- a nil slice means "library default" which is what we
+		// want for the common case. The fields live on the embedded
+		// ssh.Config struct; we set them directly so the ssh library
+		// uses our preference order in the handshake.
+		if len(profile.Ciphers) > 0 {
+			cfg.Ciphers = profile.Ciphers
+		}
+		if len(profile.MACs) > 0 {
+			cfg.MACs = profile.MACs
+		}
+		if len(profile.KeyExchanges) > 0 {
+			cfg.KeyExchanges = profile.KeyExchanges
+		}
+		return cfg
 	}
 
 	attempts := profile.GetDialAttempts()
@@ -370,7 +387,20 @@ type RunCaptureResult struct {
 // RunCapture runs `command` on the remote (in the persisted cwd, if cwd
 // is non-empty), capturing both stdout and stderr. Returns a result struct
 // with the exit code populated even on non-zero exits.
+//
+// When the client's profile has compress_streams=true, this routes
+// through runCaptureGzip which gzip-wraps stdout on the wire and
+// decompresses locally. Stderr stays raw because it's typically small.
+// On any decode failure we fall back to the un-compressed path so a
+// remote without gzip can't break the call.
 func (c *Client) RunCapture(command string, cwd string) (*RunCaptureResult, error) {
+	if c.Profile != nil && c.Profile.GetCompressStreams() {
+		if res, ok := c.runCaptureGzip(command, cwd); ok {
+			return res, nil
+		}
+		// Fall through to the un-compressed path on any glitch -- a
+		// remote without gzip, a pipefail-unaware /bin/sh, etc.
+	}
 	full := WrapWithCwd(command, cwd)
 	sess, err := c.Conn.NewSession()
 	if err != nil {
@@ -402,6 +432,56 @@ func (c *Client) RunCapture(command string, cwd string) (*RunCaptureResult, erro
 		ExitCode: exit,
 		Cwd:      cwd,
 	}, nil
+}
+
+// runCaptureGzip runs the command with its stdout piped through gzip
+// on the remote, decompresses locally, and returns a normal capture
+// result. The wrapper sets pipefail so the actual command's exit
+// propagates back (without it, the trailing gzip would always win
+// with 0). Returns ok=false on any decode glitch so the caller can
+// fall back to the plain path.
+func (c *Client) runCaptureGzip(command, cwd string) (*RunCaptureResult, bool) {
+	full := WrapWithCwd(command, cwd)
+	wrapped := "set -o pipefail; (" + full + ") | gzip -c -1"
+	sess, err := c.Conn.NewSession()
+	if err != nil {
+		return nil, false
+	}
+	defer sess.Close()
+	var stdoutGz, stderr bytes.Buffer
+	sess.Stdout = &stdoutGz
+	sess.Stderr = &stderr
+	runErr := sess.Run(wrapped)
+	exit := 0
+	if runErr != nil {
+		var ee *ssh.ExitError
+		if !errors.As(runErr, &ee) {
+			return nil, false
+		}
+		exit = ee.ExitStatus()
+	}
+	// gzip on an empty pipeline still produces a 10-byte minimal
+	// stream; "" stdout would mean the remote shell never even
+	// reached gzip, so we treat zero bytes as a decode miss and
+	// fall back.
+	if stdoutGz.Len() == 0 {
+		return &RunCaptureResult{Stdout: "", Stderr: stderr.String(), ExitCode: exit, Cwd: cwd}, true
+	}
+	gr, gerr := gzip.NewReader(&stdoutGz)
+	if gerr != nil {
+		return nil, false
+	}
+	defer gr.Close()
+	plain, rerr := io.ReadAll(gr)
+	if rerr != nil {
+		return nil, false
+	}
+	return &RunCaptureResult{
+		Stdout:   string(plain),
+		Stderr:   stderr.String(),
+		ExitCode: exit,
+		Cwd:      cwd,
+	}, true
 }
 
 // RunInteractive streams the remote command's stdio to the local terminal.

@@ -88,15 +88,6 @@ see also:
 		return clierr.Errf(1, "%v", err)
 	}
 
-	// Build the remote command. `tail -F` (capital F) follows by name
-	// and reopens on truncate / rotation -- the safe default for log
-	// files. -n N controls the initial backfill across all files.
-	quoted := make([]string, len(paths))
-	for i, p := range paths {
-		quoted[i] = srvtty.ShQuotePath(p)
-	}
-	remoteCmd := fmt.Sprintf("tail -F -n %d %s", initial, strings.Join(quoted, " "))
-
 	fmt.Fprintf(os.Stderr,
 		"srv tail: %s   (Ctrl-C to stop, auto-reconnect on drop)\n",
 		strings.Join(paths, " "))
@@ -111,18 +102,131 @@ see also:
 			fmt.Fprint(os.Stdout, line)
 		}
 	}
-	return StreamWithReconnect(profile, remoteCmd, onChunk)
+	return StreamWithReconnectResumable(profile, newTailResumer(paths, initial), onChunk)
 }
+
+// newTailResumer picks the right resumer for a tail invocation:
+//
+//   - single file -> tailByteResumer: tracks bytes-of-stdout seen, on
+//     reconnect uses `tail -F -c +<bytes+1>` so the remote re-opens at
+//     the exact byte we stopped at and the user sees no repeats. If
+//     the file was rotated during the gap, tail -F still picks the
+//     new inode up; the byte offset becomes "from start of new file"
+//     because the offset exceeds the new file's size only briefly.
+//   - multi file  -> tailMultiResumer: there's no way to attribute
+//     interleaved "==> path <==" output back to per-file byte offsets
+//     reliably, so on reconnect we just drop the initial -n N backlog
+//     (set to 0). The user loses the disconnect-window diff for
+//     multi-file tails but at least doesn't see N lines of stale
+//     backlog re-printed on every reconnect.
+func newTailResumer(paths []string, initial int) StreamResumer {
+	if len(paths) == 1 {
+		return &tailByteResumer{path: paths[0], initial: initial}
+	}
+	return &tailMultiResumer{paths: paths, initial: initial}
+}
+
+type tailByteResumer struct {
+	path     string
+	initial  int   // -n N for first attempt
+	bytes    int64 // stdout bytes seen so far (counts toward resume offset)
+	consumed bool  // true once initial backlog has been emitted at least once
+}
+
+func (t *tailByteResumer) Cmd() string {
+	quoted := srvtty.ShQuotePath(t.path)
+	if !t.consumed {
+		return fmt.Sprintf("tail -F -n %d %s", t.initial, quoted)
+	}
+	// +N is 1-indexed (byte position to start AT), so we add 1 to the
+	// count of bytes already delivered.
+	return fmt.Sprintf("tail -F -c +%d %s", t.bytes+1, quoted)
+}
+
+func (t *tailByteResumer) Observe(kind sshx.StreamChunkKind, line string) {
+	if kind == sshx.StreamStdout {
+		t.bytes += int64(len(line))
+		t.consumed = true
+	}
+}
+
+func (t *tailByteResumer) Suppress(sshx.StreamChunkKind, string) bool {
+	// No boundary dupe to drop: -c +N skips the exact byte we already
+	// counted, so the next chunk is naturally the NEW data.
+	return false
+}
+
+type tailMultiResumer struct {
+	paths    []string
+	initial  int
+	consumed bool
+}
+
+func (t *tailMultiResumer) Cmd() string {
+	quoted := make([]string, len(t.paths))
+	for i, p := range t.paths {
+		quoted[i] = srvtty.ShQuotePath(p)
+	}
+	n := t.initial
+	if t.consumed {
+		// Multi-file resume: skip the backlog on reconnect so the user
+		// doesn't see the trailing N lines from each file re-printed.
+		// We can't recover the disconnect-window content either way.
+		n = 0
+	}
+	return fmt.Sprintf("tail -F -n %d %s", n, strings.Join(quoted, " "))
+}
+
+func (t *tailMultiResumer) Observe(kind sshx.StreamChunkKind, _ string) {
+	if kind == sshx.StreamStdout {
+		t.consumed = true
+	}
+}
+
+func (t *tailMultiResumer) Suppress(sshx.StreamChunkKind, string) bool { return false }
+
+// StreamResumer is the per-stream policy that decides which remote
+// command to issue on the first attempt and after each reconnect.
+// `Cmd` is called once per loop iteration; `Observe` runs for every
+// stdout/stderr line so the resumer can update its position (byte
+// counter, last-seen timestamp, cursor, etc.). `Suppress` is consulted
+// for the very first line after a reconnect so impls can drop the
+// duplicate that resume mechanisms typically re-emit at the boundary.
+type StreamResumer interface {
+	Cmd() string
+	Observe(kind sshx.StreamChunkKind, line string)
+	Suppress(kind sshx.StreamChunkKind, line string) bool
+}
+
+// staticResumer is the no-resume implementation: same command every
+// loop, no state. Used when the caller has a fixed command they want
+// rerun verbatim after a reconnect (the original Tail behaviour).
+type staticResumer struct{ cmd string }
+
+func (s staticResumer) Cmd() string                                { return s.cmd }
+func (s staticResumer) Observe(sshx.StreamChunkKind, string)       {}
+func (s staticResumer) Suppress(sshx.StreamChunkKind, string) bool { return false }
 
 // StreamWithReconnect runs `remoteCmd` on `profile`, forwarding every
 // stdout/stderr line to onChunk, and redials on SSH disconnect with
-// exponential backoff. Stops cleanly on Ctrl-C / SIGTERM. Returns nil
-// for clean shutdown; only a permanently-broken profile (auth, host
-// key) bubbles up an error after the first dial fails non-retryably.
-//
-// Reusable: anything that wants "watch a remote command forever with
-// reconnect" (tail, watch -n 0, journalctl -f) can call this.
+// exponential backoff. Backwards-compatible thin wrapper over
+// StreamWithReconnectResumable using a static resumer.
 func StreamWithReconnect(profile *config.Profile, remoteCmd string, onChunk func(sshx.StreamChunkKind, string)) error {
+	return StreamWithReconnectResumable(profile, staticResumer{cmd: remoteCmd}, onChunk)
+}
+
+// StreamWithReconnectResumable is the resumer-aware streamer. On each
+// reconnect it asks the resumer for the next command (typically with
+// a position cursor baked in) and wraps onChunk so the resumer also
+// sees every line in order to update its state. The first chunk after
+// a reconnect is checked against resumer.Suppress so boundary
+// duplicates (e.g. journalctl --since=<ts> re-emits the seam line)
+// can be filtered out before the user sees them.
+//
+// Stops cleanly on Ctrl-C / SIGTERM. Returns nil for clean shutdown;
+// only a permanently-broken profile (auth, host key) bubbles up an
+// error after the first dial fails non-retryably.
+func StreamWithReconnectResumable(profile *config.Profile, resumer StreamResumer, onChunk func(sshx.StreamChunkKind, string)) error {
 	stopCh := make(chan struct{})
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, os.Interrupt, syscall.SIGTERM)
@@ -142,6 +246,11 @@ func StreamWithReconnect(profile *config.Profile, remoteCmd string, onChunk func
 
 	backoff := time.Second
 	const maxBackoff = 30 * time.Second
+	// firstFrame tracks whether we're in the first chunk after a
+	// reconnect. The resumer's Suppress is consulted at most once per
+	// reconnect, on the very first emitted line in either stream --
+	// after that, content flows through unfiltered.
+	firstFrame := false
 	for {
 		select {
 		case <-stopCh:
@@ -151,9 +260,6 @@ func StreamWithReconnect(profile *config.Profile, remoteCmd string, onChunk func
 
 		c, err := sshx.Dial(profile)
 		if err != nil {
-			// Auth / host-key errors are deterministic -- another redial
-			// won't change the answer, so we surface immediately rather
-			// than spin forever.
 			if !sshx.IsRetryableDialErr(err) {
 				return clierr.Errf(1, "tail: dial: %v", err)
 			}
@@ -165,10 +271,6 @@ func StreamWithReconnect(profile *config.Profile, remoteCmd string, onChunk func
 			continue
 		}
 
-		// Spawn a watcher that closes the SSH client when stop is
-		// signaled. Closing the client breaks the running session's
-		// transport, so RunStream returns and we fall out of this
-		// iteration to check stopCh.
 		watcherDone := make(chan struct{})
 		go func() {
 			select {
@@ -178,8 +280,23 @@ func StreamWithReconnect(profile *config.Profile, remoteCmd string, onChunk func
 			}
 		}()
 
-		backoff = time.Second // reset on a successful connect
-		_, _, _, runErr := c.RunStream(remoteCmd, "", onChunk)
+		backoff = time.Second
+		// Wrap onChunk so every emitted line also flows through the
+		// resumer's state machine. Order matters: Observe runs first
+		// so byte counters reflect *up-to-and-including* this line,
+		// then Suppress consumes one resume-boundary duplicate.
+		wrapped := func(kind sshx.StreamChunkKind, line string) {
+			resumer.Observe(kind, line)
+			if firstFrame {
+				firstFrame = false
+				if resumer.Suppress(kind, line) {
+					return
+				}
+			}
+			onChunk(kind, line)
+		}
+		cmd := resumer.Cmd()
+		_, _, _, runErr := c.RunStream(cmd, "", wrapped)
 		close(watcherDone)
 		_ = c.Close()
 
@@ -189,9 +306,8 @@ func StreamWithReconnect(profile *config.Profile, remoteCmd string, onChunk func
 		default:
 		}
 
-		// Either tail exited (unusual for -F) or the SSH transport
-		// dropped. Either way, the user wanted a long-running view, so
-		// reconnect after a short wait.
+		// Arm Suppress for the next reconnect iteration.
+		firstFrame = true
 		if runErr != nil {
 			fmt.Fprintf(os.Stderr, "srv tail: stream ended: %v (reconnect in %s)\n", runErr, backoff)
 		} else {

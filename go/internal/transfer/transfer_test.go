@@ -113,3 +113,90 @@ func TestParallelWorkersEnv(t *testing.T) {
 		t.Errorf("env invalid: got %d want default %d", got, defaultParallelWorkers)
 	}
 }
+
+func TestSplitChunksCoversFullRange(t *testing.T) {
+	// 17 MiB into 8 MiB chunks -> three pieces: 8, 8, 1.
+	chunks := splitChunks(17*1024*1024, 8*1024*1024)
+	if len(chunks) != 3 {
+		t.Fatalf("got %d chunks, want 3", len(chunks))
+	}
+	var covered int64
+	for i, c := range chunks {
+		if c.off != covered {
+			t.Errorf("chunk[%d] off=%d, expected contiguous start at %d", i, c.off, covered)
+		}
+		covered += c.n
+	}
+	if covered != 17*1024*1024 {
+		t.Errorf("total covered=%d, want 17MiB", covered)
+	}
+	// Last chunk should be the partial 1 MiB tail.
+	if last := chunks[len(chunks)-1].n; last != 1024*1024 {
+		t.Errorf("last chunk n=%d, want 1MiB", last)
+	}
+}
+
+func TestSplitChunksZeroSize(t *testing.T) {
+	// Zero-sized files still get one zero-length chunk so workers
+	// have something to consume; caller decides whether to bother.
+	chunks := splitChunks(0, 8*1024*1024)
+	if len(chunks) != 1 || chunks[0].n != 0 {
+		t.Errorf("zero-size: got %+v, want [{0 0}]", chunks)
+	}
+}
+
+func TestSplitChunksExactMultiple(t *testing.T) {
+	// 16 MiB / 8 MiB = exactly 2 chunks, no partial tail.
+	chunks := splitChunks(16*1024*1024, 8*1024*1024)
+	if len(chunks) != 2 {
+		t.Fatalf("exact: got %d chunks, want 2", len(chunks))
+	}
+	if chunks[0].n != 8*1024*1024 || chunks[1].n != 8*1024*1024 {
+		t.Errorf("exact chunks not equal: %+v", chunks)
+	}
+}
+
+func TestRunChunkWorkersAllRangesProcessed(t *testing.T) {
+	// Build 20 distinct chunks; assert every range is visited
+	// exactly once with the right buffer scratch reuse semantics.
+	chunks := make([]chunkRange, 20)
+	for i := range chunks {
+		chunks[i] = chunkRange{off: int64(i) * 1024, n: 1024}
+	}
+	var visited atomic.Int32
+	seen := make([]atomic.Int32, len(chunks))
+	err := runChunkWorkers(chunks, 4, func(cr chunkRange, buf []byte) error {
+		if len(buf) != 256*1024 {
+			t.Errorf("buf len=%d, expected 256KiB scratch", len(buf))
+		}
+		idx := int(cr.off / 1024)
+		seen[idx].Add(1)
+		visited.Add(1)
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("runChunkWorkers: %v", err)
+	}
+	if got := visited.Load(); int(got) != len(chunks) {
+		t.Errorf("visited %d, want %d", got, len(chunks))
+	}
+	for i := range seen {
+		if v := seen[i].Load(); v != 1 {
+			t.Errorf("chunk[%d] visited %d times, want 1", i, v)
+		}
+	}
+}
+
+func TestRunChunkWorkersFirstErrorWins(t *testing.T) {
+	chunks := []chunkRange{{0, 1}, {1, 1}, {2, 1}, {3, 1}, {4, 1}}
+	myErr := os.ErrPermission
+	err := runChunkWorkers(chunks, 4, func(cr chunkRange, _ []byte) error {
+		if cr.off == 2 {
+			return myErr
+		}
+		return nil
+	})
+	if err != myErr {
+		t.Errorf("got %v, want first error %v", err, myErr)
+	}
+}

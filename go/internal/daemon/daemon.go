@@ -159,6 +159,28 @@ type daemonState struct {
 	// per entry via sudoCacheEntry.expires (compared on get).
 	sudoMu    sync.Mutex
 	sudoCache map[string]sudoCacheEntry
+	// runInflight implements single-flight for the `run` op: while one
+	// goroutine is executing a (profile, cwd, command) tuple, every
+	// other goroutine that asks for the SAME tuple waits on its
+	// channel and reuses the result instead of opening its own SSH
+	// session. The motivating case is parallel MCP tool calls: when
+	// Claude fires 4 identical `srv ls /` requests in the same window
+	// (which it does more often than you'd think), the daemon now
+	// pays the cost once. Keyed by NUL-joined fields so empties on
+	// either side don't collapse into ambiguities.
+	runMu       sync.Mutex
+	runInflight map[string]*runInflightEntry
+}
+
+// runInflightEntry is one in-flight `run` request other goroutines can
+// hitch a ride on. `done` closes when the running goroutine has
+// populated `resp`. Readers must wait on `done` before reading the
+// other fields -- the fields are NOT protected by a mutex and the
+// channel-close happens-before relationship is what makes the read
+// safe afterward.
+type runInflightEntry struct {
+	done chan struct{}
+	resp Response
 }
 
 // sudoCacheEntry is one cached sudo password. Stored only in daemon
@@ -262,15 +284,16 @@ func Cmd(args []string) error {
 	fmt.Fprintln(os.Stderr, "srv daemon listening at", sockPath)
 
 	state := &daemonState{
-		pool:      map[string]*pooledClient{},
-		lsCache:   map[string]*lsCacheEntry{},
-		listener:  listener,
-		startedAt: time.Now(),
-		lastReq:   time.Now(),
-		stopCh:    make(chan struct{}),
-		tunnels:   map[string]*activeTunnel{},
-		tunnelErr: map[string]string{},
-		sudoCache: map[string]sudoCacheEntry{},
+		pool:        map[string]*pooledClient{},
+		lsCache:     map[string]*lsCacheEntry{},
+		listener:    listener,
+		startedAt:   time.Now(),
+		lastReq:     time.Now(),
+		stopCh:      make(chan struct{}),
+		tunnels:     map[string]*activeTunnel{},
+		tunnelErr:   map[string]string{},
+		sudoCache:   map[string]sudoCacheEntry{},
+		runInflight: map[string]*runInflightEntry{},
 	}
 
 	// Background gc: close idle connections, exit if whole daemon idle.
@@ -801,22 +824,63 @@ func (s *daemonState) handleStreamRun(req Request, wr *bufio.Writer, wrMu *sync.
 }
 
 func (s *daemonState) handleRun(req Request) Response {
+	// Single-flight: collapse concurrent identical (profile, cwd,
+	// command) calls onto one SSH round-trip. Read-write commands
+	// merge too -- if Claude fires `rm /tmp/x` in parallel twice,
+	// the second waits for the first instead of producing two
+	// independent failures. The semantics ("the call ran once,
+	// everyone sees the same result") match what the caller would
+	// have got from a local mutex around the same code.
+	key := s.runInflightKey(req.Profile, req.Cwd, req.Command)
+	s.runMu.Lock()
+	if existing, ok := s.runInflight[key]; ok {
+		s.runMu.Unlock()
+		<-existing.done
+		return existing.resp
+	}
+	entry := &runInflightEntry{done: make(chan struct{})}
+	s.runInflight[key] = entry
+	s.runMu.Unlock()
+
+	defer func() {
+		s.runMu.Lock()
+		// Only evict if we're still the owner -- a paranoid guard for
+		// the unlikely case where the key recycles before close(done).
+		if cur, ok := s.runInflight[key]; ok && cur == entry {
+			delete(s.runInflight, key)
+		}
+		s.runMu.Unlock()
+		close(entry.done)
+	}()
+
 	c, _, err := s.getClient(req.Profile)
 	if err != nil {
-		return Response{OK: false, Err: err.Error()}
+		entry.resp = Response{OK: false, Err: err.Error()}
+		return entry.resp
 	}
 	cwd := req.Cwd
 	res, err := c.RunCapture(req.Command, cwd)
 	if err != nil {
-		return Response{OK: false, Err: err.Error()}
+		entry.resp = Response{OK: false, Err: err.Error()}
+		return entry.resp
 	}
-	return Response{
+	entry.resp = Response{
 		OK:       true,
 		Stdout:   res.Stdout,
 		Stderr:   res.Stderr,
 		ExitCode: res.ExitCode,
 		Cwd:      cwd,
 	}
+	return entry.resp
+}
+
+// runInflightKey builds the single-flight identity used by handleRun.
+// NUL separators keep the boundaries unambiguous: "a", "b", "cd" and
+// "a", "bc", "d" both join to "a\x00b\x00cd" / "a\x00bc\x00d" without
+// colliding. profile MUST be the post-resolution name (not "") so
+// empty-string defaults don't share a single inflight slot.
+func (s *daemonState) runInflightKey(profile, cwd, cmd string) string {
+	return profile + "\x00" + cwd + "\x00" + cmd
 }
 
 func (s *daemonState) runGC() {

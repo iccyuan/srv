@@ -64,6 +64,28 @@ type Profile struct {
 	// `srv <cmd>` or MCP paths because those rarely benefit and the
 	// per-session round-trip cost adds up.
 	AgentForwarding *bool `json:"agent_forwarding,omitempty"`
+	// SSH crypto preference lists. Each is a comma-separated list of
+	// algorithm names accepted by golang.org/x/crypto/ssh. Empty/nil
+	// leaves the library default in place. Set when the negotiated
+	// default is suboptimal for your hardware:
+	//
+	//	x86-64 with AES-NI:  ciphers: ["aes128-gcm@openssh.com"]
+	//	ARM without AES-NI: ciphers: ["chacha20-poly1305@openssh.com"]
+	//
+	// MACs is ignored for AEAD ciphers (GCM / chacha20-poly1305 carry
+	// authentication inline). Set it only when also pinning a non-AEAD
+	// cipher like aes128-ctr (rare).
+	Ciphers           []string `json:"ciphers,omitempty"`
+	MACs              []string `json:"macs,omitempty"`
+	KeyExchanges      []string `json:"key_exchanges,omitempty"`
+	HostKeyAlgorithms []string `json:"host_key_algorithms,omitempty"`
+	// CompressStreams=true wraps every captured remote command's stdout
+	// in `| gzip -c -1` before it crosses the wire, and decompresses
+	// client-side. Stays off by default because the CPU cost is a real
+	// hit on fast LAN links and the bandwidth saving is invisible. Turn
+	// on for cross-region / mobile-tethered links where `srv ls -R /`
+	// or `cat large-log` would otherwise drag.
+	CompressStreams *bool `json:"compress_streams,omitempty"`
 	// Free-form bag for unknown keys forwarded from older Python configs.
 	Extra map[string]any `json:"-"`
 	// Name is the profile's lookup key in Config.Profiles. Populated by
@@ -112,6 +134,13 @@ func (p *Profile) GetCompressSync() bool {
 		return true
 	}
 	return *p.CompressSync
+}
+
+// GetCompressStreams reports whether captured remote commands should
+// gzip their stdout over the wire. Default false. See the field doc
+// for when it pays off and when it costs.
+func (p *Profile) GetCompressStreams() bool {
+	return p.CompressStreams != nil && *p.CompressStreams
 }
 
 func (p *Profile) GetDefaultCwd() string {
