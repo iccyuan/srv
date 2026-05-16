@@ -37,6 +37,9 @@ go/srv.exe
 *.test
 *.out
 
+# srv-mcp-dev.cmd build output (the wrapper script itself IS committed)
+/build.log
+
 # goreleaser local-snapshot output
 /dist/
 
