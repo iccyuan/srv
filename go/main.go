@@ -244,6 +244,17 @@ func run(args []string) int {
 		return 2
 	}
 
+	// AI-agent gate: an agent shelling out to the raw CLI bypasses
+	// every MCP guard and can stream unbounded output into the model.
+	// Refuse remote actions (and the implicit remote-run fallthrough)
+	// so agents go through the MCP server instead. `srv mcp` and all
+	// local subcommands are not remote, so MCP itself is unaffected.
+	// See aiguard.go.
+	if blockAIRemote(known, known && remoteSubcommands[cmd.name]) {
+		fmt.Fprint(os.Stderr, aiBlockMessage(sub))
+		return 2
+	}
+
 	// Build the uniform context. cfg is loaded only when at least one
 	// path needs it: a known subcommand without noConfig, or the
 	// remote-fallthrough (cmdRunWithHints / cmdDetach both need cfg).
