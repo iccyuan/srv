@@ -108,6 +108,39 @@ every target keeps the live/recent part and drops only the stale part
            never touched. Off unless this flag is given.`)
 }
 
+// PruneLedger drops FINISHED records from jf in place, keeping every
+// still-running one. If target != "" only that id is dropped and it
+// must be finished (running -> error, so we never orphan a live
+// remote pid + log path). Returns how many were pruned. The caller
+// persists + reports.
+//
+// This is the shared keep-live core for `srv prune jobs` (CLI) and
+// the prune_jobs MCP tool so their semantics never drift -- the same
+// single-source discipline the package doc describes. A fresh slice
+// (not jf.Jobs[:0]) is built so an early error return can't leave a
+// half-rewritten ledger in a long-lived process (the MCP server).
+func PruneLedger(jf *jobs.File, target string) (int, error) {
+	kept := make([]*jobs.Record, 0, len(jf.Jobs))
+	pruned := 0
+	for _, j := range jf.Jobs {
+		switch {
+		case target != "" && j.ID != target:
+			kept = append(kept, j)
+		case target != "" && j.ID == target:
+			if j.Finished == "" {
+				return 0, fmt.Errorf("job %q is still running; kill it first", target)
+			}
+			pruned++
+		case target == "" && j.Finished != "":
+			pruned++
+		default:
+			kept = append(kept, j)
+		}
+	}
+	jf.Jobs = kept
+	return pruned, nil
+}
+
 // pruneJobs handles the local ledger sweep (the old `srv jobs prune`
 // behaviour, verbatim semantics) and, when remoteSweep is set, the
 // server-side ~/.srv-jobs/ cleanup. rest[0], if present, narrows both
@@ -122,26 +155,10 @@ func pruneJobs(rest []string, cfg *config.Config, profileOverride string, remote
 		target = rest[0]
 	}
 
-	kept := jf.Jobs[:0]
-	pruned := 0
-	for _, j := range jf.Jobs {
-		switch {
-		case target != "" && j.ID != target:
-			kept = append(kept, j)
-		case target != "" && j.ID == target:
-			// Refuse to drop a still-running job by id: losing the
-			// local record orphans the remote pid + log path.
-			if j.Finished == "" {
-				return clierr.Errf(1, "job %q is still running; use `srv kill %s` first", target, target)
-			}
-			pruned++
-		case target == "" && j.Finished != "":
-			pruned++
-		default:
-			kept = append(kept, j)
-		}
+	pruned, err := PruneLedger(jf, target)
+	if err != nil {
+		return clierr.Errf(1, "%v", err)
 	}
-	jf.Jobs = kept
 	if err := jobs.Save(jf); err != nil {
 		return clierr.Errf(1, "save: %v", err)
 	}

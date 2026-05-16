@@ -311,6 +311,20 @@ var tools = []tool{
 	},
 	{
 		def: toolDef{
+			Name:        "prune_jobs",
+			Description: "Delete FINISHED job records from the local ledger (running jobs are always kept). The MCP counterpart of `srv prune jobs`. Call this as your \"receipt\" once you've consumed a job's result via wait_job / tail_log -- it acknowledges and discards completed jobs so list_jobs stays small and trustworthy. No `id` = prune every finished record; `id` = prune just that one completed job (errors if it is still running -- kill_job it first). Reconciles against remote .exit markers first, so a job that finished since the last ledger touch is pruned by this same call.",
+			InputSchema: map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"id":      strSchema("Optional: prune only this one finished job (full id or unambiguous prefix). Omit to prune all finished records."),
+					"profile": strSchema(""),
+				},
+			},
+		},
+		handler: handlePruneJobs,
+	},
+	{
+		def: toolDef{
 			Name:        "tail_log",
 			Description: "Read the last N lines of a detached job's log file (by job_id). Resolves the id to ~/.srv-jobs/<id>.log on the remote and runs `tail -n LINES` there. One-shot only -- use `wait_job` for the polling pattern that pairs with `detach` / `run background=true`.\n\nOutput exceeding 16 KiB is rejected (not truncated). Lower `lines`, or use `run \"grep PATTERN ~/.srv-jobs/<id>.log | head -n N\"` to filter directly.\n\nSibling tools (pick by source):\n  - `tail`     -> any remote file by path (with optional follow + grep)\n  - `journal`  -> systemd unit logs",
 			InputSchema: map[string]any{

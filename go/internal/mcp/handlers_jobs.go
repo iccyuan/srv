@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"srv/internal/config"
 	"srv/internal/jobs"
+	"srv/internal/prune"
 	"srv/internal/remote"
 	"strconv"
 	"strings"
@@ -426,4 +427,40 @@ func isSafeSignal(s string) bool {
 		}
 	}
 	return true
+}
+
+// handlePruneJobs is the AI's "receipt": after it has consumed a
+// job's result (wait_job / tail_log) it calls this to discard the
+// finished record so list_jobs stays small and trustworthy. It is
+// the MCP counterpart of `srv prune jobs`, sharing prune.PruneLedger
+// so the keep-live semantics never drift: still-running jobs are
+// always kept; an `id` that is still running is refused (we'd orphan
+// the remote pid). Reconciles against remote .exit markers first so
+// a job that finished since the ledger was last touched is pruned by
+// this same call instead of lingering as a stale "running" row.
+func handlePruneJobs(args map[string]any, cfg *config.Config, profileOverride string) toolResult {
+	id, _ := args["id"].(string)
+	jf := jobs.Load()
+	reconcileFinished(jf.Jobs, cfg)
+	n, err := prune.PruneLedger(jf, id)
+	if err != nil {
+		return textErr(err.Error())
+	}
+	if err := jobs.Save(jf); err != nil {
+		return textErr(err.Error())
+	}
+	var msg string
+	switch {
+	case id != "":
+		msg = fmt.Sprintf("pruned finished job %q; %d record(s) remain", id, len(jf.Jobs))
+	case n == 0:
+		msg = "no finished job records to prune"
+	default:
+		msg = fmt.Sprintf("pruned %d finished job record(s); %d remain (running jobs kept)", n, len(jf.Jobs))
+	}
+	return jsonResult(map[string]any{
+		"pruned":    n,
+		"remaining": len(jf.Jobs),
+		"message":   msg,
+	})
 }
