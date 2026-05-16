@@ -558,7 +558,7 @@ srv hooks set pre-sync 'cd $SRV_LOCAL && go vet ./...'
 | `SRV_LANG` | 指定 UI 语言：`zh`、`en`、`auto`。 |
 | `SRV_HINTS` | 设置为 `0`、`false`、`off` 可关闭命令拼写提示。 |
 | `SRV_GUARD` | 设置为 `1`、`true`、`on`、`yes` 可强制启用 MCP guard。 |
-| `SRV_ALLOW_AI_CLI` | 设置为 `1`、`true`、`on`、`yes` 解除“AI agent 禁用裸 CLI 远端操作”限制。默认:检测到 AI 编码 agent 环境(`CLAUDECODE` / `CLAUDE_CODE_ENTRYPOINT`)时,`srv` 的远端子命令(run/push/pull/sync/edit/diff/tail/watch/journal/top/sudo/shell/logs/kill/tunnel/recipe/ui 及隐式 `srv <cmd>` 远端执行)会被**硬拒绝**并提示改用 srv MCP server(MCP 路径不受影响,且带 token/高危 gate)。在 agent 终端里手动操作的人可设此变量绕过。 |
+| `SRV_ALLOW_AI_CLI` | 设置为 `1`、`true`、`on`、`yes` 解除“AI agent 禁用裸 CLI 远端操作”限制。默认:检测到 AI 编码 agent 环境(`CLAUDECODE` / `CLAUDE_CODE_ENTRYPOINT` / Codex `CODEX_*` 标记)时,`srv` 的远端子命令(run/push/pull/sync/edit/diff/tail/watch/journal/top/sudo/shell/logs/kill/tunnel/recipe/ui 及隐式 `srv <cmd>` 远端执行)会被**硬拒绝**并提示改用 srv MCP server(MCP 路径不受影响,且带 token/高危 gate)。在 agent 终端里手动操作的人可设此变量绕过。 |
 | `SRV_TRANSFER_WORKERS` | 调整 `srv push`/`srv pull`/`srv sync` 目录递归时的并发 goroutine 数(默认 4,范围 1~32)。 |
 
 常用 profile key：

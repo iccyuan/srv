@@ -6,7 +6,7 @@
 - **顶层 `srv prune <target>` 命令**:统一清理 srv 累积的本地缓存/历史,target 可 Tab 补全 —— `jobs` / `sessions` / `mcp-log` / `mcp-stats` / `all`。补全 DSL、help、target 列表三处共用同一份 `prune.Targets`。
 - **prune 语义一致性:留活/留近,只删陈旧**。五个 target 统一为"选择性 prune"而非整文件 wipe —— `jobs` 留运行中的、`sessions` 留 PID 活的、`mcp-log` 留最近 256 KB 尾部(新增 `mcplog.Prune`,按行边界裁剪)、`mcp-stats` 留最近 7 天(新增 `mcpstats.PruneOlderThan`,按 `ts` 过滤并改写 `.jsonl` 及其 `.1` 轮转副本)。整文件清空是另一个动词(如 `srv stats --clear`)。
 - **`srv prune jobs --remote`**(仅 jobs/all,始终显式 opt-in,绝不隐含):额外删服务器 `~/.srv-jobs/` 里**已完成**作业的 `*.log` + `*.exit`(以远端 `.exit` 标记判定完成,运行中的作业绝不触碰)。
-- **AI agent 禁用裸 CLI 远端操作**:检测到 AI 编码 agent shell(`CLAUDECODE` / `CLAUDE_CODE_ENTRYPOINT`)时,`srv` 的远端子命令及隐式 `srv <cmd>` 远端执行被硬拒绝并提示改用 srv MCP server —— 裸 CLI 走 `remote.RunStream`,绕过 MCP 的 token-economy / sync / 高危 gate,agent 直接 shell out 会把无界输出灌进上下文。`srv mcp` 与所有本地子命令不算远端,MCP 路径完全不受影响(且带 gate)。逃生开关:`SRV_ALLOW_AI_CLI=1`(在 agent 终端里手动操作的人用;默认硬拒绝)。
+- **AI agent 禁用裸 CLI 远端操作**:检测到 AI 编码 agent shell(`CLAUDECODE` / `CLAUDE_CODE_ENTRYPOINT` / Codex `CODEX_*` 标记)时,`srv` 的远端子命令及隐式 `srv <cmd>` 远端执行被硬拒绝并提示改用 srv MCP server —— 裸 CLI 走 `remote.RunStream`,绕过 MCP 的 token-economy / sync / 高危 gate,agent 直接 shell out 会把无界输出灌进上下文。`srv mcp` 与所有本地子命令不算远端,MCP 路径完全不受影响(且带 gate)。逃生开关:`SRV_ALLOW_AI_CLI=1`(在 agent 终端里手动操作的人用;默认硬拒绝)。
 - **同步 `run_group` 的 `rejectUnfiltered` gate**:此前 `run_group` 只走 guard + rejectSync,漏了 token-economy gate,无界源(`cat`/裸 `dmesg`/未过滤 `journalctl`/`find /`)会按组成员数 ×N 放大;现与 `run` 对齐,在 `group.Run` 扇出前拦截。
 
 ### Changed

@@ -2,13 +2,14 @@ package main
 
 import "testing"
 
-// clearAgentEnv pins all three env knobs to a known-empty baseline so a
-// test is not perturbed by the CLAUDECODE the suite itself may run
-// under. t.Setenv restores originals at test end.
+// clearAgentEnv pins all known AI-agent env knobs to a known-empty
+// baseline so a test is not perturbed by the agent shell the suite
+// itself may run under. t.Setenv restores originals at test end.
 func clearAgentEnv(t *testing.T) {
 	t.Helper()
-	t.Setenv("CLAUDECODE", "")
-	t.Setenv("CLAUDE_CODE_ENTRYPOINT", "")
+	for _, k := range aiAgentEnvVars {
+		t.Setenv(k, "")
+	}
 	t.Setenv("SRV_ALLOW_AI_CLI", "")
 }
 
@@ -20,6 +21,9 @@ func TestAIAgentDetected(t *testing.T) {
 		{"none", "", "", false},
 		{"claudecode", "CLAUDECODE", "1", true},
 		{"entrypoint", "CLAUDE_CODE_ENTRYPOINT", "cli", true},
+		{"codex npm marker", "CODEX_MANAGED_BY_NPM", "1", true},
+		{"codex sandbox marker", "CODEX_SANDBOX_NETWORK_DISABLED", "1", true},
+		{"codex thread marker", "CODEX_THREAD_ID", "019e3077-147b-7843-9d1c-ce070bc68c46", true},
 		{"empty value is not detection", "CLAUDECODE", "  ", false},
 	}
 	for _, tc := range cases {

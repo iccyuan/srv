@@ -29,6 +29,9 @@ import (
 var aiAgentEnvVars = []string{
 	"CLAUDECODE",             // Claude Code sets this to "1"
 	"CLAUDE_CODE_ENTRYPOINT", // Claude Code entrypoint marker
+	"CODEX_MANAGED_BY_NPM",   // OpenAI Codex CLI npm launcher marker
+	"CODEX_SANDBOX_NETWORK_DISABLED",
+	"CODEX_THREAD_ID",
 }
 
 // remoteSubcommands is the set of subcommand PRIMARY names that open an
