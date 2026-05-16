@@ -200,15 +200,14 @@ func printNotifyState(cfg *config.Config) {
 // the list down to one profile when set. With --watch (or -w) the
 // command flips into a TUI loop -- see CmdJobsWatch. The first
 // positional `notify` switches into the notification-config CLI.
-// `srv jobs prune` drops finished entries from jobs.json so the
-// table doesn't accumulate historical rows the user has already
-// moved on from.
+// Clearing finished rows is no longer a `jobs` subaction -- it moved
+// to the top-level `srv prune jobs` (see internal/prune).
 func CmdJobs(args []string, cfg *config.Config, profileOverride string) error {
 	if len(args) > 0 && args[0] == "notify" {
 		return cmdJobsNotify(args[1:], cfg)
 	}
 	if len(args) > 0 && args[0] == "prune" {
-		return cmdJobsPrune(args[1:])
+		return clierr.Errf(2, "`srv jobs prune` was replaced by `srv prune jobs` (see `srv prune`)")
 	}
 	for i, a := range args {
 		if a == "--watch" || a == "-w" {
@@ -241,55 +240,6 @@ func CmdJobs(args []string, cfg *config.Config, profileOverride string) error {
 		}
 		fmt.Printf("%s  pid=%-7d profile=%-10s started=%s  cmd=%s\n",
 			j.ID, j.Pid, j.Profile, j.Started, cmd)
-	}
-	return nil
-}
-
-// cmdJobsPrune drops finished entries from jobs.json. With no args
-// it sweeps every record whose Finished is set; with a positional
-// id it drops just that one. Started-but-not-finished records are
-// always kept -- pruning them would lose the live PID and the user
-// would have to track it down by hand. Remote log files are NEVER
-// touched: they sit in ~/.srv-jobs/ on the server and outlive the
-// local record by design.
-func cmdJobsPrune(args []string) error {
-	jf := jobs.Load()
-	if jf == nil || len(jf.Jobs) == 0 {
-		fmt.Println("(no jobs)")
-		return nil
-	}
-	target := ""
-	if len(args) > 0 {
-		target = args[0]
-	}
-	kept := jf.Jobs[:0]
-	pruned := 0
-	for _, j := range jf.Jobs {
-		switch {
-		case target != "" && j.ID != target:
-			kept = append(kept, j)
-		case target != "" && j.ID == target:
-			// Only drop the named entry if it's finished -- pruning
-			// a still-running job from the local record orphans it
-			// (we lose track of the remote PID + log path).
-			if j.Finished == "" {
-				return clierr.Errf(1, "tunnel %q is still running; use `srv kill %s` first", target, target)
-			}
-			pruned++
-		case target == "" && j.Finished != "":
-			pruned++
-		default:
-			kept = append(kept, j)
-		}
-	}
-	jf.Jobs = kept
-	if err := jobs.Save(jf); err != nil {
-		return clierr.Errf(1, "save: %v", err)
-	}
-	if pruned == 0 {
-		fmt.Println("(no finished jobs to prune)")
-	} else {
-		fmt.Printf("pruned %d finished job record(s)\n", pruned)
 	}
 	return nil
 }

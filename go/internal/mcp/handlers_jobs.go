@@ -178,7 +178,7 @@ tail -n %d %s
 		// log. Earlier versions pruned the row here, which caused
 		// "no such job" on every post-completion tail_log even
 		// though the .log file was right where it had always been.
-		// Explicit cleanup is now `srv jobs prune` (CLI) or
+		// Explicit cleanup is now `srv prune jobs` (CLI) or
 		// kill_job (still prunes, since the user is explicitly
 		// asking to discard).
 		j.Finished = time.Now().Format(time.RFC3339)

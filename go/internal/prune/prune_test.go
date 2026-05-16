@@ -1,4 +1,4 @@
-package jobcli
+package prune
 
 import (
 	"srv/internal/jobs"
@@ -6,10 +6,14 @@ import (
 	"testing"
 )
 
-// TestPruneKeepsLiveJobs is a regression guard for the bug that
-// motivated keeping job records after completion: pruning must
-// distinguish finished from still-running rows, never silently
-// dropping a live job we're tracking the PID + log path for.
+// These three guard the local-ledger semantics that moved here verbatim
+// from the retired `srv jobs prune` (internal/jobcli). remoteSweep is
+// false throughout so cfg can be nil -- config.Resolve is only reached
+// on the --remote path, which has its own host-dependent coverage.
+
+// TestPruneKeepsLiveJobs: a no-arg prune drops every finished row and
+// keeps every still-running one. Regression guard for the bug that
+// motivated keeping job records after completion.
 func TestPruneKeepsLiveJobs(t *testing.T) {
 	dir := t.TempDir()
 	t.Setenv("SRV_HOME", dir)
@@ -25,7 +29,7 @@ func TestPruneKeepsLiveJobs(t *testing.T) {
 		t.Fatalf("seed save: %v", err)
 	}
 
-	if err := cmdJobsPrune(nil); err != nil {
+	if err := pruneJobs(nil, nil, "", false); err != nil {
 		t.Fatalf("prune: %v", err)
 	}
 	loaded := jobs.Load()
@@ -56,9 +60,8 @@ func TestPruneKeepsLiveJobs(t *testing.T) {
 	}
 }
 
-// TestPruneRefusesToDropLiveByID is the safety check on the
-// targeted-prune path: pruning a specific id that's still running
-// must fail loudly rather than silently orphan the remote PID.
+// TestPruneRefusesToDropLiveByID: pruning a specific id that's still
+// running must fail loudly rather than silently orphan the remote pid.
 func TestPruneRefusesToDropLiveByID(t *testing.T) {
 	dir := t.TempDir()
 	t.Setenv("SRV_HOME", dir)
@@ -68,21 +71,20 @@ func TestPruneRefusesToDropLiveByID(t *testing.T) {
 	if err := jobs.Save(jf); err != nil {
 		t.Fatal(err)
 	}
-	err := cmdJobsPrune([]string{"still-going"})
+	err := pruneJobs([]string{"still-going"}, nil, "", false)
 	if err == nil {
 		t.Fatal("expected prune of live job to error")
 	}
 	if !strings.Contains(err.Error(), "still running") {
 		t.Errorf("error %q should mention the job is still running", err)
 	}
-	// Record must remain.
 	if loaded := jobs.Load(); len(loaded.Jobs) != 1 {
 		t.Errorf("live record was wrongly removed; have %d jobs", len(loaded.Jobs))
 	}
 }
 
-// TestPruneTargetsOneByID checks the happy-path of pruning a
-// specific finished entry without touching siblings.
+// TestPruneTargetsOneByID: pruning a specific finished entry leaves
+// siblings untouched.
 func TestPruneTargetsOneByID(t *testing.T) {
 	dir := t.TempDir()
 	t.Setenv("SRV_HOME", dir)
@@ -94,7 +96,7 @@ func TestPruneTargetsOneByID(t *testing.T) {
 	if err := jobs.Save(jf); err != nil {
 		t.Fatal(err)
 	}
-	if err := cmdJobsPrune([]string{"done-a"}); err != nil {
+	if err := pruneJobs([]string{"done-a"}, nil, "", false); err != nil {
 		t.Fatalf("prune by id: %v", err)
 	}
 	loaded := jobs.Load()

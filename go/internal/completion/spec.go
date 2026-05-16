@@ -73,6 +73,7 @@ var compSpecs = map[string]compSpec{
 	"use": {positions: []argSlot{{typ: argEnumProfile, choices: []string{"--clear"}}}},
 
 	"sessions":   {positions: []argSlot{{typ: argEnum, choices: []string{"list", "show", "clear", "prune"}}}},
+	"prune":      {positions: []argSlot{{typ: argEnum, choices: []string{"jobs", "sessions", "mcp-log", "mcp-stats", "all"}}}},
 	"completion": {positions: []argSlot{{typ: argEnum, choices: []string{"bash", "zsh", "powershell"}}}},
 	"group":      {positions: []argSlot{{typ: argEnum, choices: []string{"list", "show", "set", "remove"}}}},
 	// `srv tunnel <TAB>` lists the management actions. The one-shot
