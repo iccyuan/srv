@@ -668,7 +668,14 @@ func (c *Client) Shell(cwd string) (int, error) {
 // the portability contract has a regression test without SSH.
 func detachSpawnCmd(encoded, cwd, logPath string) string {
 	return fmt.Sprintf(
-		"mkdir -p ~/.srv-jobs && cd %s && (nohup bash -c \"$(echo %s | { base64 -d 2>/dev/null || base64 -D; })\" </dev/null >%s 2>&1 & echo $!)",
+		// `setsid` puts the job in its own session/process group so
+		// kill_job can signal the WHOLE tree (`kill -SIG -PID`) instead
+		// of just the bash wrapper -- without it the real workload (e.g.
+		// the `sleep` child) survived kill and orphaned. `nohup` is kept
+		// for SIGHUP-immunity on SSH drop; setsid execs nohup execs bash,
+		// so `$!` is still that single pid and (being the session leader)
+		// equals the process-group id.
+		"mkdir -p ~/.srv-jobs && cd %s && (setsid nohup bash -c \"$(echo %s | { base64 -d 2>/dev/null || base64 -D; })\" </dev/null >%s 2>&1 & echo $!)",
 		srvtty.ShQuotePath(cwd), encoded, logPath,
 	)
 }

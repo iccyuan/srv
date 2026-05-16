@@ -38,10 +38,74 @@ type listJobView struct {
 // down to the one id, where the full cmd is acceptable token cost).
 const listJobsCmdMax = 80
 
+// reconcileFinished heals the ledger: for every still-"running"
+// record it probes that profile's ~/.srv-jobs/*.exit markers (one
+// round-trip per profile) and, when the marker exists, records the
+// real Finished time + exit code. Returns true if any record changed
+// so the caller can persist once. Profiles missing from cfg or
+// unreachable are left untouched (treated as still-running).
+func reconcileFinished(rs []*jobs.Record, cfg *config.Config) bool {
+	byProf := map[string][]*jobs.Record{}
+	for _, j := range rs {
+		if j.Finished == "" {
+			byProf[j.Profile] = append(byProf[j.Profile], j)
+		}
+	}
+	if len(byProf) == 0 {
+		return false
+	}
+	// Portable across sh/bash/zsh; the `ls | grep` guard avoids a
+	// zsh "no matches found" abort when there are no .exit files yet.
+	const probe = `cd ~/.srv-jobs 2>/dev/null || exit 0; for f in $(ls -1 2>/dev/null | grep '\.exit$'); do printf '%s %s\n' "${f%.exit}" "$(cat "$f" 2>/dev/null)"; done`
+	changed := false
+	for profName, recs := range byProf {
+		prof, ok := cfg.Profiles[profName]
+		if !ok {
+			continue
+		}
+		res, err := remote.RunCapture(prof, "", probe)
+		if err != nil || res == nil {
+			continue
+		}
+		codes := map[string]int{}
+		for _, line := range strings.Split(res.Stdout, "\n") {
+			f := strings.Fields(line)
+			if len(f) == 0 {
+				continue
+			}
+			code := 0
+			if len(f) > 1 {
+				code, _ = strconv.Atoi(f[1])
+			}
+			codes[f[0]] = code
+		}
+		now := time.Now().Format(time.RFC3339)
+		for _, j := range recs {
+			if c, present := codes[j.ID]; present {
+				j.Finished = now
+				cc := c
+				j.ExitCode = &cc
+				changed = true
+			}
+		}
+	}
+	return changed
+}
+
 func handleListJobs(args map[string]any, cfg *config.Config, profileOverride string) toolResult {
-	rs := jobs.Load().Jobs
+	jf := jobs.Load()
+	// Reconcile the WHOLE ledger against the remote .exit markers
+	// before reporting. Without this a finished job stayed "running"
+	// in the ledger forever (only a targeted wait_job ever reconciled
+	// it), so list_jobs was untrustworthy and never self-healed.
+	// Reconcile all jobs (not just the filtered view) so the on-disk
+	// ledger heals globally; persist once if anything changed.
+	if reconcileFinished(jf.Jobs, cfg) {
+		_ = jobs.Save(jf)
+	}
+	rs := jf.Jobs
 	if profileOverride != "" {
-		filtered := rs[:0]
+		filtered := make([]*jobs.Record, 0, len(rs))
 		for _, j := range rs {
 			if j.Profile == profileOverride {
 				filtered = append(filtered, j)
@@ -79,9 +143,9 @@ func handleTailLog(args map[string]any, cfg *config.Config, profileOverride stri
 		lines = int(v)
 	}
 	jf := jobs.Load()
-	j := jobs.Find(jf, jid)
-	if j == nil {
-		return textErr(fmt.Sprintf("no such job %q", jid))
+	j, err := jobs.Resolve(jf, jid)
+	if err != nil {
+		return textErr(err.Error())
 	}
 	prof, ok := cfg.Profiles[j.Profile]
 	if !ok {
@@ -149,9 +213,9 @@ func handleWaitJob(args map[string]any, cfg *config.Config, profileOverride stri
 		tailLines = int(v)
 	}
 	jf := jobs.Load()
-	j := jobs.Find(jf, jid)
-	if j == nil {
-		return textErr(fmt.Sprintf("no such job %q", jid))
+	j, err := jobs.Resolve(jf, jid)
+	if err != nil {
+		return textErr(err.Error())
 	}
 	prof, ok := cfg.Profiles[j.Profile]
 	if !ok {
@@ -285,31 +349,81 @@ func handleKillJob(args map[string]any, cfg *config.Config, profileOverride stri
 	if sig == "" {
 		sig = "TERM"
 	}
+	if !isSafeSignal(sig) {
+		return textErr(fmt.Sprintf("invalid signal %q (use a name like TERM/KILL/USR1 or a number)", sig))
+	}
 	jf := jobs.Load()
-	j := jobs.Find(jf, jid)
-	if j == nil {
-		return textErr(fmt.Sprintf("no such job %q", jid))
+	j, err := jobs.Resolve(jf, jid)
+	if err != nil {
+		return textErr(err.Error())
 	}
 	prof, ok := cfg.Profiles[j.Profile]
 	if !ok {
 		return textErr(fmt.Sprintf("profile %q not found", j.Profile))
 	}
-	cmd := fmt.Sprintf("kill -%s %d 2>/dev/null && echo killed || echo 'no such pid'", sig, j.Pid)
+	// Signal the whole process GROUP (`kill -SIG -PID`), not just the
+	// recorded pid. detach now spawns under setsid, so the recorded
+	// pid is the group leader and -PID reaches the real workload
+	// (e.g. the `sleep` child) -- previously kill hit only the bash
+	// wrapper and orphaned the child while reporting a false "killed".
+	// Fall back to the bare pid for pre-setsid (legacy) jobs. Check
+	// the .exit marker first so an already-finished job reports its
+	// real outcome instead of a misleading "no such pid".
+	exitf := fmt.Sprintf("$HOME/.srv-jobs/%s.exit", j.ID)
+	cmd := fmt.Sprintf(`if [ -f %s ]; then printf 'ALREADY_FINISHED %%s\n' "$(cat %s 2>/dev/null)"; elif kill -%s -%d 2>/dev/null || kill -%s %d 2>/dev/null; then echo SIGNALLED; else echo NO_PROCESS; fi`,
+		exitf, exitf, sig, j.Pid, sig, j.Pid)
 	res, _ := remote.RunCapture(prof, "", cmd)
-	// Mark the job as killed but keep the record so tail_log still
-	// works for post-mortem inspection. The CLI `srv kill` is the
-	// place users go for explicit cleanup; MCP's kill_job is more
-	// often "please stop this, I'll look at the log after."
-	j.Finished = time.Now().Format(time.RFC3339)
-	j.Killed = true
-	_ = jobs.Save(jf)
-	text := strings.TrimSpace(res.Stdout)
-	if text == "" {
-		text = strings.TrimSpace(res.Stderr)
+	out := strings.TrimSpace(res.Stdout)
+	tok := out
+	if i := strings.IndexByte(tok, ' '); i >= 0 {
+		tok = tok[:i]
 	}
-	// Content-only: "killed" vs "no such pid" is the actual signal
-	// here and lives only in the text (the kill wrapper's `|| echo`
-	// makes exit_code 0 either way, so the dropped structured stub
-	// couldn't distinguish them anyway).
-	return payloadResult(text, res.ExitCode != 0)
+	var text string
+	switch tok {
+	case "ALREADY_FINISHED":
+		code := 0
+		if f := strings.Fields(out); len(f) > 1 {
+			code, _ = strconv.Atoi(f[1])
+		}
+		j.Finished = time.Now().Format(time.RFC3339)
+		ec := code
+		j.ExitCode = &ec
+		_ = jobs.Save(jf)
+		text = fmt.Sprintf("job %s already finished (exit %d); nothing to kill", j.ID, code)
+	case "SIGNALLED":
+		j.Finished = time.Now().Format(time.RFC3339)
+		j.Killed = true
+		_ = jobs.Save(jf)
+		text = fmt.Sprintf("killed: signal %s sent to job %s process group", sig, j.ID)
+	case "NO_PROCESS":
+		j.Finished = time.Now().Format(time.RFC3339)
+		j.Killed = true
+		_ = jobs.Save(jf)
+		text = fmt.Sprintf("no live process for job %s (already exited; no exit marker recorded)", j.ID)
+	default:
+		text = out
+		if text == "" {
+			text = strings.TrimSpace(res.Stderr)
+		}
+		if text == "" {
+			text = "kill_job: unrecognized result from remote"
+		}
+		return textErr(text)
+	}
+	return payloadResult(text, false)
+}
+
+// isSafeSignal guards the signal that gets interpolated into the
+// remote `kill -%s` -- only a bare name (TERM, SIGUSR1) or number
+// (9, 15). Anything else could inject shell.
+func isSafeSignal(s string) bool {
+	if s == "" || len(s) > 12 {
+		return false
+	}
+	for _, r := range s {
+		if !((r >= 'A' && r <= 'Z') || (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9')) {
+			return false
+		}
+	}
+	return true
 }

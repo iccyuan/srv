@@ -113,6 +113,38 @@ func Find(j *File, idOrPrefix string) *Record {
 	return nil
 }
 
+// Resolve is Find with a typed error so non-stderr callers (the MCP
+// job tools) can tell "no such job" apart from "ambiguous prefix".
+// Find collapses both to nil + a swallowed stderr warning, which made
+// kill_job/wait_job/tail_log report a misleading "no such job" for an
+// ambiguous prefix even though the README documents prefix matching.
+func Resolve(j *File, idOrPrefix string) (*Record, error) {
+	for _, job := range j.Jobs {
+		if job.ID == idOrPrefix {
+			return job, nil
+		}
+	}
+	matches := []*Record{}
+	for _, job := range j.Jobs {
+		if strings.HasPrefix(job.ID, idOrPrefix) {
+			matches = append(matches, job)
+		}
+	}
+	switch len(matches) {
+	case 1:
+		return matches[0], nil
+	case 0:
+		return nil, fmt.Errorf("no such job %q", idOrPrefix)
+	default:
+		sample := matches[0].ID
+		if len(matches) > 1 {
+			sample += ", " + matches[1].ID
+		}
+		return nil, fmt.Errorf("ambiguous job id %q matches %d jobs (e.g. %s, ...); use a longer prefix or the full id",
+			idOrPrefix, len(matches), sample)
+	}
+}
+
 // ExitMarkerLister is the dependency-injection seam for CheckLiveness:
 // given a profile name, return the set of remote `.exit` filenames
 // (without the .exit suffix; jobID keys) plus a bool reporting whether

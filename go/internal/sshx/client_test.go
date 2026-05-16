@@ -17,8 +17,10 @@ func TestDetachSpawnCmd_PortableBase64Decode(t *testing.T) {
 	if !strings.Contains(cmd, "base64 -d 2>/dev/null || base64 -D") {
 		t.Errorf("decode is not a stderr-suppressed -d||-D fallback: %s", cmd)
 	}
-	// Sanity: still the nohup spawn shape that echoes the pid.
-	for _, want := range []string{"mkdir -p ~/.srv-jobs", "nohup bash -c", "QkFTRTY0", "echo $!"} {
+	// Sanity: still the spawn shape that echoes the pid, now wrapped
+	// in `setsid` so the job is its own process group and kill_job can
+	// signal the whole tree (regression: orphaned `sleep` child).
+	for _, want := range []string{"mkdir -p ~/.srv-jobs", "setsid nohup bash -c", "QkFTRTY0", "echo $!"} {
 		if !strings.Contains(cmd, want) {
 			t.Errorf("spawn line lost %q: %s", want, cmd)
 		}
