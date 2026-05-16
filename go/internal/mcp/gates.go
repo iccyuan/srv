@@ -292,11 +292,17 @@ func guardCheckRisky(tool, cmd string, confirm bool) *toolResult {
 	return &r
 }
 
-// longWaitSleep matches `sleep N` or `sleep N.X` where N > 5. Doesn't
-// catch `sleep 5m` / `sleep 1h` (rare in AI-generated commands;
-// would match if we tried, with false-positive risk on `sleep
-// ${VAR}`).
-var longWaitSleep = regexp.MustCompile(`\bsleep\s+(\d+(?:\.\d+)?)\b`)
+// longWaitSleep matches `sleep N` / `sleep N.X` (N>5 checked by the
+// caller) ONLY when `sleep` sits at a command position -- start of
+// line, after a shell separator (`; & | ( ) { }` / newline), or after
+// a `do`/`then` keyword. The old `\bsleep\s+\d` matched the substring
+// anywhere, so `pgrep -af 'sleep 30'`, `grep "sleep 60" log` and
+// `echo sleep 90` were wrongly rejected as blocking. Trade-off: a
+// genuinely-blocking `sleep` buried in quotes with no loop keyword
+// (`bash -c 'sleep 30'`) is no longer caught -- the 60s MCP per-tool
+// timeout stays the backstop, and under-rejecting beats blocking
+// legitimate fast inspection commands.
+var longWaitSleep = regexp.MustCompile(`(?:^|[;&|(){}\n]|\bdo\b|\bthen\b)\s*sleep\s+(\d+(?:\.\d+)?)\b`)
 
 // foreverPatterns are commands that don't terminate on their own.
 // `tail -f`, `watch`, and `journalctl -f` are the canonical sins.
