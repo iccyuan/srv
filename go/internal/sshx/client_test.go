@@ -1,6 +1,29 @@
 package sshx
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
+
+// TestDetachSpawnCmd_PortableBase64Decode guards the macOS/BSD
+// compatibility fix: the detached-job wrapper must decode its base64
+// payload with a GNU->BSD fallback so `detach` / `run
+// background=true` work whether the remote spells decode `-d`
+// (coreutils/busybox) or `-D` (macOS/*BSD). Regression for the bug
+// where a macOS remote silently ran an empty `bash -c` and never
+// wrote the .exit marker.
+func TestDetachSpawnCmd_PortableBase64Decode(t *testing.T) {
+	cmd := detachSpawnCmd("QkFTRTY0", "~", "~/.srv-jobs/job1.log")
+	if !strings.Contains(cmd, "base64 -d 2>/dev/null || base64 -D") {
+		t.Errorf("decode is not a stderr-suppressed -d||-D fallback: %s", cmd)
+	}
+	// Sanity: still the nohup spawn shape that echoes the pid.
+	for _, want := range []string{"mkdir -p ~/.srv-jobs", "nohup bash -c", "QkFTRTY0", "echo $!"} {
+		if !strings.Contains(cmd, want) {
+			t.Errorf("spawn line lost %q: %s", want, cmd)
+		}
+	}
+}
 
 func TestParseHostSpec(t *testing.T) {
 	cases := []struct {

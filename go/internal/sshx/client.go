@@ -654,6 +654,25 @@ func (c *Client) Shell(cwd string) (int, error) {
 	return 0, nil
 }
 
+// detachSpawnCmd builds the remote spawn line for a detached job.
+//
+// The base64 payload is decoded with a GNU -> BSD fallback
+// (`base64 -d` first, then `base64 -D` if that errors): GNU coreutils
+// / busybox spell decode `-d`, while macOS and the *BSDs spell it
+// `-D`. Without the fallback, `detach` and `run background=true`
+// silently produced a job that decoded to nothing (empty `bash -c`)
+// on a macOS/BSD remote -- the .exit marker was never written, so
+// wait_job could never see completion. stderr of the first attempt
+// is dropped so the GNU "invalid option -- D" / BSD "illegal option
+// -- d" noise never lands in the job log. Pure + package-visible so
+// the portability contract has a regression test without SSH.
+func detachSpawnCmd(encoded, cwd, logPath string) string {
+	return fmt.Sprintf(
+		"mkdir -p ~/.srv-jobs && cd %s && (nohup bash -c \"$(echo %s | { base64 -d 2>/dev/null || base64 -D; })\" </dev/null >%s 2>&1 & echo $!)",
+		srvtty.ShQuotePath(cwd), encoded, logPath,
+	)
+}
+
 // RunDetached spawns `command` on the remote with nohup, redirecting its
 // stdout/stderr to ~/.srv-jobs/<jobID>.log. Returns the remote pid printed
 // by the spawn line.
@@ -671,10 +690,7 @@ func (c *Client) RunDetached(command string, cwd string, jobID string) (int, err
 	// quotes) and we still ship it intact through `bash -c`.
 	wrappedCmd := fmt.Sprintf("(%s); echo $? > %s", command, exitPath)
 	encoded := srvtty.Base64Encode(wrappedCmd)
-	wrapped := fmt.Sprintf(
-		"mkdir -p ~/.srv-jobs && cd %s && (nohup bash -c \"$(echo %s | base64 -d)\" </dev/null >%s 2>&1 & echo $!)",
-		srvtty.ShQuotePath(cwdOrTilde(cwd)), encoded, logPath,
-	)
+	wrapped := detachSpawnCmd(encoded, cwdOrTilde(cwd), logPath)
 	res, err := c.RunCapture(wrapped, "")
 	if err != nil {
 		return 0, err
