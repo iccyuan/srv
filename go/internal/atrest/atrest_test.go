@@ -2,6 +2,7 @@ package atrest
 
 import (
 	"bytes"
+	"encoding/base64"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -59,18 +60,25 @@ func TestDecryptLinePassesThroughPlaintext(t *testing.T) {
 
 func TestDecryptLineTamperingRejected(t *testing.T) {
 	withSrvHome(t)
-	// Use a payload long enough that flipping a middle base64 byte
-	// definitely lands on real ciphertext bytes, not on trailing
-	// base64 padding characters (= signs) which can decode through
-	// fine and produce no observable change.
 	enc, err := EncryptLine([]byte(`{"big":"enough to span past the GCM tag region"}`))
 	if err != nil {
 		t.Fatalf("encrypt: %v", err)
 	}
-	tampered := append([]byte{}, enc...)
-	tampered[len(tampered)/2] ^= 0x01
-	_, err = DecryptLine(tampered)
-	if err == nil {
+	// Tamper *inside* the decoded frame, not on the base64 text:
+	// XOR'ing a base64 character can yield a non-alphabet byte
+	// (A->@, z->{, +->*, ...). base64 decode then fails and
+	// DecryptLine correctly falls back to plaintext passthrough --
+	// which is NOT the GCM-tag path this test means to exercise, and
+	// whether it happens is random per nonce. Decode, flip a byte in
+	// the ciphertext region (past magic+nonce), and re-encode so we
+	// deterministically reach aead.Open.
+	frame, err := base64.StdEncoding.DecodeString(string(enc))
+	if err != nil {
+		t.Fatalf("decode frame: %v", err)
+	}
+	frame[len(magicBytes)+nonceLen] ^= 0x01
+	tampered := []byte(base64.StdEncoding.EncodeToString(frame))
+	if _, err := DecryptLine(tampered); err == nil {
 		t.Error("expected GCM tag check to reject tampered ciphertext")
 	}
 }
