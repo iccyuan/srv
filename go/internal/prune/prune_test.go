@@ -1,9 +1,12 @@
 package prune
 
 import (
-	"srv/internal/jobs"
 	"strings"
 	"testing"
+
+	"srv/internal/clierr"
+	"srv/internal/config"
+	"srv/internal/jobs"
 )
 
 // These three guard the local-ledger semantics that moved here verbatim
@@ -103,4 +106,83 @@ func TestPruneTargetsOneByID(t *testing.T) {
 	if len(loaded.Jobs) != 1 || loaded.Jobs[0].ID != "done-b" {
 		t.Errorf("expected only done-b to survive, got %+v", loaded.Jobs)
 	}
+}
+
+// TestRemoteSweepScriptGatesOnExit is the regression guard for the bug
+// where `srv prune jobs <id> --remote` deleted a still-running job's
+// remote .log unconditionally. The targeted path is reachable with an
+// id that is NOT in the local ledger (stale/pruned ledger, id from
+// another machine, typo colliding with a live job), in which case
+// pruneJobs never verified the job finished -- so the script ITSELF
+// must gate the rm on the .exit marker. The invariant: every command
+// that can remove a .log must first prove that job's .exit exists.
+func TestRemoteSweepScriptGatesOnExit(t *testing.T) {
+	got := remoteSweepScript("abc123")
+	// The .log rm must not be reachable unless .exit was tested first.
+	if !strings.Contains(got, "[ -e ~/.srv-jobs/abc123.exit ]") {
+		t.Fatalf("targeted sweep does not gate on the .exit marker:\n%s", got)
+	}
+	gate := strings.Index(got, "[ -e ~/.srv-jobs/abc123.exit ]")
+	rmLog := strings.Index(got, "abc123.log")
+	if gate < 0 || rmLog < 0 || gate > rmLog {
+		t.Fatalf("the .exit test must precede the .log rm:\n%s", got)
+	}
+	// A bare unconditional `rm -f ...log` (the old bug) must be gone:
+	// the rm has to be chained behind the test with &&.
+	if strings.Contains(got, "&& rm -f") == false {
+		t.Errorf("targeted rm is not && -chained behind the .exit test:\n%s", got)
+	}
+
+	// The no-target sweep only ever touches files discovered by
+	// iterating *.exit, so a log without an .exit is structurally
+	// unreachable; assert it still does that (no `rm` of a bare *.log).
+	all := remoteSweepScript("")
+	if !strings.Contains(all, "for e in *.exit") {
+		t.Errorf("no-target sweep must iterate *.exit only:\n%s", all)
+	}
+	if strings.Contains(all, "rm -f *.log") || strings.Contains(all, `rm -f ~/.srv-jobs/*.log`) {
+		t.Errorf("no-target sweep must not blanket-rm logs:\n%s", all)
+	}
+}
+
+// TestCmdDispatch covers the Cmd argument parser scenarios: a bare
+// prune is usage (exit 2) not a silent no-op, an unknown target is
+// exit 2, and --remote is positional-independent. The --remote success
+// paths need a live host and are exercised by the manual/E2E pass, not
+// here (config.Resolve would need real config); these assert the
+// pre-resolve dispatch only.
+func TestCmdDispatch(t *testing.T) {
+	t.Run("bare prune is usage exit 2", func(t *testing.T) {
+		err := Cmd(nil, nil, "")
+		if err == nil || clierr.CodeOf(err) != 2 {
+			t.Fatalf("bare prune: want exit-2 usage error, got %v", err)
+		}
+		if !strings.Contains(err.Error(), "usage:") {
+			t.Errorf("bare prune error should be usage text, got %q", err)
+		}
+	})
+	t.Run("unknown target is exit 2", func(t *testing.T) {
+		err := Cmd([]string{"bogus"}, nil, "")
+		if err == nil || clierr.CodeOf(err) != 2 {
+			t.Fatalf("unknown target: want exit-2, got %v", err)
+		}
+		if !strings.Contains(err.Error(), "unknown prune target") {
+			t.Errorf("want unknown-target message, got %q", err)
+		}
+	})
+	t.Run("--remote before target still parses target", func(t *testing.T) {
+		// Reaches sweepRemoteJobs -> config.Resolve, which with an
+		// empty (profile-less) config returns a clean error. The
+		// point: --remote leading did not get consumed as the target;
+		// "jobs" was, so we went down the remote path. Hermetic:
+		// tempdir SRV_HOME + cleared SRV_PROFILE so a developer's real
+		// profile can't satisfy Resolve and skip the error.
+		dir := t.TempDir()
+		t.Setenv("SRV_HOME", dir)
+		t.Setenv("SRV_PROFILE", "")
+		err := Cmd([]string{"--remote", "jobs"}, &config.Config{}, "")
+		if err == nil || !strings.Contains(err.Error(), "--remote") {
+			t.Fatalf("expected --remote resolve error proving target parsed, got %v", err)
+		}
+	})
 }

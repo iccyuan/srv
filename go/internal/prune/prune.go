@@ -159,25 +159,16 @@ func pruneJobs(rest []string, cfg *config.Config, profileOverride string, remote
 
 // sweepRemoteJobs deletes the log/exit pair for completed jobs under
 // ~/.srv-jobs/ on the resolved profile's host. When target != "" only
-// that job's files go (it was already verified finished by pruneJobs);
-// otherwise every job carrying a .exit marker -- which by construction
-// excludes still-running jobs -- is removed in one round-trip.
+// that job's files go; otherwise every job carrying a .exit marker --
+// which by construction excludes still-running jobs -- is removed in
+// one round-trip. Both paths gate on the .exit marker so a running job
+// (log present, no .exit yet) is never touched -- see remoteSweepScript.
 func sweepRemoteJobs(target string, cfg *config.Config, profileOverride string) error {
 	name, profile, err := config.Resolve(cfg, profileOverride)
 	if err != nil {
 		return clierr.Errf(1, "--remote: %v", err)
 	}
-	var sh string
-	if target != "" {
-		sh = fmt.Sprintf(`rm -f ~/.srv-jobs/%s.log ~/.srv-jobs/%s.exit && echo 1 || echo 0`, target, target)
-	} else {
-		// Literal-glob safe: with no matches the loop body runs once
-		// with e="*.exit", the `-e` test fails, and we break with n=0.
-		sh = `n=0; cd ~/.srv-jobs 2>/dev/null || { echo 0; exit 0; }; ` +
-			`for e in *.exit; do [ -e "$e" ] || break; id="${e%.exit}"; ` +
-			`rm -f "$id.exit" "$id.log" && n=$((n+1)); done; echo "$n"`
-	}
-	res, err := remote.RunCapture(profile, "", sh)
+	res, err := remote.RunCapture(profile, "", remoteSweepScript(target))
 	if err != nil {
 		return clierr.Errf(1, "--remote sweep on %q failed: %v", name, err)
 	}
@@ -187,6 +178,32 @@ func sweepRemoteJobs(target string, cfg *config.Config, profileOverride string) 
 	}
 	fmt.Printf("remote: deleted %s completed job log/exit pair(s) on %s (~/.srv-jobs/)\n", cnt, name)
 	return nil
+}
+
+// remoteSweepScript builds the POSIX sh deletion command. The cardinal
+// invariant (also stated in the package doc): a job's files are removed
+// only when its .exit marker exists, so a still-running job -- log
+// present, no .exit yet -- is never touched. This must hold for BOTH
+// paths, because the targeted path is reachable for an id that is NOT
+// in the local ledger (stale/already-pruned ledger, an id from another
+// machine, or a typo colliding with a live job's id): in that case
+// pruneJobs prunes zero records and never verifies the job finished, so
+// the gate cannot be delegated to it -- it lives here unconditionally.
+//
+//	target != ""  delete <id>.{log,exit} iff <id>.exit exists -> echo 1/0
+//	target == ""  iterate *.exit only (literal-glob safe: with no
+//	              matches the body runs once with e="*.exit", the -e
+//	              test fails, and we break with n=0) -> echo count
+func remoteSweepScript(target string) string {
+	if target != "" {
+		return fmt.Sprintf(
+			`[ -e ~/.srv-jobs/%s.exit ] && `+
+				`rm -f ~/.srv-jobs/%s.log ~/.srv-jobs/%s.exit && echo 1 || echo 0`,
+			target, target, target)
+	}
+	return `n=0; cd ~/.srv-jobs 2>/dev/null || { echo 0; exit 0; }; ` +
+		`for e in *.exit; do [ -e "$e" ] || break; id="${e%.exit}"; ` +
+		`rm -f "$id.exit" "$id.log" && n=$((n+1)); done; echo "$n"`
 }
 
 func pruneSessions() error {
