@@ -22,6 +22,16 @@ func Ensure() bool {
 	if Ping() {
 		return true
 	}
+	// Never auto-spawn a daemon from inside a `go test` binary:
+	// os.Executable() there is the test binary, and exec'ing it with
+	// a `daemon` arg re-runs the whole suite recursively -- an
+	// exponential fork bomb that freezes the machine (see underGoTest
+	// for the full chain). Returning false here makes every TryX
+	// caller fall back to a direct sshx.Dial, which is exactly the
+	// path the live test harness already documents and expects.
+	if underGoTest() {
+		return false
+	}
 	if err := spawnDaemonDetached(); err != nil {
 		fmt.Fprintln(os.Stderr, "srv: failed to spawn daemon:", err)
 		return false
