@@ -42,6 +42,26 @@ type boundedStreamResult struct {
 // matching the regex are accumulated AND emitted via progress
 // (filtering at the source is what keeps grep mandatory for
 // follow-mode in the first place).
+// lineBufferedFollow wraps a follow command so its stdout is
+// line-buffered instead of the default ~8 KiB block buffering to the
+// SSH pipe (the remote isn't a TTY). Without this, lines a chatty
+// `tail -F` / `journalctl -f` produces sit in the remote process's
+// stdio buffer and are DESTROYED when the follow deadline hard-closes
+// the SSH connection -- only the last in-flight line survived, so the
+// final result lost almost everything captured during the window
+// regardless of the 16 KiB cap. `stdbuf -oL` makes every line hit the
+// wire immediately so forwardStreamReader accumulates it in real time.
+//
+// stdbuf(1) is GNU coreutils only (macOS/*BSD/busybox lack it -- same
+// portability class as the setsid detach fix). Gate on `command -v`
+// with a plain fallback: on those hosts follow keeps the pre-fix
+// block-buffered behavior (degraded, but no regression / no error).
+func lineBufferedFollow(cmd string) string {
+	return fmt.Sprintf(
+		"if command -v stdbuf >/dev/null 2>&1; then stdbuf -oL %s; else %s; fi",
+		cmd, cmd)
+}
+
 func runBoundedStream(c *sshx.Client, remoteCmd, cwd string, followSeconds int, filter *regexp.Regexp) boundedStreamResult {
 	token := progressToken()
 	timer := time.NewTimer(time.Duration(followSeconds) * time.Second)
@@ -73,13 +93,7 @@ func runBoundedStream(c *sshx.Client, remoteCmd, cwd string, followSeconds int, 
 		}
 		emitProgress(token, capturedBytes, line)
 	}
-	// PTY so the remote `tail -F`/`journalctl -f` libc line-buffers
-	// (isatty) instead of ~8 KiB block-buffering to a pipe -- without
-	// it, lines sit unflushed in the remote process and die with it
-	// when the deadline hard-closes the connection (only the last
-	// in-flight line survived). PTY works on every platform; stdbuf
-	// would be GNU-only.
-	_, _, _, runErr := c.RunStreamPTY(remoteCmd, cwd, onChunk)
+	_, _, _, runErr := c.RunStream(remoteCmd, cwd, onChunk)
 	return boundedStreamResult{
 		Text:   buf.String(),
 		Bytes:  capturedBytes,
@@ -214,7 +228,7 @@ func handleTail(args map[string]any, cfg *config.Config, profileOverride string)
 	}
 	defer c.Close()
 
-	remoteCmd := fmt.Sprintf("tail -F -n %d %s", lines, srvtty.ShQuotePath(path))
+	remoteCmd := lineBufferedFollow(fmt.Sprintf("tail -F -n %d %s", lines, srvtty.ShQuotePath(path)))
 
 	res := runBoundedStream(c, remoteCmd, "", follow, re)
 	// res.RunErr is expected when the timer-close ends the stream;
@@ -328,7 +342,7 @@ func handleJournal(args map[string]any, cfg *config.Config, profileOverride stri
 	// the follow-mode chunk filter is nil here; the same gate that
 	// requires SOME filter argument has already passed by this
 	// point (unit / since / priority / grep).
-	res := runBoundedStream(c, remoteCmd, cwd, follow, nil)
+	res := runBoundedStream(c, lineBufferedFollow(remoteCmd), cwd, follow, nil)
 
 	if res.Capped {
 		return oversizeResult("journal", res.Total,
