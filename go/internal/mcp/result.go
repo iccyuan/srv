@@ -2,6 +2,7 @@ package mcp
 
 import (
 	"fmt"
+	"maps"
 	"srv/internal/config"
 	"srv/internal/jobs"
 	"srv/internal/sshx"
@@ -119,6 +120,59 @@ func buildRunText(res *sshx.RunCaptureResult, cwd string) string {
 	return text
 }
 
+// payloadResult wraps a text payload as a Content-only tool result.
+//
+// NO StructuredContent, deliberately: an MCP client (Claude Code)
+// surfaces structuredContent in place of the text block whenever it
+// is present and isError is false. For every tool whose entire value
+// IS the text -- command output, log lines, file content, sync
+// previews -- attaching a structured metadata stub silently hides
+// the payload and leaves the model only that stub. Keeping these
+// Content-only is the exact contract jsonResult already uses for the
+// structured tools, for the same token reason; metadata that the
+// model genuinely needs (clamp notices, transport errors) is folded
+// into the text by the caller instead.
+//
+// isError still drives the client's error styling and the stats OK
+// flag; when true the text surfaces regardless.
+func payloadResult(text string, isError bool) toolResult {
+	return toolResult{
+		Content: []toolContent{{Type: "text", Text: text}},
+		IsError: isError,
+	}
+}
+
+// runResult builds the final `run` tool result from a captured
+// execution.
+//
+// Content-only on purpose -- NO StructuredContent on the success
+// path. MCP clients (Claude Code) surface `structuredContent` in
+// place of the text block whenever it is present and isError is
+// false, which would hide the command's actual stdout -- the entire
+// point of `run`. (On a non-zero exit isError=true and the text is
+// shown, but a successful command's output would silently vanish,
+// leaving the model only a byte count.) The `[ok cwd X]` / `[exit N
+// cwd X]` footer baked in by buildRunText already carries exit code
+// and cwd, so nothing the model needs is lost. This mirrors the
+// Content-only contract of jsonResult and its token rationale.
+//
+// Oversize still routes to oversizeResult, which sets isError=true
+// (so its text DOES surface) and carries retry metadata plus `extra`
+// (e.g. bytes_emitted / streamed from the streaming path) in
+// structuredContent.
+func runResult(res *sshx.RunCaptureResult, cwd string, extra map[string]any) toolResult {
+	text := buildRunText(res, cwd)
+	if len(text) > ResultByteMax {
+		ex := map[string]any{"exit_code": res.ExitCode, "cwd": cwd}
+		maps.Copy(ex, extra)
+		return oversizeResult("run", len(text), runOversizeHint, ex)
+	}
+	return toolResult{
+		Content: []toolContent{{Type: "text", Text: text}},
+		IsError: res.ExitCode != 0,
+	}
+}
+
 // oversizeResult is the unified rejection when a tool's text payload
 // exceeds ResultByteMax. The body is intentionally not echoed -- the
 // model is expected to add a filter and retry, not to read a sliced
@@ -136,9 +190,7 @@ func oversizeResult(tool string, gotBytes int, hint string, extra map[string]any
 		"bytes_returned":  gotBytes,
 		"cap_bytes":       ResultByteMax,
 	}
-	for k, v := range extra {
-		sc[k] = v
-	}
+	maps.Copy(sc, extra)
 	r := textErr(msg)
 	r.StructuredContent = sc
 	return r

@@ -215,6 +215,89 @@ func TestBuildRunText_NoTruncationAtCap(t *testing.T) {
 	}
 }
 
+// TestPayloadResult_ContentOnly guards the shared contract for every
+// payload-bearing tool (tail, journal, tail_log, wait_job, sync
+// previews, kill_job): the result must be Content-only so the MCP
+// client cannot surface a structured stub in place of the text and
+// hide the actual payload. Holds for both error states.
+func TestPayloadResult_ContentOnly(t *testing.T) {
+	for _, isErr := range []bool{false, true} {
+		r := payloadResult("the-actual-log-lines", isErr)
+		if r.StructuredContent != nil {
+			t.Fatalf("payloadResult(isErr=%v) MUST NOT set StructuredContent: %#v", isErr, r.StructuredContent)
+		}
+		if r.IsError != isErr {
+			t.Errorf("IsError = %v, want %v", r.IsError, isErr)
+		}
+		if len(r.Content) != 1 || r.Content[0].Text != "the-actual-log-lines" {
+			t.Fatalf("payload missing/garbled in Content: %+v", r.Content)
+		}
+	}
+}
+
+// TestRunResult_SuccessIsContentOnly is the regression guard for the
+// bug where a successful `run` returned StructuredContent alongside
+// the text. MCP clients surface structuredContent in place of the
+// text block when isError is false, so the command's actual stdout
+// became invisible -- the model saw only a byte count. The success
+// path MUST be Content-only; the [ok cwd X] footer carries exit+cwd.
+func TestRunResult_SuccessIsContentOnly(t *testing.T) {
+	res := &sshx.RunCaptureResult{Stdout: "the-real-output\n", ExitCode: 0}
+	r := runResult(res, "/srv", map[string]any{"streamed": true})
+	if r.IsError {
+		t.Errorf("success runResult should not be IsError")
+	}
+	if r.StructuredContent != nil {
+		t.Fatalf("success runResult MUST NOT set StructuredContent (client would hide stdout): %#v", r.StructuredContent)
+	}
+	if len(r.Content) != 1 || !strings.Contains(r.Content[0].Text, "the-real-output") {
+		t.Fatalf("stdout missing from Content text: %+v", r.Content)
+	}
+	if !strings.Contains(r.Content[0].Text, "[ok cwd /srv]") {
+		t.Errorf("footer (exit+cwd) missing from text: %q", r.Content[0].Text)
+	}
+}
+
+// Non-zero exit: still Content-only (isError=true makes the client
+// surface the text anyway), with the [exit N ...] footer.
+func TestRunResult_NonZeroExit(t *testing.T) {
+	res := &sshx.RunCaptureResult{Stdout: "partial", Stderr: "boom", ExitCode: 7}
+	r := runResult(res, "/x", nil)
+	if !r.IsError {
+		t.Errorf("non-zero exit must be IsError=true")
+	}
+	if r.StructuredContent != nil {
+		t.Errorf("non-zero exit should still be Content-only: %#v", r.StructuredContent)
+	}
+	if !strings.Contains(r.Content[0].Text, "[exit 7 cwd /x]") {
+		t.Errorf("missing exit footer: %q", r.Content[0].Text)
+	}
+}
+
+// Oversize routes to oversizeResult: isError=true (text DOES surface)
+// and `extra` (stream diagnostics) is merged into structuredContent.
+func TestRunResult_OversizeCarriesExtra(t *testing.T) {
+	big := strings.Repeat("x", ResultByteMax+10)
+	res := &sshx.RunCaptureResult{Stdout: big, ExitCode: 0}
+	r := runResult(res, "/c", map[string]any{"bytes_emitted": 999, "streamed": true})
+	if !r.IsError {
+		t.Fatalf("oversize must be IsError=true so its text surfaces")
+	}
+	sc, ok := r.StructuredContent.(map[string]any)
+	if !ok {
+		t.Fatalf("oversize structuredContent not a map: %T", r.StructuredContent)
+	}
+	if sc["rejected_reason"] != "oversize_output" {
+		t.Errorf("rejected_reason = %v", sc["rejected_reason"])
+	}
+	if sc["bytes_emitted"] != 999 || sc["streamed"] != true {
+		t.Errorf("stream diagnostics not merged through extra: %v", sc)
+	}
+	if sc["cwd"] != "/c" {
+		t.Errorf("cwd not threaded into oversize extras: %v", sc)
+	}
+}
+
 func TestOversizeResult_ShapeAndStructured(t *testing.T) {
 	r := oversizeResult("run", 99999, "use head -n 100",
 		map[string]any{"exit_code": 0, "cwd": "/x"})
@@ -275,6 +358,45 @@ func TestDetachedResult(t *testing.T) {
 	}
 	if info["next_tool"] != "wait_job" {
 		t.Errorf("next_tool = %v, want wait_job", info["next_tool"])
+	}
+}
+
+// TestClassifyWaitStatus pins the poll-output parser, including the
+// regression case behind the live bug: empty / unrecognized stdout
+// must classify as "unknown" so handleWaitJob can turn it into a
+// retryable error instead of a silent {status:"unknown"} success.
+func TestClassifyWaitStatus(t *testing.T) {
+	cases := []struct {
+		name     string
+		stdout   string
+		status   string
+		exitCode int
+		body     string
+	}{
+		{"completed exit 0", "STATUS=completed EXIT=0\nlog line a\nlog line b", "completed", 0, "log line a\nlog line b"},
+		{"completed nonzero", "STATUS=completed EXIT=7\nboom", "completed", 7, "boom"},
+		{"completed no body", "STATUS=completed EXIT=0", "completed", 0, ""},
+		{"completed garbled exit", "STATUS=completed EXIT=notanum\nx", "completed", -1, "x"},
+		{"killed", "STATUS=killed\npartial output", "killed", -1, "partial output"},
+		{"running", "STATUS=running\n", "running", -1, ""},
+		// The bug: empty stdout (gzip-wrapper glitch) must NOT look
+		// like any terminal/active state.
+		{"empty -> unknown", "", "unknown", -1, ""},
+		{"shell noise -> unknown", "zsh: command not found: seq\n", "unknown", -1, ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			st, ec, body := classifyWaitStatus(tc.stdout)
+			if st != tc.status {
+				t.Errorf("status = %q, want %q", st, tc.status)
+			}
+			if ec != tc.exitCode {
+				t.Errorf("exitCode = %d, want %d", ec, tc.exitCode)
+			}
+			if body != tc.body {
+				t.Errorf("body = %q, want %q", body, tc.body)
+			}
+		})
 	}
 }
 
