@@ -516,14 +516,18 @@ func TestLive(t *testing.T) {
 		}
 	})
 
-	// --- >16 KiB ONE-SHOT: must reject cleanly with the oversize
+	// --- >64 KiB ONE-SHOT: must reject cleanly with the oversize
 	// receipt -- never truncate-and-return a sliced fragment, never
 	// hang. Proves the cap is enforced and the body is withheld. ---
 	t.Run("TailOneShotOversize", func(t *testing.T) {
 		h := newLiveHarness(t)
-		tok := uniq("OVR1")
+		// Long token padding makes each generated line ~140 B so the
+		// livegen 1000-line ceiling still clears the 64 KiB cap with
+		// margin (~140 KiB). The pad is plain [A-Z0-9-] -> safe as a
+		// literal grep pattern and shell-quoted arg.
+		tok := uniq("OVR1") + strings.Repeat("X", 96)
 		path := h.tmp("oversize1")
-		// ~1000 lines * ~45 B ≈ ~45 KiB, far over the 16 KiB cap.
+		// ~1000 lines * ~140 B ≈ ~140 KiB, far over the 64 KiB cap.
 		// interval 0 -> one instant burst; generator self-caps at 30s.
 		h.spawn("lines", tok, path, 0, 1000, 0, 30)
 		h.waitFor("1000 generated lines", 25*time.Second, func() bool {
@@ -550,7 +554,7 @@ func TestLive(t *testing.T) {
 			t.Errorf("cap_bytes = %v, want %d", sc["cap_bytes"], ResultByteMax)
 		}
 		if got, _ := sc["bytes_returned"].(int); got <= ResultByteMax {
-			t.Errorf("bytes_returned = %d, want > %d (file is ~45 KiB)", got, ResultByteMax)
+			t.Errorf("bytes_returned = %d, want > %d (file is ~140 KiB)", got, ResultByteMax)
 		}
 		// The body MUST NOT be returned: the contract is "model adds a
 		// filter and retries", not "model reads a truncated slice that
@@ -564,7 +568,7 @@ func TestLive(t *testing.T) {
 	// --- HEAVY no-loss, CORRECTLY timed: this is the real test of
 	// "does follow actually deliver the data". 350 distinct numbered
 	// lines (~12 KiB total: deliberately > the ~8 KiB pipe block
-	// buffer it crosses ~1.5x, but < the 16 KiB result cap so the
+	// buffer it crosses ~1.5x, but < the 64 KiB result cap so the
 	// body is returned and every line is checkable). Lines are PACED
 	// across the window AFTER a long warmup that covers BOTH dials
 	// (spawnRaw's own + handleTail's) so `tail -F` is provably

@@ -22,9 +22,11 @@ const (
 	// The MCP client keeps every tool result in its conversation
 	// history, so a single `cat /var/log/...` or `journalctl -n
 	// 100000` permanently inflates the client's memory by the full
-	// payload. 16 KiB is tight enough that small / structured output
-	// fits naturally and unbounded dumps trip the gate.
-	ResultByteMax         = 16 * 1024
+	// payload. 64 KiB is roomy enough that ordinary multi-screen
+	// output (a build log, a config dump, a few hundred journal
+	// lines) fits in one call, while still tripping the gate on
+	// genuinely unbounded dumps.
+	ResultByteMax         = 64 * 1024
 	waitJobDefaultSeconds = 8
 	waitJobMaxSeconds     = 15
 )

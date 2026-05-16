@@ -350,7 +350,7 @@ func rejectMessage(cmd, why string) string {
 	)
 }
 
-// Token-economy gates for MCP `run`. The ResultByteMax (16 KiB) cap
+// Token-economy gates for MCP `run`. The ResultByteMax (64 KiB) cap
 // stops the model from drowning in output, but it doesn't stop the
 // WASTED tokens that get paid when the model asks for an unbounded
 // source and we serve them the wrong slice. Forcing an explicit
