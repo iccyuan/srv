@@ -1,6 +1,41 @@
 package remote
 
-import "testing"
+import (
+	"strings"
+	"testing"
+
+	"srv/internal/config"
+)
+
+// ApplyEnv is the contract handleRun/handleDetach now depend on for
+// CLI/MCP parity: profile env vars are prepended to the command,
+// sorted, and it is a pure no-op when there is no env to apply.
+func TestApplyEnv(t *testing.T) {
+	const cmd = "echo hi"
+
+	if got := ApplyEnv(nil, cmd); got != cmd {
+		t.Errorf("ApplyEnv(nil) = %q; want unchanged %q", got, cmd)
+	}
+	if got := ApplyEnv(&config.Profile{}, cmd); got != cmd {
+		t.Errorf("ApplyEnv(empty env) = %q; want unchanged %q", got, cmd)
+	}
+
+	p := &config.Profile{Env: map[string]string{"BVAR": "2", "AVAR": "1"}}
+	got := ApplyEnv(p, cmd)
+	if !strings.HasSuffix(got, " "+cmd) {
+		t.Errorf("ApplyEnv result %q must end with the original command", got)
+	}
+	if !strings.Contains(got, "AVAR=") || !strings.Contains(got, "BVAR=") {
+		t.Errorf("ApplyEnv result %q must carry both env keys", got)
+	}
+	if strings.Index(got, "AVAR=") > strings.Index(got, "BVAR=") {
+		t.Errorf("ApplyEnv result %q must order keys deterministically (AVAR before BVAR)", got)
+	}
+	// Deterministic: same inputs -> byte-identical output (cache safety).
+	if again := ApplyEnv(p, cmd); again != got {
+		t.Errorf("ApplyEnv not deterministic: %q vs %q", got, again)
+	}
+}
 
 func TestValidateRemotePath_Valid(t *testing.T) {
 	valid := []string{

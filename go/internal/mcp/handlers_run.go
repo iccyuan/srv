@@ -41,7 +41,7 @@ func handleRun(args map[string]any, cfg *config.Config, profileOverride string) 
 	}
 	background, _ := args["background"].(bool)
 	if background {
-		rec, err := remote.SpawnDetached(profName, prof, cmd)
+		rec, err := remote.SpawnDetached(profName, prof, remote.ApplyEnv(prof, cmd))
 		if err != nil {
 			return textErr(err.Error())
 		}
@@ -61,6 +61,13 @@ func handleRun(args map[string]any, cfg *config.Config, profileOverride string) 
 	if label, msg := rejectUnfiltered(cmd); label != "" {
 		return rejectUnfilteredMessage(label, msg)
 	}
+	// Gates above intentionally scan the user's raw command; apply
+	// profile env only now, just before execution, so a leading
+	// `KEY=val` can't mask a sleep/cat/tail -f from the gates. Matches
+	// the CLI (cmds.go cmdRun): `srv env set` vars are prepended to
+	// every remote command. Without this the MCP `env` tool silently
+	// no-ops for `run`/`detach`.
+	cmd = remote.ApplyEnv(prof, cmd)
 	cwd := config.GetCwd(profName, prof)
 
 	// Sync path: warm daemon pool when the client didn't ask for
@@ -161,6 +168,9 @@ func handleDetach(args map[string]any, cfg *config.Config, profileOverride strin
 	if errResult != nil {
 		return *errResult
 	}
+	// Apply profile env (CLI/MCP parity -- see handleRun). Guard above
+	// already vetted the raw user command.
+	cmd = remote.ApplyEnv(prof, cmd)
 	rec, err := remote.SpawnDetached(profName, prof, cmd)
 	if err != nil {
 		return textErr(err.Error())
