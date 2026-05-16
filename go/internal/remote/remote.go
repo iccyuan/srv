@@ -193,9 +193,21 @@ func isASCIILetter(b byte) bool {
 	return (b >= 'a' && b <= 'z') || (b >= 'A' && b <= 'Z')
 }
 
-// ApplyEnv prepends `KEY=value ...` exports to the user's command
-// when the profile has an Env map. Order is deterministic (sorted
-// keys) so cache hits on the same cmd repeat byte-for-byte.
+// ApplyEnv exports the profile's Env map into the shell scope before
+// running the user's command: `export K1=v1 K2=v2; <cmd>`.
+//
+// It deliberately does NOT use the `K=v cmd` simple-command prefix.
+// That form is a shell *syntax error* in front of a compound command
+// (`for`/`while`/`if`/`{ }`/`case`) -- e.g. `K=v for i ...; do` --
+// and, for `;`/`&&`-joined lines, only binds to the first command.
+// `srv` runs arbitrary user commands (and the MCP wait_job poll is a
+// `for` loop), so the prefix form broke every compound command the
+// moment any env var was set. `export ...;` scopes the vars for the
+// whole line regardless of its shape.
+//
+// Order is deterministic (sorted keys) so cache hits on the same cmd
+// repeat byte-for-byte. Empty/no env is a pure pass-through so the
+// command stays exactly what the user typed.
 func ApplyEnv(profile *config.Profile, cmd string) string {
 	if profile == nil || len(profile.Env) == 0 {
 		return cmd
@@ -215,7 +227,7 @@ func ApplyEnv(profile *config.Profile, cmd string) string {
 	if len(parts) == 0 {
 		return cmd
 	}
-	return strings.Join(parts, " ") + " " + cmd
+	return "export " + strings.Join(parts, " ") + "; " + cmd
 }
 
 // silence unused import when session isn't directly referenced in

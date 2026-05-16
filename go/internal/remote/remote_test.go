@@ -7,9 +7,9 @@ import (
 	"srv/internal/config"
 )
 
-// ApplyEnv is the contract handleRun/handleDetach now depend on for
-// CLI/MCP parity: profile env vars are prepended to the command,
-// sorted, and it is a pure no-op when there is no env to apply.
+// ApplyEnv is the contract handleRun/handleDetach depend on for
+// CLI/MCP parity: profile env vars are exported into the shell scope
+// (`export K=v; cmd`), sorted, a pure no-op when there is no env.
 func TestApplyEnv(t *testing.T) {
 	const cmd = "echo hi"
 
@@ -22,8 +22,11 @@ func TestApplyEnv(t *testing.T) {
 
 	p := &config.Profile{Env: map[string]string{"BVAR": "2", "AVAR": "1"}}
 	got := ApplyEnv(p, cmd)
-	if !strings.HasSuffix(got, " "+cmd) {
-		t.Errorf("ApplyEnv result %q must end with the original command", got)
+	if !strings.HasPrefix(got, "export ") {
+		t.Errorf("ApplyEnv result %q must start with `export `", got)
+	}
+	if !strings.HasSuffix(got, "; "+cmd) {
+		t.Errorf("ApplyEnv result %q must end with `; <cmd>` so the vars scope the whole line", got)
 	}
 	if !strings.Contains(got, "AVAR=") || !strings.Contains(got, "BVAR=") {
 		t.Errorf("ApplyEnv result %q must carry both env keys", got)
@@ -34,6 +37,29 @@ func TestApplyEnv(t *testing.T) {
 	// Deterministic: same inputs -> byte-identical output (cache safety).
 	if again := ApplyEnv(p, cmd); again != got {
 		t.Errorf("ApplyEnv not deterministic: %q vs %q", got, again)
+	}
+}
+
+// Regression for the wait_job / compound-command breakage: the old
+// `K=v cmd` prefix form turned `K=v for i ...; do ...; done` into a
+// shell syntax error and only bound to the first `;`-joined command.
+// The export form must keep a compound command syntactically intact
+// and never emit the `<KEY>=<val> for` prefix pattern.
+func TestApplyEnv_CompoundCommandStaysValid(t *testing.T) {
+	p := &config.Profile{Env: map[string]string{"FOO": "bar"}}
+
+	loop := "for i in 1 2 3; do echo $i; done"
+	got := ApplyEnv(p, loop)
+	if !strings.HasSuffix(got, "; "+loop) {
+		t.Fatalf("compound command must survive intact after `; `; got %q", got)
+	}
+	if strings.Contains(got, "FOO=bar for ") {
+		t.Fatalf("regression: produced the broken `K=v for` prefix: %q", got)
+	}
+
+	multi := "echo a; printenv FOO; echo b"
+	if g := ApplyEnv(p, multi); !strings.HasSuffix(g, "; "+multi) {
+		t.Fatalf("multi-command line must be scoped as a whole; got %q", g)
 	}
 }
 
