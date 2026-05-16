@@ -16,6 +16,7 @@
 package mcplog
 
 import (
+	"bytes"
 	"fmt"
 	"os"
 	"sync"
@@ -74,4 +75,46 @@ func Logf(format string, args ...any) {
 	stamp := time.Now().Format(time.RFC3339)
 	line := fmt.Sprintf("%s [%d] %s\n", stamp, logPid, fmt.Sprintf(format, args...))
 	_, _ = f.WriteString(line)
+}
+
+// Prune trims mcp.log to its last keepBytes, dropping the oldest lines
+// while preserving the recent tail. It is the on-demand form of the
+// size-triggered trim open() performs at 1 MB: `srv prune mcp-log`
+// applies the same 256 KB retention immediately instead of waiting for
+// the file to balloon. The cut lands on a line boundary so the file
+// never starts mid-record. Returns bytes kept / dropped.
+//
+// Best-effort and failure-tolerant by the same logic as the rest of
+// this package: a live MCP server in another process may be appending
+// concurrently; worst case a couple of log lines race. A diagnostic
+// log is not authoritative state, so that trade-off is acceptable --
+// and identical to what open() already does.
+func Prune() (kept, dropped int64, err error) {
+	logMu.Lock()
+	defer logMu.Unlock()
+	path := Path()
+	st, err := os.Stat(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return 0, 0, nil
+		}
+		return 0, 0, err
+	}
+	if st.Size() <= keepBytes {
+		return st.Size(), 0, nil
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return 0, 0, err
+	}
+	orig := int64(len(data))
+	tail := data[orig-keepBytes:]
+	// Drop the partial first line so the file starts at a record edge.
+	if i := bytes.IndexByte(tail, '\n'); i >= 0 && i+1 <= len(tail) {
+		tail = tail[i+1:]
+	}
+	if err := os.WriteFile(path, tail, 0o600); err != nil {
+		return 0, 0, err
+	}
+	return int64(len(tail)), orig - int64(len(tail)), nil
 }

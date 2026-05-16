@@ -81,7 +81,6 @@ Detached jobs (background on remote, log to ~/.srv-jobs/<id>.log):
   srv jobs notify on             enable OS toast on job completion
   srv jobs notify webhook URL    POST JSON to URL on completion
   srv jobs notify test           fire a sample notification
-  srv jobs prune [<id>]          drop finished records (all, or just one id)
   srv logs <id> [-f]             cat (or tail -f) the remote log
   srv kill <id>                  SIGTERM the remote process and forget it
 
@@ -96,6 +95,15 @@ Sessions (per-shell isolation):
   srv sessions show              show this shell's session record
   srv sessions clear             drop this shell's session record
   srv sessions prune             remove records whose pid is dead
+
+Prune accumulated caches -- keeps the live/recent part, drops the stale
+part (full wipe is a different verb, e.g. srv stats --clear):
+  srv prune <TAB>                jobs | sessions | mcp-log | mcp-stats | all
+  srv prune jobs                 drop finished records from the local ledger
+  srv prune jobs --remote        also delete completed jobs' ~/.srv-jobs/
+                                 *.log + *.exit on the server (running jobs
+                                 untouched; opt-in, never implied)
+  srv prune all [--remote]       jobs + sessions + mcp-log + mcp-stats
 
 Command history (this session only by default, --all for everything):
   srv history                    last 50 commands run via srv (this shell)
@@ -250,7 +258,6 @@ const helpZH = `srv - 跨平台 SSH 远端命令工具,持久 cwd / 连接复用
   srv jobs notify on             job 完成时弹本地 OS 通知
   srv jobs notify webhook URL    job 完成时 POST JSON 到 URL
   srv jobs notify test           发一次测试通知
-  srv jobs prune [<id>]          删除已完成的 job 记录(全部或指定 id)
   srv logs <id> [-f]             cat(或 tail -f)远端日志
   srv kill <id>                  SIGTERM 远端进程并丢弃记录
 
@@ -265,6 +272,13 @@ Supervisor / 资源限制(对 srv run 和 srv -d 都生效):
   srv sessions show              当前 shell 的 session 记录
   srv sessions clear             删当前 session 记录
   srv sessions prune             清掉 PID 已死的 session
+
+清理累积的缓存 —— 留活/留近、只删陈旧(整文件清空是另一个动词,如 srv stats --clear):
+  srv prune <TAB>                jobs | sessions | mcp-log | mcp-stats | all
+  srv prune jobs                 删本地账本里已完成的 job 记录
+  srv prune jobs --remote        额外删服务器 ~/.srv-jobs/ 里已完成作业的
+                                 *.log + *.exit(运行中的不动;需显式 opt-in)
+  srv prune all [--remote]       jobs + sessions + mcp-log + mcp-stats
 
 命令历史(默认只看当前 shell, --all 看全部):
   srv history                    最近 50 条远端命令(当前 shell)

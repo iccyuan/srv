@@ -249,10 +249,7 @@ func handleSync(args map[string]any, cfg *config.Config, profileOverride string)
 		return textErr(fmt.Sprintf("sync delete would remove %d files (limit %d). Re-run dry_run=true, yes=true, or set delete_limit.", len(deletes), limit))
 	}
 	if len(files) == 0 && len(deletes) == 0 {
-		return toolResult{
-			Content:           []toolContent{{Type: "text", Text: "(nothing to sync)"}},
-			StructuredContent: map[string]any{"files": []string{}, "deletes": deletes, "remote_root": remoteRoot, "exit_code": 0},
-		}
+		return payloadResult("(nothing to sync)", false)
 	}
 	if o.DryRun {
 		text := fmt.Sprintf("would sync %d files to %s\n", len(files), remoteRoot)
@@ -267,15 +264,10 @@ func handleSync(args map[string]any, cfg *config.Config, profileOverride string)
 		if len(deletes) > 0 {
 			text += "\nwould Delete:\n" + strings.Join(deletes, "\n")
 		}
-		return toolResult{
-			Content: []toolContent{{Type: "text", Text: text}},
-			StructuredContent: map[string]any{
-				"files_count":   len(files),
-				"deletes_count": len(deletes),
-				"remote_root":   remoteRoot,
-				"dry_run":       true,
-			},
-		}
+		// Content-only: the file/delete list IS the preview the
+		// caller asked dry_run for. A {files_count, ...} stub would
+		// make the client surface counts and hide the list itself.
+		return payloadResult(text, false)
 	}
 	rc := 0
 	var terr error
@@ -350,14 +342,9 @@ func handleSyncDeleteDryRun(args map[string]any, cfg *config.Config, profileOver
 		remoteRoot = remote.ResolvePath(prof.SyncRoot, cwd)
 	}
 	text := fmt.Sprintf("would delete %d files from %s\n%s", len(deletes), remoteRoot, strings.Join(deletes, "\n"))
-	return toolResult{
-		Content: []toolContent{{Type: "text", Text: text}},
-		StructuredContent: map[string]any{
-			"deletes_count": len(deletes),
-			"remote_root":   remoteRoot,
-			"dry_run":       true,
-		},
-	}
+	// Content-only: the delete list IS the preview; a count stub
+	// would make the client hide which files would be removed.
+	return payloadResult(text, false)
 }
 
 func handleListDir(args map[string]any, cfg *config.Config, profileOverride string) toolResult {

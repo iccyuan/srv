@@ -190,19 +190,14 @@ func handleTail(args map[string]any, cfg *config.Config, profileOverride string)
 				"lower `lines`, or use the `grep` parameter to filter by regex",
 				map[string]any{"path": path, "exit_code": res.ExitCode, "lines_clamped": linesClamped})
 		}
-		structured := map[string]any{
-			"path":           path,
-			"follow_seconds": 0,
-			"bytes_captured": len(text),
-			"lines_clamped":  linesClamped,
-			"end_reason":     "complete",
-			"exit_code":      res.ExitCode,
+		// Content-only: the file slice IS the payload. The clamp
+		// notice was the only field the model needed that wasn't
+		// already in the text, so fold it in rather than leave it in
+		// a structured stub the client would surface instead.
+		if linesClamped {
+			text += fmt.Sprintf("\n[note: lines clamped to %d]", lines)
 		}
-		return toolResult{
-			Content:           []toolContent{{Type: "text", Text: text}},
-			IsError:           res.ExitCode != 0,
-			StructuredContent: structured,
-		}
+		return payloadResult(text, res.ExitCode != 0)
 	}
 
 	// Follow mode: bounded streaming. Dial direct, time-out via
@@ -226,29 +221,23 @@ func handleTail(args map[string]any, cfg *config.Config, profileOverride string)
 	}
 	text := res.Text
 	text += fmt.Sprintf("\n[followed %s for %ds, %d bytes captured]", path, follow, res.Bytes)
-	structured := map[string]any{
-		"path":           path,
-		"follow_seconds": follow,
-		"bytes_captured": res.Bytes,
-		"capped":         res.Capped,
-		"lines_clamped":  linesClamped,
-		"end_reason":     "timer",
+	if linesClamped {
+		text += fmt.Sprintf("\n[note: lines clamped to %d]", lines)
 	}
 	// Timer-close ends the SSH session abruptly, which surfaces as
 	// either os.ErrClosed OR "wait: remote command exited without
 	// exit status or exit signal" depending on which side raced
 	// who. Both are the documented success exit for bounded follow;
-	// we surface transport_error only for genuinely-other errors
+	// we surface a transport note only for genuinely-other errors
 	// (dial failures, unexpected eof on the underlying conn) the
-	// model has any business worrying about.
+	// model has any business worrying about. Folded into the text
+	// (not a structured stub) so payloadResult stays Content-only
+	// and the client cannot elide the followed lines.
 	if res.RunErr != nil && !errors.Is(res.RunErr, os.ErrClosed) &&
 		!strings.Contains(res.RunErr.Error(), "exited without exit status") {
-		structured["transport_error"] = res.RunErr.Error()
+		text += fmt.Sprintf("\n[transport: %s]", res.RunErr.Error())
 	}
-	return toolResult{
-		Content:           []toolContent{{Type: "text", Text: text}},
-		StructuredContent: structured,
-	}
+	return payloadResult(text, false)
 }
 
 // handleJournal exposes journalctl to the MCP server. Bounded
@@ -311,17 +300,13 @@ func handleJournal(args map[string]any, cfg *config.Config, profileOverride stri
 				"narrow `unit` / `since` / `priority`, use a tighter `grep`, or lower `lines`",
 				map[string]any{"unit": unit, "exit_code": res.ExitCode, "lines_clamped": linesClamped})
 		}
-		structured := map[string]any{
-			"exit_code":     res.ExitCode,
-			"cwd":           cwd,
-			"unit":          unit,
-			"lines_clamped": linesClamped,
+		// Content-only: buildRunText already appended the
+		// `[ok cwd ...]` / `[exit N cwd ...]` footer, so the only
+		// remaining structured-only signal is the clamp notice.
+		if linesClamped {
+			text += fmt.Sprintf("\n[note: lines clamped to %d]", lines)
 		}
-		return toolResult{
-			Content:           []toolContent{{Type: "text", Text: text}},
-			IsError:           res.ExitCode != 0,
-			StructuredContent: structured,
-		}
+		return payloadResult(text, res.ExitCode != 0)
 	}
 
 	// Follow mode: bounded tail-style streaming. Same shape as the
@@ -346,14 +331,11 @@ func handleJournal(args map[string]any, cfg *config.Config, profileOverride stri
 	}
 	text := res.Text
 	text += fmt.Sprintf("\n[followed journal on %s for %ds, %d bytes captured]", profName, follow, res.Bytes)
-	return toolResult{
-		Content: []toolContent{{Type: "text", Text: text}},
-		StructuredContent: map[string]any{
-			"unit":           unit,
-			"follow_seconds": follow,
-			"bytes_captured": res.Bytes,
-			"capped":         res.Capped,
-			"lines_clamped":  linesClamped,
-		},
+	if linesClamped {
+		text += fmt.Sprintf("\n[note: lines clamped to %d]", lines)
 	}
+	// Content-only, same rationale as the `tail` follow path: the
+	// followed journal lines ARE the payload and a structured stub
+	// would make the client elide them on this success result.
+	return payloadResult(text, false)
 }

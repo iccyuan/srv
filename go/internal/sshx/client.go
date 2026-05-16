@@ -481,12 +481,22 @@ func (c *Client) runCaptureGzip(command, cwd string) (*RunCaptureResult, bool) {
 		}
 		exit = ee.ExitStatus()
 	}
-	// gzip on an empty pipeline still produces a 10-byte minimal
-	// stream; "" stdout would mean the remote shell never even
-	// reached gzip, so we treat zero bytes as a decode miss and
-	// fall back.
+	// gzip on an empty pipeline still produces a ~10-byte minimal
+	// stream (header + CRC), so even a command with genuinely empty
+	// stdout yields a non-zero stdoutGz here. Zero bytes therefore
+	// means the remote shell never reached the gzip stage at all --
+	// the `set -o pipefail; (...) | gzip` wrapper failed to launch
+	// the pipeline (e.g. a shell that rejects `set -o pipefail`).
+	// That is a decode glitch, NOT a successful empty result:
+	// returning ok=false makes RunCapture fall through to the plain
+	// uncompressed path, which runs the bare command with no wrapper
+	// and captures the real output. Returning ok=true with Stdout=""
+	// here was the bug behind `wait_job`/`tail_log`/`kill_job`
+	// silently coming back empty (status:"unknown") on
+	// compression-enabled profiles. Matches this function's
+	// contract: ok=false on any glitch so the caller can fall back.
 	if stdoutGz.Len() == 0 {
-		return &RunCaptureResult{Stdout: "", Stderr: stderr.String(), ExitCode: exit, Cwd: cwd}, true
+		return nil, false
 	}
 	gr, gerr := gzip.NewReader(&stdoutGz)
 	if gerr != nil {

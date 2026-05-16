@@ -25,6 +25,7 @@ package mcpstats
 
 import (
 	"bufio"
+	"bytes"
 	"encoding/json"
 	"os"
 	"path/filepath"
@@ -252,6 +253,83 @@ func Clear() error {
 		}
 	}
 	return nil
+}
+
+// PruneOlderThan is the selective counterpart to Clear: it rewrites
+// the stats file (and its rotated `.1` sibling) keeping only records
+// whose TS is >= cutoff, and reports rows kept vs dropped. Recent
+// telemetry survives, stale history goes -- the "keep live, drop old"
+// contract every srv prune target shares. The `.checkpoint` marker is
+// left untouched: it only anchors --since-last, and a stale anchor at
+// worst makes the next report start from "everything kept".
+//
+// Corrupt lines count as dropped (same lenient stance LoadCalls takes
+// when reading). A file with nothing to drop is left byte-for-byte
+// alone -- no needless rewrite, no race with a live appender.
+func PruneOlderThan(cutoff time.Time) (kept, dropped int, err error) {
+	appendMu.Lock()
+	defer appendMu.Unlock()
+	path := pathFn()
+	for _, p := range []string{path, path + ".1"} {
+		k, d, e := pruneStatsFile(p, cutoff)
+		if e != nil {
+			return kept, dropped, e
+		}
+		kept += k
+		dropped += d
+	}
+	return kept, dropped, nil
+}
+
+// pruneStatsFile filters one JSONL file in place. Caller holds
+// appendMu. Missing file is a no-op; an emptied file is removed
+// rather than left as a zero-byte stub.
+func pruneStatsFile(p string, cutoff time.Time) (kept, dropped int, err error) {
+	f, err := os.Open(p)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return 0, 0, nil
+		}
+		return 0, 0, err
+	}
+	var keepLines [][]byte
+	sc := bufio.NewScanner(f)
+	sc.Buffer(make([]byte, 64*1024), 1024*1024)
+	for sc.Scan() {
+		raw := append([]byte(nil), sc.Bytes()...)
+		var c Call
+		if json.Unmarshal(raw, &c) != nil {
+			dropped++
+			continue
+		}
+		if c.TS.Before(cutoff) {
+			dropped++
+			continue
+		}
+		keepLines = append(keepLines, raw)
+		kept++
+	}
+	if err := sc.Err(); err != nil {
+		f.Close()
+		return kept, dropped, err
+	}
+	f.Close()
+	if dropped == 0 {
+		return kept, 0, nil
+	}
+	if len(keepLines) == 0 {
+		return kept, dropped, os.Remove(p)
+	}
+	var buf bytes.Buffer
+	for _, l := range keepLines {
+		buf.Write(l)
+		buf.WriteByte('\n')
+	}
+	tmp := p + ".tmp"
+	if err := os.WriteFile(tmp, buf.Bytes(), 0o600); err != nil {
+		return kept, dropped, err
+	}
+	return kept, dropped, os.Rename(tmp, p)
 }
 
 // checkpointPath returns the location of the "last viewed at"

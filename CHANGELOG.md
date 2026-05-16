@@ -1,5 +1,15 @@
 # Changelog
 
+## [Unreleased]
+
+### Added
+- **顶层 `srv prune <target>` 命令**:统一清理 srv 累积的本地缓存/历史,target 可 Tab 补全 —— `jobs` / `sessions` / `mcp-log` / `mcp-stats` / `all`。补全 DSL、help、target 列表三处共用同一份 `prune.Targets`。
+- **prune 语义一致性:留活/留近,只删陈旧**。五个 target 统一为"选择性 prune"而非整文件 wipe —— `jobs` 留运行中的、`sessions` 留 PID 活的、`mcp-log` 留最近 256 KB 尾部(新增 `mcplog.Prune`,按行边界裁剪)、`mcp-stats` 留最近 7 天(新增 `mcpstats.PruneOlderThan`,按 `ts` 过滤并改写 `.jsonl` 及其 `.1` 轮转副本)。整文件清空是另一个动词(如 `srv stats --clear`)。
+- **`srv prune jobs --remote`**(仅 jobs/all,始终显式 opt-in,绝不隐含):额外删服务器 `~/.srv-jobs/` 里**已完成**作业的 `*.log` + `*.exit`(以远端 `.exit` 标记判定完成,运行中的作业绝不触碰)。
+
+### Changed
+- **`srv jobs prune` 彻底替换为 `srv prune jobs`**:本地账本清理语义原样迁移到新的 `internal/prune` 包;旧 `srv jobs prune` 现在报错并指向新命令。`srv sessions prune` 保留作别名(行为不变)。
+
 ## [Go 2.6.7] - 2026-05-15
 
 ### Added

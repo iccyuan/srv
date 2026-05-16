@@ -329,3 +329,71 @@ func TestCallEstTokens(t *testing.T) {
 		t.Errorf("EstTokens (with progress) = %d, want 3025", c2.EstTokens())
 	}
 }
+
+// TestPruneOlderThan: rows before the cutoff go, rows at/after it stay,
+// the surviving file round-trips, and a cutoff that drops nothing
+// leaves the file byte-for-byte untouched (no needless rewrite).
+func TestPruneOlderThan(t *testing.T) {
+	path := withTempPath(t)
+	now := time.Now().Truncate(time.Second)
+	old1 := Call{TS: now.Add(-72 * time.Hour), Tool: "run", OK: true}
+	old2 := Call{TS: now.Add(-48 * time.Hour), Tool: "tail", OK: true}
+	recent := Call{TS: now.Add(-1 * time.Hour), Tool: "push", OK: true}
+	for _, c := range []Call{old1, old2, recent} {
+		if err := AppendCall(c); err != nil {
+			t.Fatalf("AppendCall: %v", err)
+		}
+	}
+
+	cutoff := now.Add(-24 * time.Hour)
+	kept, dropped, err := PruneOlderThan(cutoff)
+	if err != nil {
+		t.Fatalf("PruneOlderThan: %v", err)
+	}
+	if kept != 1 || dropped != 2 {
+		t.Fatalf("kept=%d dropped=%d, want kept=1 dropped=2", kept, dropped)
+	}
+	got, err := LoadCalls(time.Time{})
+	if err != nil {
+		t.Fatalf("LoadCalls: %v", err)
+	}
+	if len(got) != 1 || got[0].Tool != "push" {
+		t.Fatalf("survivors = %+v, want only the recent push row", got)
+	}
+
+	before, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read back: %v", err)
+	}
+	k2, d2, err := PruneOlderThan(cutoff)
+	if err != nil {
+		t.Fatalf("second prune: %v", err)
+	}
+	if k2 != 1 || d2 != 0 {
+		t.Errorf("idempotent prune: kept=%d dropped=%d, want 1/0", k2, d2)
+	}
+	after, _ := os.ReadFile(path)
+	if string(before) != string(after) {
+		t.Errorf("nothing-to-drop prune rewrote the file:\n before=%q\n after =%q", before, after)
+	}
+}
+
+// TestPruneOlderThanEmptiesFile: when every row is stale the file is
+// removed outright rather than left as a zero-byte stub.
+func TestPruneOlderThanEmptiesFile(t *testing.T) {
+	path := withTempPath(t)
+	now := time.Now()
+	if err := AppendCall(Call{TS: now.Add(-100 * time.Hour), Tool: "run"}); err != nil {
+		t.Fatalf("AppendCall: %v", err)
+	}
+	kept, dropped, err := PruneOlderThan(now.Add(-24 * time.Hour))
+	if err != nil {
+		t.Fatalf("PruneOlderThan: %v", err)
+	}
+	if kept != 0 || dropped != 1 {
+		t.Fatalf("kept=%d dropped=%d, want 0/1", kept, dropped)
+	}
+	if _, err := os.Stat(path); !os.IsNotExist(err) {
+		t.Errorf("emptied stats file should be removed, stat err = %v", err)
+	}
+}

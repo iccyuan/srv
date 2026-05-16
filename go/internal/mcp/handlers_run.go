@@ -69,16 +69,7 @@ func handleRun(args map[string]any, cfg *config.Config, profileOverride string) 
 	token := progressToken()
 	if token == nil {
 		res, _ := remote.RunCapture(prof, cwd, cmd)
-		text := buildRunText(res, cwd)
-		if len(text) > ResultByteMax {
-			return oversizeResult("run", len(text), runOversizeHint,
-				map[string]any{"exit_code": res.ExitCode, "cwd": cwd})
-		}
-		return toolResult{
-			Content:           []toolContent{{Type: "text", Text: text}},
-			IsError:           res.ExitCode != 0,
-			StructuredContent: map[string]any{"exit_code": res.ExitCode, "cwd": cwd},
-		}
+		return runResult(res, cwd, nil)
 	}
 
 	// Streaming path -- the client passed _meta.progressToken on
@@ -143,24 +134,13 @@ func handleRun(args map[string]any, cfg *config.Config, profileOverride string) 
 		ExitCode: exitCode,
 		Cwd:      cwd,
 	}
-	text := buildRunText(res, cwd)
-	// Cap may still be hit at the final-assembly step (footer +
-	// stderr divider push us over) even though early-terminate
-	// didn't fire mid-stream. Same reject shape.
-	if len(text) > ResultByteMax {
-		return oversizeResult("run", len(text), runOversizeHint,
-			map[string]any{"exit_code": exitCode, "cwd": cwd, "bytes_emitted": emitted, "streamed": true})
-	}
-	return toolResult{
-		Content: []toolContent{{Type: "text", Text: text}},
-		IsError: exitCode != 0,
-		StructuredContent: map[string]any{
-			"exit_code":     exitCode,
-			"cwd":           cwd,
-			"bytes_emitted": emitted,
-			"streamed":      true,
-		},
-	}
+	// runResult returns Content-only on success so the client cannot
+	// elide the streamed stdout in favour of structuredContent. The
+	// cap may still be hit at final assembly (footer + stderr divider
+	// push us over) even though early-terminate didn't fire mid-
+	// stream; runResult routes that to the same oversize reject,
+	// carrying the stream diagnostics through `extra`.
+	return runResult(res, cwd, map[string]any{"bytes_emitted": emitted, "streamed": true})
 }
 
 // runOversizeHint is the filter guidance returned when `run` output
@@ -269,14 +249,15 @@ func handleRunGroup(args map[string]any, cfg *config.Config, profileOverride str
 				"failed":    failed,
 			})
 	}
+	// Content-only, same rationale as runResult: on an all-success
+	// fan-out (isError=false) the client would surface
+	// structuredContent in place of this text block, hiding the
+	// per-profile stdout/stderr the text carries. The `=== profile
+	// [exit N, Ds] ===` headers plus the trailing
+	// "N profile(s), X succeeded, Y failed." summary already encode
+	// every field the dropped `results` array held.
 	return toolResult{
 		Content: []toolContent{{Type: "text", Text: text}},
 		IsError: failed > 0,
-		StructuredContent: map[string]any{
-			"group":     groupName,
-			"results":   results,
-			"succeeded": len(results) - failed,
-			"failed":    failed,
-		},
 	}
 }

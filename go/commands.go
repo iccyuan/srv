@@ -21,6 +21,7 @@ import (
 	"srv/internal/mcp"
 	"srv/internal/mcpstats"
 	"srv/internal/project"
+	"srv/internal/prune"
 	"srv/internal/recipe"
 	"srv/internal/session"
 	"srv/internal/streams"
@@ -145,6 +146,7 @@ var subcommands = []subcommand{
 	{name: "logs", handler: func(c cmdCtx) error { return jobcli.CmdLogs(c.args, c.cfg, c.profileOverride) }},
 	{name: "kill", handler: func(c cmdCtx) error { return jobcli.CmdKill(c.args, c.cfg, c.profileOverride) }},
 	{name: "sessions", handler: func(c cmdCtx) error { return cmdSessions(c.args) }},
+	{name: "prune", handler: func(c cmdCtx) error { return prune.Cmd(c.args, c.cfg, c.profileOverride) }},
 	{name: "hooks", handler: func(c cmdCtx) error { return hooks.Cmd(c.args, c.cfg) }},
 	{name: "history", handler: func(c cmdCtx) error { return history.Cmd(c.args, session.ID()) }},
 	{name: "recipe", handler: func(c cmdCtx) error { return recipe.Cmd(c.args, c.cfg, c.profileOverride) }},

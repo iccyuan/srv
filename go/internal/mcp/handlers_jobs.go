@@ -97,11 +97,42 @@ func handleTailLog(args map[string]any, cfg *config.Config, profileOverride stri
 			"lower `lines`, or use `run \"grep PATTERN ~/.srv-jobs/<id>.log | head -n N\"` to filter the job log directly",
 			map[string]any{"job_id": j.ID, "exit_code": res.ExitCode})
 	}
-	return toolResult{
-		Content:           []toolContent{{Type: "text", Text: text}},
-		IsError:           res.ExitCode != 0,
-		StructuredContent: map[string]any{"job_id": j.ID, "exit_code": res.ExitCode},
+	// Content-only: the log IS the payload; a {job_id, exit_code}
+	// structured stub would make the client hide it on success.
+	return payloadResult(text, res.ExitCode != 0)
+}
+
+// classifyWaitStatus parses the poll script's stdout into (status,
+// exitCode, body). The script's contract: its first line is exactly
+// one of `STATUS=completed EXIT=<n>`, `STATUS=killed`, or
+// `STATUS=running` (the last is its unconditional fallthrough), and
+// everything after the first newline is the log-tail body.
+//
+// status == "unknown" is reserved for output matching NONE of those
+// -- empty stdout (a transport / gzip-wrapper glitch) or unexpected
+// shell noise. The script cannot legitimately produce that, so
+// handleWaitJob turns it into a retryable error rather than a
+// successful poll. exitCode is -1 unless a STATUS=completed EXIT=<n>
+// was parsed.
+func classifyWaitStatus(stdout string) (status string, exitCode int, body string) {
+	statusLine, body, _ := strings.Cut(stdout, "\n")
+	exitCode = -1
+	switch {
+	case strings.HasPrefix(statusLine, "STATUS=completed"):
+		status = "completed"
+		if _, after, ok := strings.Cut(statusLine, "EXIT="); ok {
+			if n, err := strconv.Atoi(strings.TrimSpace(after)); err == nil {
+				exitCode = n
+			}
+		}
+	case strings.HasPrefix(statusLine, "STATUS=killed"):
+		status = "killed"
+	case strings.HasPrefix(statusLine, "STATUS=running"):
+		status = "running"
+	default:
+		status = "unknown"
 	}
+	return status, exitCode, body
 }
 
 func handleWaitJob(args map[string]any, cfg *config.Config, profileOverride string) toolResult {
@@ -155,45 +186,51 @@ tail -n %d %s
 	res, _ := remote.RunCapture(prof, "", script)
 	waited := time.Since(start).Seconds()
 
-	lines := strings.SplitN(res.Stdout, "\n", 2)
-	statusLine := ""
-	body := ""
-	if len(lines) > 0 {
-		statusLine = lines[0]
-	}
-	if len(lines) > 1 {
-		body = lines[1]
-	}
-	status := "unknown"
-	exitCode := -1
-	if strings.HasPrefix(statusLine, "STATUS=completed") {
-		status = "completed"
-		if i := strings.Index(statusLine, "EXIT="); i >= 0 {
-			if n, err := strconv.Atoi(strings.TrimSpace(statusLine[i+5:])); err == nil {
-				exitCode = n
-			}
-		}
+	status, exitCode, body := classifyWaitStatus(res.Stdout)
+	switch status {
+	case "completed":
 		// Job finished -- record the outcome but KEEP the entry so
 		// follow-up tail_log calls can still surface the historical
 		// log. Earlier versions pruned the row here, which caused
 		// "no such job" on every post-completion tail_log even
 		// though the .log file was right where it had always been.
-		// Explicit cleanup is now `srv jobs prune` (CLI) or
+		// Explicit cleanup is now `srv prune jobs` (CLI) or
 		// kill_job (still prunes, since the user is explicitly
 		// asking to discard).
 		j.Finished = time.Now().Format(time.RFC3339)
 		ec := exitCode
 		j.ExitCode = &ec
 		_ = jobs.Save(jf)
-	} else if strings.HasPrefix(statusLine, "STATUS=killed") {
-		status = "killed"
+	case "killed":
 		// External kill detected -- mark so subsequent list_jobs /
 		// tail_log calls can distinguish from a clean completion.
 		j.Finished = time.Now().Format(time.RFC3339)
 		j.Killed = true
 		_ = jobs.Save(jf)
-	} else if strings.HasPrefix(statusLine, "STATUS=running") {
-		status = "running"
+	}
+
+	// The poll script always emits exactly one of STATUS=completed /
+	// killed / running (its final line is an unconditional `echo
+	// STATUS=running`). A status that is still "unknown" here means
+	// the remote produced no recognizable marker -- empty stdout from
+	// a transport/wrapper glitch, or unexpected shell noise. Handing
+	// that back as a non-error success gives the model an actionless
+	// {status:"unknown"} it cannot poll on (and it would wrongly look
+	// done). Surface it as an error with whatever diagnostics we have
+	// so the polling loop retries instead of silently giving up. Job
+	// state is deliberately NOT mutated -- we don't know the outcome.
+	if status == "unknown" {
+		diag := strings.TrimSpace(res.Stderr)
+		if diag == "" {
+			snippet := res.Stdout
+			if len(snippet) > 120 {
+				snippet = snippet[:120]
+			}
+			diag = fmt.Sprintf("empty/unrecognized poll output (exit %d, stdout %q)", res.ExitCode, snippet)
+		}
+		return textErr(fmt.Sprintf(
+			"wait_job: could not determine status of %q after %.1fs -- %s. The job may still be running; call wait_job again.",
+			j.ID, waited, diag))
 	}
 
 	var hint string
@@ -232,11 +269,14 @@ tail -n %d %s
 		r.IsError = status == "killed" || (status == "completed" && exitCode != 0)
 		return r
 	}
-	return toolResult{
-		Content:           []toolContent{{Type: "text", Text: text}},
-		IsError:           status == "killed" || (status == "completed" && exitCode != 0),
-		StructuredContent: structured,
-	}
+	// Content-only on the non-oversize path: the `hint` line already
+	// encodes status + exit + waited in a form the polling loop reads
+	// ("[running after 8.0s -- call wait_job again ...]"), and `body`
+	// carries the log tail. A structured stub here would make the
+	// client hide both behind {status, exit_code}. The oversize
+	// branch above keeps `structured` precisely because there the
+	// body is rejected and the loop has only the stub to advance on.
+	return payloadResult(text, status == "killed" || (status == "completed" && exitCode != 0))
 }
 
 func handleKillJob(args map[string]any, cfg *config.Config, profileOverride string) toolResult {
@@ -267,9 +307,9 @@ func handleKillJob(args map[string]any, cfg *config.Config, profileOverride stri
 	if text == "" {
 		text = strings.TrimSpace(res.Stderr)
 	}
-	return toolResult{
-		Content:           []toolContent{{Type: "text", Text: text}},
-		IsError:           res.ExitCode != 0,
-		StructuredContent: map[string]any{"job_id": j.ID, "signal": sig, "exit_code": res.ExitCode},
-	}
+	// Content-only: "killed" vs "no such pid" is the actual signal
+	// here and lives only in the text (the kill wrapper's `|| echo`
+	// makes exit_code 0 either way, so the dropped structured stub
+	// couldn't distinguish them anyway).
+	return payloadResult(text, res.ExitCode != 0)
 }
