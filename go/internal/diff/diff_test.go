@@ -27,3 +27,19 @@ func TestCompare_MissingLocalIsFriendly(t *testing.T) {
 		t.Errorf("Compare(missing local) = (%q, %d); want (\"\", 1)", text, rc)
 	}
 }
+
+// A directory `local` must be rejected up front. Regression: it fell
+// through to a git-diff that joined the Windows temp path under the
+// dir ("<dir>/C:\\Users\\..\\.remote") and failed with a baffling
+// "Could not access" error (Windows-path-leak family). The IsDir
+// guard runs before config.Resolve -- no network.
+func TestCompare_DirectoryLocalRejected(t *testing.T) {
+	dir := t.TempDir()
+	text, rc, err := Compare(&config.Config{}, "", dir, "")
+	if err == nil || !strings.Contains(err.Error(), "is a directory") {
+		t.Fatalf("Compare(dir local) err = %v; want an 'is a directory' error", err)
+	}
+	if rc != 1 || text != "" {
+		t.Errorf("Compare(dir local) = (%q, %d); want (\"\", 1)", text, rc)
+	}
+}

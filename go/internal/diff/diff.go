@@ -49,11 +49,21 @@ func Cmd(args []string, cfg *config.Config, profileOverride string) error {
 // Compare runs the local-vs-remote diff and returns (text, exit
 // code, error). Used by the CLI (Cmd) and by the MCP `diff` tool.
 func Compare(cfg *config.Config, profileOverride, local, remoteArg string) (string, int, error) {
-	if _, err := os.Stat(local); err != nil {
+	st, err := os.Stat(local)
+	if err != nil {
 		if os.IsNotExist(err) {
 			return "", 1, fmt.Errorf("local path missing: %q", local)
 		}
 		return "", 1, fmt.Errorf("local %q: %w", local, err)
+	}
+	// diff compares a single file against its remote counterpart.
+	// A directory used to fall through to a git-diff invocation that
+	// joined the Windows temp path under the dir ("<dir>/C:\Users\..
+	// .remote") and failed with a baffling "Could not access" error
+	// (same path-leak family as the Windows-remote-path bug). Reject
+	// it up front instead.
+	if st.IsDir() {
+		return "", 1, fmt.Errorf("local %q is a directory; srv diff compares a single file", local)
 	}
 	name, profile, err := config.Resolve(cfg, profileOverride)
 	if err != nil {

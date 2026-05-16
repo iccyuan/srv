@@ -232,7 +232,7 @@ var tools = []tool{
 	{
 		def: toolDef{
 			Name:        "sync",
-			Description: "Sync local changes to remote.",
+			Description: "Sync local files to the remote. Selection by `mode`: git (changed tracked files), glob (`include` patterns; `*` is one level, `**` recurses), mtime (`since`), or list (explicit `files`). `files`/globs are resolved relative to `root` (the local sync root), not your shell cwd. NOT incremental: every selected file is re-tar'd and re-sent each call even if unchanged (no per-file skip) -- it's a push, not rsync.",
 			InputSchema: map[string]any{
 				"type": "object",
 				"properties": map[string]any{
@@ -258,7 +258,7 @@ var tools = []tool{
 	{
 		def: toolDef{
 			Name:        "sync_delete_dry_run",
-			Description: "Preview sync deletes.",
+			Description: "Preview which remote files `sync delete=true` would remove. GIT-ONLY: it lists files git knows were deleted from the tracked set under `root` -- it does NOT diff arbitrary remote-vs-local trees. On a non-git `root` it returns \"would delete 0\" regardless of what the remote holds.",
 			InputSchema: map[string]any{
 				"type":       "object",
 				"properties": map[string]any{"root": strSchema("Local root."), "remote_root": strSchema("Remote root."), "profile": strSchema("")},

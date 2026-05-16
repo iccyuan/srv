@@ -542,7 +542,17 @@ func CollectFiles(o *Options, localRoot string, allExcludes []string) ([]string,
 			return nil, fmt.Errorf("--files requires at least one path")
 		}
 		for _, p := range o.Files {
-			rel := normalizeForTar(localRoot, p)
+			// Resolve a relative file against localRoot, NOT the
+			// process CWD. glob/mtime/git modes all operate within
+			// localRoot; list used to Abs() against CWD, so passing
+			// `root` + relative `files` (the MCP sync tool's normal
+			// shape) silently dropped every file as "outside root"
+			// and returned "(nothing to sync)" with no error.
+			fp := p
+			if !filepath.IsAbs(fp) {
+				fp = filepath.Join(localRoot, fp)
+			}
+			rel := normalizeForTar(localRoot, fp)
 			if rel == "" {
 				fmt.Fprintf(os.Stderr, "warning: skipping %q (outside local root)\n", p)
 				continue

@@ -22,14 +22,33 @@ func TestCollectFiles_ListWithoutFilesErrors(t *testing.T) {
 	}
 }
 
-// The guard must not false-trigger when files ARE supplied.
-func TestCollectFiles_ListWithFilesOK(t *testing.T) {
+// Relative `files` must resolve against `root`, not the process cwd
+// (t.TempDir() is never the cwd). Regression for the silent-drop bug:
+// `sync mode=list files=[rel] root=<dir>` used to Abs() each file
+// against the cwd, judge it "outside root", skip it, and return
+// "(nothing to sync)" with no error. Nested + absolute-in-root must
+// also collect.
+func TestCollectFiles_ListResolvesRelativeToRoot(t *testing.T) {
 	root := t.TempDir()
-	if err := os.WriteFile(filepath.Join(root, "x.txt"), []byte("hi"), 0o600); err != nil {
-		t.Fatalf("write fixture: %v", err)
+	if err := os.MkdirAll(filepath.Join(root, "sub"), 0o755); err != nil {
+		t.Fatal(err)
 	}
-	o := &Options{Mode: "list", Files: []string{"x.txt"}}
-	if _, err := CollectFiles(o, root, nil); err != nil {
-		t.Fatalf("CollectFiles(mode=list, files=[x.txt]) err = %v; want nil", err)
+	for _, rel := range []string{"x.txt", "sub/c.txt"} {
+		if err := os.WriteFile(filepath.Join(root, filepath.FromSlash(rel)), []byte("hi"), 0o600); err != nil {
+			t.Fatalf("write %s: %v", rel, err)
+		}
+	}
+	abs := filepath.Join(root, "x.txt")
+	o := &Options{Mode: "list", Files: []string{"x.txt", "sub/c.txt", abs}}
+	files, err := CollectFiles(o, root, nil)
+	if err != nil {
+		t.Fatalf("CollectFiles err = %v; want nil", err)
+	}
+	got := map[string]bool{}
+	for _, f := range files {
+		got[f] = true
+	}
+	if !got["x.txt"] || !got["sub/c.txt"] {
+		t.Fatalf("relative files not collected against root: got %v", files)
 	}
 }
