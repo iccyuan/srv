@@ -817,6 +817,99 @@ func forwardStreamReader(src io.Reader, kind StreamChunkKind, buf *bytes.Buffer,
 	}
 }
 
+// stripPTYCR turns a PTY line ("...\r\n" from the terminal's \n->\r\n
+// output mapping, or a trailing "\r" on a partial EOF line) back into
+// a clean \n-terminated (or bare) line so PTY-streamed output matches
+// the plain-pipe shape callers expect.
+func stripPTYCR(line string) string {
+	if strings.HasSuffix(line, "\r\n") {
+		return line[:len(line)-2] + "\n"
+	}
+	return strings.TrimSuffix(line, "\r")
+}
+
+// forwardPTYReader is forwardStreamReader for a PTY stream: same
+// line-by-line read + buffer + onChunk, but each line has its
+// terminal CR stripped (stripPTYCR) and everything is StreamStdout
+// (a PTY has no separate stderr -- it's one merged stream).
+func forwardPTYReader(src io.Reader, buf *bytes.Buffer, onChunk func(StreamChunkKind, string), wg *sync.WaitGroup) {
+	defer wg.Done()
+	rd := bufio.NewReaderSize(src, 8*1024)
+	for {
+		line, err := rd.ReadString('\n')
+		if len(line) > 0 {
+			line = stripPTYCR(line)
+			buf.WriteString(line)
+			if onChunk != nil {
+				onChunk(StreamStdout, line)
+			}
+		}
+		if err != nil {
+			return
+		}
+	}
+}
+
+// RunStreamPTY is RunStream over a pseudo-terminal. A PTY makes the
+// remote process's libc default to LINE buffering on EVERY platform
+// (it sees isatty(stdout)==true) -- the portable fix for the
+// streaming data-loss bug. `tail -F` / `journalctl -f` block-buffer
+// (~8 KiB) to a plain pipe, so their lines sit unflushed in the
+// remote process and are destroyed when the bounded-follow deadline
+// hard-closes the connection; only the last in-flight line survived.
+// `stdbuf -oL` only fixes GNU coreutils hosts; a PTY also fixes
+// macOS / *BSD / busybox (same portability concern as the setsid
+// detach fix). Used only by the bounded-follow path; interactive
+// stdio stays on RunInteractive.
+//
+// A PTY merges stderr into stdout; stderr is returned empty.
+func (c *Client) RunStreamPTY(command string, cwd string, onChunk func(kind StreamChunkKind, line string)) (int, string, string, error) {
+	full := WrapWithCwd(command, cwd)
+	sess, err := c.Conn.NewSession()
+	if err != nil {
+		return -1, "", "", err
+	}
+	defer sess.Close()
+
+	// ECHO off (we send no input). `dumb` term so tail/journalctl
+	// don't emit colour/cursor escapes.
+	modes := ssh.TerminalModes{
+		ssh.ECHO:          0,
+		ssh.TTY_OP_ISPEED: 14400,
+		ssh.TTY_OP_OSPEED: 14400,
+	}
+	if err := sess.RequestPty("dumb", 24, 80, modes); err != nil {
+		return -1, "", "", err
+	}
+
+	stdout, err := sess.StdoutPipe()
+	if err != nil {
+		return -1, "", "", err
+	}
+	if err := sess.Start(full); err != nil {
+		return -1, "", "", err
+	}
+
+	var outBuf bytes.Buffer
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go forwardPTYReader(stdout, &outBuf, onChunk, &wg)
+
+	waitErr := sess.Wait()
+	wg.Wait()
+
+	exit := 0
+	if waitErr != nil {
+		var ee *ssh.ExitError
+		if errors.As(waitErr, &ee) {
+			exit = ee.ExitStatus()
+		} else {
+			return -1, outBuf.String(), "", waitErr
+		}
+	}
+	return exit, outBuf.String(), "", nil
+}
+
 // RunStreamStdin runs a command on the remote with `stdin` providing the
 // child's stdin (e.g., a local `tar -cf -` for sync). Stdout and stderr go
 // to local stdout/stderr. Returns remote exit code.
