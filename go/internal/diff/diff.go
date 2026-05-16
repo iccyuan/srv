@@ -71,9 +71,9 @@ func Compare(cfg *config.Config, profileOverride, local, remoteArg string) (stri
 	remoteLocal := filepath.Join(tmpDir, filepath.Base(local)+".remote")
 	if rc, _, err := transfer.PullPath(profile, remotePath, remoteLocal, false); err != nil || rc != 0 {
 		if err != nil {
-			return "", 1, err
+			return "", 1, fmt.Errorf("remote %q: %w", remotePath, err)
 		}
-		return "", rc, fmt.Errorf("pull failed")
+		return "", rc, fmt.Errorf("remote %q: pull failed (exit %d)", remotePath, rc)
 	}
 	if git, err := exec.LookPath("git"); err == nil {
 		cmd := exec.Command(git, "diff", "--no-index", "--", local, remoteLocal)

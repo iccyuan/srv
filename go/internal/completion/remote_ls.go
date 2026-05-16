@@ -135,7 +135,10 @@ func remoteLs(profile *config.Profile, target string, timeout time.Duration) ([]
 		if stderr == "" {
 			return nil, fmt.Errorf("ls exit %d", res.ExitCode)
 		}
-		return nil, fmt.Errorf("ls: %s", stderr)
+		// `ls` stderr already self-identifies ("ls: cannot access
+		// ...") -- don't prepend another "ls: " or callers see the
+		// doubled `ls: ls:` prefix.
+		return nil, fmt.Errorf("%s", stderr)
 	}
 	out := []string{}
 	for _, line := range strings.Split(res.Stdout, "\n") {

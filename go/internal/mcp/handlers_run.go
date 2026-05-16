@@ -28,7 +28,7 @@ import (
 // of the final result.
 func handleRun(args map[string]any, cfg *config.Config, profileOverride string) toolResult {
 	cmd, _ := args["command"].(string)
-	if cmd == "" {
+	if strings.TrimSpace(cmd) == "" {
 		return textErr("error: command is required")
 	}
 	confirm, _ := args["confirm"].(bool)
@@ -157,7 +157,7 @@ const runOversizeHint = "use `head -n N`, `tail -n N`, `grep PATTERN`, or pipe t
 
 func handleDetach(args map[string]any, cfg *config.Config, profileOverride string) toolResult {
 	cmd, _ := args["command"].(string)
-	if cmd == "" {
+	if strings.TrimSpace(cmd) == "" {
 		return textErr("command is required")
 	}
 	confirm, _ := args["confirm"].(bool)

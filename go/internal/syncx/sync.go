@@ -294,7 +294,7 @@ func GitChangedFiles(repoRoot, scope string) ([]string, error) {
 func parseDuration(s string) (time.Duration, error) {
 	s = strings.TrimSpace(strings.ToLower(s))
 	if s == "" {
-		return 0, fmt.Errorf("empty duration")
+		return 0, fmt.Errorf("--since requires a duration (e.g. \"2h\", \"30m\")")
 	}
 	last := s[len(s)-1]
 	mul := time.Second

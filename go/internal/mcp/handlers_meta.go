@@ -212,6 +212,11 @@ func handleEnv(args map[string]any, cfg *config.Config, profileOverride string) 
 			return textErr("key is required")
 		}
 		delete(prof.Env, key)
+		// Collapse an emptied map to nil so `unset` of the last key
+		// matches `clear`'s representation (env: null, not env: {}).
+		if len(prof.Env) == 0 {
+			prof.Env = nil
+		}
 		if err := config.Save(cfg); err != nil {
 			return textErr(err.Error())
 		}

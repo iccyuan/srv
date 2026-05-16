@@ -275,7 +275,7 @@ func handleJournal(args map[string]any, cfg *config.Config, profileOverride stri
 	// enough.
 	if r := requireStreamFilter("journal", follow,
 		[]string{unit, since, priority, grep},
-		`{ Unit: "nginx.service", follow_seconds: 30 }`,
+		`{ unit: "nginx.service", follow_seconds: 30 }`,
 	); r != nil {
 		return *r
 	}
