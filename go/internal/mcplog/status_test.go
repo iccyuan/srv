@@ -101,7 +101,7 @@ func TestParseToolLine(t *testing.T) {
 	}{
 		{"tool=run dur=0.5s ok", "run", "0.5s", true},
 		{"tool=push dur=12.3s err", "push", "12.3s", false},
-		{"tool=run_stream dur=45.0s ok", "run_stream", "45.0s", true},
+		{"tool=run dur=45.0s ok", "run", "45.0s", true},
 		// Out-of-order fields shouldn't break parsing.
 		{"dur=1s tool=tail ok", "tail", "1s", true},
 		// Missing fields produce zero values.

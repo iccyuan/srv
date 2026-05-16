@@ -74,8 +74,9 @@ func send(obj any) {
 
 // notification is the JSON-RPC 2.0 shape for server-to-client
 // notifications (no `id`, the client doesn't reply). Used today for
-// `notifications/progress` so the streaming `run_stream` tool can
-// push partial output before its final tool result lands.
+// `notifications/progress` so streaming tools (run with progressToken,
+// tail/journal in follow mode) can push partial output before the
+// final tool result lands.
 type notification struct {
 	JSONRPC string `json:"jsonrpc"`
 	Method  string `json:"method"`
@@ -85,7 +86,7 @@ type notification struct {
 // progressParams is the payload of a `notifications/progress` message.
 // `progressToken` echoes the value the client sent in tools/call meta;
 // `progress` is a monotonic counter (we use byte count); `message` is
-// the human-readable chunk -- for run_stream that's the streamed line.
+// the human-readable chunk -- for streaming run that's the streamed line.
 type progressParams struct {
 	ProgressToken any    `json:"progressToken"`
 	Progress      int    `json:"progress"`

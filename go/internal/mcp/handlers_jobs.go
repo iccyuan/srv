@@ -92,6 +92,11 @@ func handleTailLog(args map[string]any, cfg *config.Config, profileOverride stri
 	if text == "" {
 		text = res.Stderr
 	}
+	if len(text) > ResultByteMax {
+		return oversizeResult("tail_log", len(text),
+			"lower `lines`, or use `run \"grep PATTERN ~/.srv-jobs/<id>.log | head -n N\"` to filter the job log directly",
+			map[string]any{"job_id": j.ID, "exit_code": res.ExitCode})
+	}
 	return toolResult{
 		Content:           []toolContent{{Type: "text", Text: text}},
 		IsError:           res.ExitCode != 0,
@@ -211,6 +216,21 @@ tail -n %d %s
 	}
 	if status == "completed" {
 		structured["exit_code"] = exitCode
+	}
+	// Log tail can exceed the cap on chatty jobs even at default
+	// tail_lines=50. Status/exit_code still flow back via
+	// structuredContent so the polling loop can advance, but the
+	// body text is rejected and the caller is told how to fetch
+	// less. IsError reflects the actual JOB outcome (killed or
+	// non-zero exit), not the size-rejection itself -- a successful
+	// job with a chatty log shouldn't look like a tool failure to
+	// the MCP client's UI.
+	if len(text) > ResultByteMax {
+		r := oversizeResult("wait_job", len(text),
+			"lower `tail_lines`, or fetch the log separately with `tail_log` + a smaller `lines`",
+			structured)
+		r.IsError = status == "killed" || (status == "completed" && exitCode != 0)
+		return r
 	}
 	return toolResult{
 		Content:           []toolContent{{Type: "text", Text: text}},

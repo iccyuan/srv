@@ -166,20 +166,17 @@ func TestRejectSync(t *testing.T) {
 	}
 }
 
-func TestBuildRunText_NoTruncation(t *testing.T) {
+func TestBuildRunText_Basic(t *testing.T) {
 	res := &sshx.RunCaptureResult{
 		Stdout:   "hello\nworld",
 		Stderr:   "",
 		ExitCode: 0,
 	}
-	text, truncated := buildRunText(res, "/home/user")
-	if truncated != 0 {
-		t.Errorf("truncated = %d, want 0", truncated)
-	}
+	text := buildRunText(res, "/home/user")
 	if !strings.Contains(text, "hello\nworld") {
 		t.Errorf("missing stdout: %q", text)
 	}
-	// ExitCode 0 now renders as "ok" rather than "exit 0" so MCP
+	// ExitCode 0 renders as "ok" rather than "exit 0" so MCP
 	// clients with pattern-matching log analysis don't read the
 	// word "exit" as a failure signal on every successful command.
 	if !strings.Contains(text, "[ok cwd /home/user]") {
@@ -193,7 +190,7 @@ func TestBuildRunText_StderrFenced(t *testing.T) {
 		Stderr:   "err",
 		ExitCode: 1,
 	}
-	text, _ := buildRunText(res, "/tmp")
+	text := buildRunText(res, "/tmp")
 	if !strings.Contains(text, "--- stderr ---") {
 		t.Errorf("missing stderr fence: %q", text)
 	}
@@ -202,18 +199,50 @@ func TestBuildRunText_StderrFenced(t *testing.T) {
 	}
 }
 
-func TestBuildRunText_TruncatesAtCap(t *testing.T) {
-	big := strings.Repeat("a", runTextMax+1234)
+func TestBuildRunText_NoTruncationAtCap(t *testing.T) {
+	// buildRunText must NOT truncate -- callers check len against
+	// ResultByteMax and call oversizeResult when over. Verify the
+	// formatter passes oversized input through verbatim (plus
+	// footer); the truncation policy lives in the handlers.
+	big := strings.Repeat("a", ResultByteMax+1234)
 	res := &sshx.RunCaptureResult{Stdout: big, ExitCode: 0}
-	text, truncated := buildRunText(res, "/x")
-	if truncated != 1234 {
-		t.Errorf("truncated = %d, want 1234", truncated)
-	}
-	if !strings.Contains(text, "1234 bytes truncated") {
-		t.Errorf("missing truncation marker: %q", text[:200])
+	text := buildRunText(res, "/x")
+	if len(text) < ResultByteMax+1234 {
+		t.Errorf("buildRunText shortened input: got %d, want >= %d", len(text), ResultByteMax+1234)
 	}
 	if !strings.Contains(text, "[ok cwd /x]") {
-		t.Errorf("missing footer (truncated case): %q", text[len(text)-80:])
+		t.Errorf("missing footer: %q", text[len(text)-80:])
+	}
+}
+
+func TestOversizeResult_ShapeAndStructured(t *testing.T) {
+	r := oversizeResult("run", 99999, "use head -n 100",
+		map[string]any{"exit_code": 0, "cwd": "/x"})
+	if !r.IsError {
+		t.Errorf("oversize result should be IsError=true")
+	}
+	if len(r.Content) != 1 || !strings.Contains(r.Content[0].Text, "rejected: run output is 99999 bytes") {
+		t.Errorf("missing reject preamble: %v", r.Content)
+	}
+	if !strings.Contains(r.Content[0].Text, "use head -n 100") {
+		t.Errorf("hint missing in body: %v", r.Content)
+	}
+	sc, ok := r.StructuredContent.(map[string]any)
+	if !ok {
+		t.Fatalf("structuredContent is not a map: %T", r.StructuredContent)
+	}
+	if sc["rejected_reason"] != "oversize_output" {
+		t.Errorf("rejected_reason = %v", sc["rejected_reason"])
+	}
+	if sc["bytes_returned"] != 99999 {
+		t.Errorf("bytes_returned = %v", sc["bytes_returned"])
+	}
+	if sc["cap_bytes"] != ResultByteMax {
+		t.Errorf("cap_bytes = %v, want %d", sc["cap_bytes"], ResultByteMax)
+	}
+	// extras merged through:
+	if sc["exit_code"] != 0 || sc["cwd"] != "/x" {
+		t.Errorf("extras not merged: %v", sc)
 	}
 }
 

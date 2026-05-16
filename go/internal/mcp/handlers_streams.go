@@ -19,9 +19,10 @@ import (
 // caller. Plain struct so callers can append their own summary
 // lines / pick out fields for the structuredContent payload.
 type boundedStreamResult struct {
-	Text   string // text accumulated up to runTextMax
-	Bytes  int    // total bytes captured (post-filter)
-	Capped bool   // true if more output was dropped past runTextMax
+	Text   string // text accumulated up to ResultByteMax (always <= cap)
+	Bytes  int    // bytes in Text (post-filter, capped at ResultByteMax)
+	Total  int    // total bytes seen by the filter (>= Bytes; reported in oversize rejects)
+	Capped bool   // true if more output was dropped past ResultByteMax
 	RunErr error  // RunStream's error -- typically os.ErrClosed when the timer ended the stream
 }
 
@@ -52,17 +53,19 @@ func runBoundedStream(c *sshx.Client, remoteCmd, cwd string, followSeconds int, 
 		stop()
 	}()
 
-	var capturedBytes int
+	var capturedBytes, totalBytes int
 	var capped bool
 	var buf strings.Builder
 	onChunk := func(_ sshx.StreamChunkKind, line string) {
 		if filter != nil && !filter.MatchString(line) {
 			return
 		}
-		// Accumulate up to the run-text cap; further chunks still
-		// stream via progress (model sees them in real time) but
-		// the final result text gets a truncation marker.
-		if capturedBytes+len(line) <= runTextMax {
+		totalBytes += len(line)
+		// Accumulate up to the cap; further chunks still stream via
+		// progress (model sees them in real time) but the final
+		// result will be rejected if Capped, so we stop appending
+		// to the buffer once we hit the limit.
+		if capturedBytes+len(line) <= ResultByteMax {
 			buf.WriteString(line)
 			capturedBytes += len(line)
 		} else {
@@ -74,6 +77,7 @@ func runBoundedStream(c *sshx.Client, remoteCmd, cwd string, followSeconds int, 
 	return boundedStreamResult{
 		Text:   buf.String(),
 		Bytes:  capturedBytes,
+		Total:  totalBytes,
 		Capped: capped,
 		RunErr: runErr,
 	}
@@ -81,8 +85,8 @@ func runBoundedStream(c *sshx.Client, remoteCmd, cwd string, followSeconds int, 
 
 // handleTail follows a remote file for a bounded duration and
 // streams new lines to the client via `notifications/progress`. The
-// final tools/call response returns the full accumulated output
-// (capped at runTextMax) plus structured metadata.
+// final tools/call response returns the accumulated output, or an
+// oversize rejection if the buffer would exceed ResultByteMax.
 //
 // Why not just use `run` with `tail -F`: synchronous `run` rejects
 // long-blocking patterns including `tail -f` for the MCP timeout
@@ -181,9 +185,10 @@ func handleTail(args map[string]any, cfg *config.Config, profileOverride string)
 			}
 			text += res.Stderr
 		}
-		if len(text) > runTextMax {
-			text = text[:runTextMax] + fmt.Sprintf(
-				"\n\n... [truncated; lower `lines` or add a `grep` filter to slice] ...")
+		if len(text) > ResultByteMax {
+			return oversizeResult("tail", len(text),
+				"lower `lines`, or use the `grep` parameter to filter by regex",
+				map[string]any{"path": path, "exit_code": res.ExitCode, "lines_clamped": linesClamped})
 		}
 		structured := map[string]any{
 			"path":           path,
@@ -214,10 +219,12 @@ func handleTail(args map[string]any, cfg *config.Config, profileOverride string)
 	// res.RunErr is expected when the timer-close ends the stream;
 	// that's the normal exit path. Only surface as transport_error
 	// when it's a different failure.
-	text := res.Text
 	if res.Capped {
-		text += fmt.Sprintf("\n[output cap %d bytes; further lines streamed via progress only]\n", runTextMax)
+		return oversizeResult("tail", res.Total,
+			"use a tighter `grep` regex or lower `follow_seconds`",
+			map[string]any{"path": path, "follow_seconds": follow, "lines_clamped": linesClamped})
 	}
+	text := res.Text
 	text += fmt.Sprintf("\n[followed %s for %ds, %d bytes captured]", path, follow, res.Bytes)
 	structured := map[string]any{
 		"path":           path,
@@ -259,7 +266,7 @@ func handleJournal(args map[string]any, cfg *config.Config, profileOverride stri
 	unit, _ := args["unit"].(string)
 	since, _ := args["since"].(string)
 	priority, _ := args["priority"].(string)
-	lines := 100
+	lines := 50
 	if v, ok := args["lines"].(float64); ok && v >= 0 {
 		lines = int(v)
 	}
@@ -298,15 +305,17 @@ func handleJournal(args map[string]any, cfg *config.Config, profileOverride stri
 
 	if follow == 0 {
 		res, _ := remote.RunCapture(prof, cwd, remoteCmd)
-		text, truncatedBytes := buildRunText(res, cwd)
+		text := buildRunText(res, cwd)
+		if len(text) > ResultByteMax {
+			return oversizeResult("journal", len(text),
+				"narrow `unit` / `since` / `priority`, use a tighter `grep`, or lower `lines`",
+				map[string]any{"unit": unit, "exit_code": res.ExitCode, "lines_clamped": linesClamped})
+		}
 		structured := map[string]any{
 			"exit_code":     res.ExitCode,
 			"cwd":           cwd,
 			"unit":          unit,
 			"lines_clamped": linesClamped,
-		}
-		if truncatedBytes > 0 {
-			structured["truncated_bytes"] = truncatedBytes
 		}
 		return toolResult{
 			Content:           []toolContent{{Type: "text", Text: text}},
@@ -330,10 +339,12 @@ func handleJournal(args map[string]any, cfg *config.Config, profileOverride stri
 	// point (unit / since / priority / grep).
 	res := runBoundedStream(c, remoteCmd, cwd, follow, nil)
 
-	text := res.Text
 	if res.Capped {
-		text += fmt.Sprintf("\n[output cap %d bytes; further lines streamed via progress only]\n", runTextMax)
+		return oversizeResult("journal", res.Total,
+			"use a tighter `grep`, narrower `unit` / `since` / `priority`, or lower `follow_seconds`",
+			map[string]any{"unit": unit, "follow_seconds": follow, "lines_clamped": linesClamped})
 	}
+	text := res.Text
 	text += fmt.Sprintf("\n[followed journal on %s for %ds, %d bytes captured]", profName, follow, res.Bytes)
 	return toolResult{
 		Content: []toolContent{{Type: "text", Text: text}},

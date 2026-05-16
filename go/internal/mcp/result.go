@@ -10,16 +10,20 @@ import (
 // Token-economy bounds applied uniformly by handlers. Tuning each in
 // isolation has consequences for the others, so they live together.
 const (
-	// runTextMax caps the combined stdout+stderr the `run` tool
-	// returns to the MCP client. Beyond this, output is truncated
-	// with a marker pointing the caller at remote-side filtering.
+	// ResultByteMax is the hard cap on a tool result's text payload,
+	// applied uniformly by every handler that can produce variable-
+	// length output (run, tail, journal, tail_log, wait_job log
+	// body, run_group, ...). When a result would exceed this, the
+	// handler returns oversizeResult instead of truncating -- the
+	// model is expected to add a filter and retry rather than read a
+	// truncated slice.
 	//
 	// The MCP client keeps every tool result in its conversation
 	// history, so a single `cat /var/log/...` or `journalctl -n
 	// 100000` permanently inflates the client's memory by the full
-	// payload. 64 KiB is enough for typical command output while
-	// drawing a hard line against runaway dumps.
-	runTextMax            = 64 * 1024
+	// payload. 16 KiB is tight enough that small / structured output
+	// fits naturally and unbounded dumps trip the gate.
+	ResultByteMax         = 16 * 1024
 	waitJobDefaultSeconds = 8
 	waitJobMaxSeconds     = 15
 )
@@ -89,9 +93,17 @@ func resolveProfile(cfg *config.Config, override string) (string, *config.Profil
 }
 
 // buildRunText assembles the textual payload returned by the `run`
-// tool, capping the combined stdout+stderr at runTextMax. Returns
-// (text, truncatedBytes); truncatedBytes is 0 when the output fit.
-func buildRunText(res *sshx.RunCaptureResult, cwd string) (string, int) {
+// tool: stdout, optional `--- stderr ---` divider + stderr, plus a
+// footer with cwd and exit code.
+//
+// Success renders as `[ok cwd ...]` rather than `exit 0 cwd ...` so
+// MCP clients with pattern-matching log analysis (Codex et al.) don't
+// read the word "exit" as a failure signal on every successful
+// command.
+//
+// Does NOT truncate -- callers check len(text) against ResultByteMax
+// and call oversizeResult when over.
+func buildRunText(res *sshx.RunCaptureResult, cwd string) string {
 	text := res.Stdout
 	if res.Stderr != "" {
 		if text != "" {
@@ -99,25 +111,37 @@ func buildRunText(res *sshx.RunCaptureResult, cwd string) (string, int) {
 		}
 		text += res.Stderr
 	}
-	truncated := 0
-	if len(text) > runTextMax {
-		truncated = len(text) - runTextMax
-		text = text[:runTextMax] + fmt.Sprintf(
-			"\n\n... [%d bytes truncated; pipe through head/tail/grep on the remote to slice the output] ...",
-			truncated,
-		)
-	}
-	// Don't spell out "exit 0" on success: Codex (and other MCP
-	// clients with pattern-matching log analysis) read the word
-	// "exit" as a failure signal even when followed by 0. Use
-	// [ok cwd ...] for the success case; reserve [exit N cwd ...]
-	// for the actually-non-zero codes where the word is accurate.
 	if res.ExitCode == 0 {
 		text += fmt.Sprintf("\n[ok cwd %s]", cwd)
 	} else {
 		text += fmt.Sprintf("\n[exit %d cwd %s]", res.ExitCode, cwd)
 	}
-	return text, truncated
+	return text
+}
+
+// oversizeResult is the unified rejection when a tool's text payload
+// exceeds ResultByteMax. The body is intentionally not echoed -- the
+// model is expected to add a filter and retry, not to read a sliced
+// fragment that may have lost the relevant lines. `hint` is the
+// tool-specific instruction on what filter to add; `extra` is merged
+// into structuredContent so authoritative metadata (exit_code, job
+// status, ...) flows back even when the body is dropped.
+func oversizeResult(tool string, gotBytes int, hint string, extra map[string]any) toolResult {
+	msg := fmt.Sprintf(
+		"rejected: %s output is %d bytes (cap %d). Output not returned -- narrow the scope and retry:\n%s",
+		tool, gotBytes, ResultByteMax, hint,
+	)
+	sc := map[string]any{
+		"rejected_reason": "oversize_output",
+		"bytes_returned":  gotBytes,
+		"cap_bytes":       ResultByteMax,
+	}
+	for k, v := range extra {
+		sc[k] = v
+	}
+	r := textErr(msg)
+	r.StructuredContent = sc
+	return r
 }
 
 // strSchema builds a string-type JSON schema fragment. Empty desc

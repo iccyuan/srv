@@ -276,7 +276,7 @@ func isInsideQuotes(s string, pos int) bool {
 // guardCheckRisky returns a blocking toolResult when the session
 // guard is on AND `cmd` matches a high-risk pattern AND the caller
 // didn't pass confirm=true. Returns nil to mean "allowed". Used by
-// `run`, `detach`, `run_stream`, `run_group`, and any other tool
+// `run`, `detach`, `run_group`, and any other tool
 // that ferries a raw shell command to the remote.
 func guardCheckRisky(tool, cmd string, confirm bool) *toolResult {
 	if !session.GuardOn() || confirm {
@@ -344,13 +344,13 @@ func rejectMessage(cmd, why string) string {
 	)
 }
 
-// Token-economy gates for MCP `run` / `run_stream`. The 64 KiB result
-// cap stops the model from drowning in output, but it doesn't stop
-// the WASTED tokens that get paid when the model asks for an
-// unbounded source and we serve them the wrong 64 KiB slice. Forcing
-// an explicit slicing decision usually returns more relevant content
-// AND saves tokens; the model can read the rejection and pick a
-// `head -n N` / `tail -n N` / `grep` / dedicated MCP tool path.
+// Token-economy gates for MCP `run`. The ResultByteMax (16 KiB) cap
+// stops the model from drowning in output, but it doesn't stop the
+// WASTED tokens that get paid when the model asks for an unbounded
+// source and we serve them the wrong slice. Forcing an explicit
+// slicing decision usually returns more relevant content AND saves
+// tokens; the model can read the rejection and pick a `head -n N`
+// / `tail -n N` / `grep` / dedicated MCP tool path.
 var (
 	// reBareCat matches `cat <something>` at a command-position. We
 	// don't reject `cat` with no arg (it's just `stdin -> stdout`).

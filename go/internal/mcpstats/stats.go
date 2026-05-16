@@ -54,7 +54,7 @@ const CmdMaxLen = 200
 // DescribeArgs returns a one-line human-readable summary of the most
 // informative arg for `tool`. Priority list per tool:
 //
-//	run / run_stream / detach          args["command"]
+//	run / detach                       args["command"]
 //	run_group                          "[group=X] " + args["command"]
 //	tail / list_dir / cd               args["path"]
 //	tail_log / wait_job / kill_job     args["id"]
@@ -78,7 +78,7 @@ func DescribeArgs(tool string, args map[string]any) string {
 	}
 	var out string
 	switch tool {
-	case "run", "run_stream", "detach":
+	case "run", "detach":
 		out = get("command")
 	case "run_group":
 		cmd := get("command")

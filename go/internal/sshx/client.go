@@ -710,9 +710,11 @@ const (
 // The trailing newline is preserved on each chunk so callers can
 // emit them verbatim.
 //
-// Used by the MCP `run_stream` tool to push progress notifications
-// while the command is still executing, sidestepping the MCP per-tool
-// timeout for medium-length commands (20-50s builds/tests).
+// Used by the MCP `run` tool (streaming mode, activated when the
+// client passes _meta.progressToken on tools/call) to push progress
+// notifications while the command is still executing, sidestepping
+// the MCP per-tool timeout for medium-length commands (20-50s
+// builds/tests).
 func (c *Client) RunStream(command string, cwd string, onChunk func(kind StreamChunkKind, line string)) (int, string, string, error) {
 	full := WrapWithCwd(command, cwd)
 	sess, err := c.Conn.NewSession()

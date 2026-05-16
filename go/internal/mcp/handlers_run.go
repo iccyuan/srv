@@ -9,6 +9,23 @@ import (
 	"strings"
 )
 
+// handleRun dispatches the unified `run` tool across three modes:
+//
+//   - background=true  -> spawn detached job, return job_id immediately.
+//   - progressToken set -> stream stdout/stderr chunks via
+//     `notifications/progress`; cold-dials a
+//     dedicated SSH session so the chunk callback
+//     can fire per-line. Use for medium-length
+//     (~20-90s) commands where progress keeps the
+//     MCP per-tool timeout alive.
+//   - neither           -> synchronous capture through the warm daemon
+//     pool (~200ms for short commands).
+//
+// Same pre-flight gates apply to non-background modes: guard for
+// destructive patterns, rejectSync for long-blocking shapes, and
+// rejectUnfiltered for unbounded sources. Streaming does NOT exempt
+// the gates -- progress notifications add their own token cost on top
+// of the final result.
 func handleRun(args map[string]any, cfg *config.Config, profileOverride string) toolResult {
 	cmd, _ := args["command"].(string)
 	if cmd == "" {
@@ -30,96 +47,92 @@ func handleRun(args map[string]any, cfg *config.Config, profileOverride string) 
 		}
 		return detachedResult(rec)
 	}
-	// Hard-reject sync calls that would block the MCP turn for too
-	// long. Description tells the model what to do instead; this
-	// catches the case where it ignored that and went with the
-	// reflex sleep+poll pattern anyway.
+	// Sync-blocking patterns bust the MCP per-tool timeout even with
+	// streaming (progress notifications reset the timeout, but the
+	// conversation is held open forever with no upper bound). Route
+	// to background=true for these.
 	if why := rejectSync(cmd); why != "" {
 		return textErr(rejectMessage(cmd, why))
 	}
-	// Token-economy gate: reject `cat <file>` / `dmesg` / unfiltered
-	// `journalctl` / unfiltered `find /` and friends -- they have no
-	// native upper bound, so even the 64 KiB result cap pays tokens
-	// for the wrong slice. Model is told exactly what slicer to add.
+	// Token-economy gate: unbounded sources (cat <file>, bare dmesg,
+	// unfiltered journalctl / find /) are rejected with an
+	// educational message pointing at the right slicer. Same rule
+	// for sync and stream paths -- progress chunks cost tokens too.
 	if label, msg := rejectUnfiltered(cmd); label != "" {
 		return rejectUnfilteredMessage(label, msg)
 	}
 	cwd := config.GetCwd(profName, prof)
-	res, _ := remote.RunCapture(prof, cwd, cmd)
-	text, truncatedBytes := buildRunText(res, cwd)
-	structured := map[string]any{
-		"exit_code": res.ExitCode,
-		"cwd":       cwd,
-	}
-	if truncatedBytes > 0 {
-		structured["truncated_bytes"] = truncatedBytes
-	}
-	return toolResult{
-		Content:           []toolContent{{Type: "text", Text: text}},
-		IsError:           res.ExitCode != 0,
-		StructuredContent: structured,
-	}
-}
 
-// handleRunStream is the streaming variant of `run`. While the
-// remote command executes, every line of stdout/stderr is pushed to
-// the client as a `notifications/progress` notification tagged with
-// the caller's progressToken. The final `tools/call` response still
-// carries the full captured output (capped at runTextMax) and the
-// exit code -- progress notifications are informational, not the
-// authoritative output, so a client that ignores them still gets
-// the same shape as `run`.
-//
-// Why this exists: the synchronous `run` tool is bound by the MCP
-// per-tool timeout (Claude Code default 60s) -- a 30s build sits
-// silent until completion and risks the "tools no longer available"
-// red dot if it slips past the bound. Streaming keeps progress
-// flowing so the client doesn't time out, and lets the model see
-// partial output before the command finishes.
-func handleRunStream(args map[string]any, cfg *config.Config, profileOverride string) toolResult {
-	cmd, _ := args["command"].(string)
-	if cmd == "" {
-		return textErr("error: command is required")
-	}
-	confirm, _ := args["confirm"].(bool)
-	if blocked := guardCheckRisky("run_stream", cmd, confirm); blocked != nil {
-		return *blocked
-	}
-	// Same token-economy gate as plain `run` -- streaming makes the
-	// unbounded-source problem worse, not better, since progress
-	// notifications add their own token cost on top of the final
-	// result.
-	if label, msg := rejectUnfiltered(cmd); label != "" {
-		return rejectUnfilteredMessage(label, msg)
-	}
-	profName, prof, errResult := resolveProfile(cfg, profileOverride)
-	if errResult != nil {
-		return *errResult
-	}
-	cwd := config.GetCwd(profName, prof)
+	// Sync path: warm daemon pool when the client didn't ask for
+	// streaming. Short commands (~200ms) skip the ~2.7s cold-dial
+	// cost the streaming path pays.
 	token := progressToken()
+	if token == nil {
+		res, _ := remote.RunCapture(prof, cwd, cmd)
+		text := buildRunText(res, cwd)
+		if len(text) > ResultByteMax {
+			return oversizeResult("run", len(text), runOversizeHint,
+				map[string]any{"exit_code": res.ExitCode, "cwd": cwd})
+		}
+		return toolResult{
+			Content:           []toolContent{{Type: "text", Text: text}},
+			IsError:           res.ExitCode != 0,
+			StructuredContent: map[string]any{"exit_code": res.ExitCode, "cwd": cwd},
+		}
+	}
 
-	// Direct dial -- the daemon's stream_run op exists but is wired
-	// for CLI consumption (writes to stdout); routing through it
-	// would require yet another adapter. Cold handshake hits the
-	// same ~2.7s cost as any non-pooled tool, which is fine for an
-	// explicitly-streaming call (the streaming masks the dial cost).
+	// Streaming path -- the client passed _meta.progressToken on
+	// tools/call. Direct dial here because the daemon's stream_run
+	// op is wired for CLI consumption (writes to stdout); routing
+	// through it would require yet another adapter. Cold handshake
+	// hits the same ~2.7s cost as any non-pooled tool, which the
+	// streaming call masks.
 	c, err := sshx.Dial(prof)
 	if err != nil {
 		return textErr(fmt.Sprintf("dial: %v", err))
 	}
 	defer c.Close()
 
-	// progress counter: byte-based, monotonic. Some MCP clients use
-	// progress to drive a UI bar; bytes is meaningful enough without
-	// knowing the unbounded total.
+	// Byte-based monotonic progress counter; some MCP clients drive
+	// a UI bar off it. Total is unbounded so this is just elapsed
+	// bytes-so-far, not a percentage.
+	//
+	// Early-terminate when emitted > ResultByteMax: stop forwarding
+	// progress (further chunks would burn tokens for output the
+	// final result will reject anyway) and close the SSH session,
+	// which kills the remote command via SIGHUP. The flag also
+	// drives the post-RunStream branch below.
 	var emitted int
+	var oversize bool
 	onChunk := func(_ sshx.StreamChunkKind, line string) {
+		if oversize {
+			return
+		}
 		emitted += len(line)
 		emitProgress(token, emitted, line)
+		if emitted > ResultByteMax {
+			oversize = true
+			// Close in a goroutine -- onChunk runs in the SSH read
+			// loop; a synchronous c.Close() would wait for that
+			// loop to drain and deadlock against itself.
+			go func() { _ = c.Close() }()
+		}
 	}
 
 	exitCode, stdout, stderr, runErr := c.RunStream(cmd, cwd, onChunk)
+	// When `oversize` fired, we intentionally closed the session.
+	// RunStream then typically returns os.ErrClosed or "exited
+	// without exit status" -- both expected. Treat as the oversize
+	// reject path and skip the normal error surface.
+	if oversize {
+		return oversizeResult("run", emitted, runOversizeHint,
+			map[string]any{
+				"cwd":              cwd,
+				"bytes_emitted":    emitted,
+				"streamed":         true,
+				"terminated_early": true,
+			})
+	}
 	if runErr != nil {
 		return textErr(fmt.Sprintf("stream run: %v", runErr))
 	}
@@ -130,24 +143,30 @@ func handleRunStream(args map[string]any, cfg *config.Config, profileOverride st
 		ExitCode: exitCode,
 		Cwd:      cwd,
 	}
-	text, truncatedBytes := buildRunText(res, cwd)
-	structured := map[string]any{
-		"exit_code":     exitCode,
-		"cwd":           cwd,
-		"bytes_emitted": emitted,
-	}
-	if truncatedBytes > 0 {
-		structured["truncated_bytes"] = truncatedBytes
-	}
-	if token != nil {
-		structured["streamed"] = true
+	text := buildRunText(res, cwd)
+	// Cap may still be hit at the final-assembly step (footer +
+	// stderr divider push us over) even though early-terminate
+	// didn't fire mid-stream. Same reject shape.
+	if len(text) > ResultByteMax {
+		return oversizeResult("run", len(text), runOversizeHint,
+			map[string]any{"exit_code": exitCode, "cwd": cwd, "bytes_emitted": emitted, "streamed": true})
 	}
 	return toolResult{
-		Content:           []toolContent{{Type: "text", Text: text}},
-		IsError:           exitCode != 0,
-		StructuredContent: structured,
+		Content: []toolContent{{Type: "text", Text: text}},
+		IsError: exitCode != 0,
+		StructuredContent: map[string]any{
+			"exit_code":     exitCode,
+			"cwd":           cwd,
+			"bytes_emitted": emitted,
+			"streamed":      true,
+		},
 	}
 }
+
+// runOversizeHint is the filter guidance returned when `run` output
+// exceeds ResultByteMax. Repeated verbatim by `run_group` is OK; the
+// rejection helper just embeds whatever string is passed.
+const runOversizeHint = "use `head -n N`, `tail -n N`, `grep PATTERN`, or pipe through `head|tail|grep|awk|sed|wc|cut|jq|sort|uniq` to slice the output"
 
 func handleDetach(args map[string]any, cfg *config.Config, profileOverride string) toolResult {
 	cmd, _ := args["command"].(string)
@@ -236,8 +255,22 @@ func handleRunGroup(args map[string]any, cfg *config.Config, profileOverride str
 	}
 	fmt.Fprintf(&sb, "\n%d profile(s), %d succeeded, %d failed.\n", len(results), len(results)-failed, failed)
 
+	text := sb.String()
+	// Cap applies to the aggregated text (N profiles' stdout/stderr
+	// glued together). The per-profile `results` array in
+	// structuredContent would also be too big to keep, so we drop
+	// both and signal the count summary in `extra` for context.
+	if len(text) > ResultByteMax {
+		return oversizeResult("run_group", len(text),
+			"narrow the `group` membership, or run the command per-profile with a slicer (`| head -n N`, `| grep PATTERN`)",
+			map[string]any{
+				"group":     groupName,
+				"succeeded": len(results) - failed,
+				"failed":    failed,
+			})
+	}
 	return toolResult{
-		Content: []toolContent{{Type: "text", Text: sb.String()}},
+		Content: []toolContent{{Type: "text", Text: text}},
 		IsError: failed > 0,
 		StructuredContent: map[string]any{
 			"group":     groupName,

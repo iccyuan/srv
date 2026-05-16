@@ -23,32 +23,15 @@ type tool struct {
 var tools = []tool{
 	{
 		def: toolDef{
-			Name:        "run",
-			Description: "Run a remote shell command. Synchronous by default (blocks until completion).\n\nREJECTED in synchronous mode (use background=true instead):\n  - `sleep N` where N > 5\n  - `tail -f`, `watch`, `journalctl -f` and similar never-terminating patterns\n\nREJECTED as unbounded-output (token economy -- add a slicer):\n  - `cat <file>`           -> use `head -n N <file>` or `tail -n N <file>` or the `tail` MCP tool\n  - `dmesg`                -> pipe into `tail -n N` or `grep PATTERN`\n  - `journalctl` w/o flags -> use the `journal` MCP tool or add -u/--since/-p/-g/-n\n  - `find /` w/o flags     -> add -maxdepth N / -name PATTERN / -type / etc.\nDownstream limiters (`| head`, `| tail`, `| grep`, `| wc`, etc.) satisfy the gate.\n\nFor anything expected to take more than ~10s (builds, installs, tests, big greps, sleep+poll loops), set background=true. The command starts as a detached job and returns a job_id immediately; then poll with wait_job in short (<=15s) chunks. Synchronous mode is bound by the client's per-tool timeout (Claude Code default 60s).",
-			InputSchema: map[string]any{
-				"type": "object",
-				"properties": map[string]any{
-					"command":    strSchema("Remote shell command."),
-					"profile":    strSchema(""),
-					"background": boolSchema(false, "Start as a detached job and return immediately. Required for long commands and for any sleep/wait/follow pattern."),
-					"confirm":    boolSchema(false, "Required when guard is on AND command hits a high-risk pattern (rm -rf, dd, mkfs, drop ...)."),
-				},
-				"required": []string{"command"},
-			},
-		},
-		handler: handleRun,
-	},
-	{
-		def: toolDef{
 			Name:        "journal",
-			Description: "Read or follow systemd journal on the remote. Mirrors journalctl's flag shape: `unit` (-u), `since`, `priority` (-p), `lines` (-n), `grep` (-g, server-side). Pass `follow_seconds` > 0 to stream new lines via `notifications/progress` for that many seconds (cap 60); leave 0 for a one-shot read. Use this in place of `run \"journalctl ...\"` so the bounded-follow case has a real tool surface instead of getting rejected as a long-blocking pattern.\n\nToken-economy gates (MCP only):\n  - ANY follow_seconds > 0 REQUIRES at least one of unit / since / priority / grep -- progress notifications during follow are unbounded by the result-text cap.\n  - `lines` is clamped to 2000.\n  - follow_seconds capped at 60s.\n\nSibling tools (pick by source):\n  - `tail`      -> any remote file by path\n  - `tail_log`  -> output of a detached srv job (by job_id, not path)",
+			Description: "Read or follow systemd journal on the remote. Mirrors journalctl's flag shape: `unit` (-u), `since`, `priority` (-p), `lines` (-n), `grep` (-g, server-side). Pass `follow_seconds` > 0 to stream new lines via `notifications/progress` for that many seconds (cap 60); leave 0 for a one-shot read. Use this in place of `run \"journalctl ...\"` so the bounded-follow case has a real tool surface instead of getting rejected as a long-blocking pattern.\n\nToken-economy gates (MCP only):\n  - ANY follow_seconds > 0 REQUIRES at least one of unit / since / priority / grep -- progress notifications during follow are unbounded by the result-text cap.\n  - `lines` is clamped to 2000.\n  - follow_seconds capped at 60s.\n  - Output exceeding 16 KiB is rejected (not truncated); narrow `unit` / `since` / `priority` / `grep`, or lower `lines` / `follow_seconds`, and retry.\n\nSibling tools (pick by source):\n  - `tail`      -> any remote file by path\n  - `tail_log`  -> output of a detached srv job (by job_id, not path)",
 			InputSchema: map[string]any{
 				"type": "object",
 				"properties": map[string]any{
 					"unit":           strSchema("Service unit name (passed to -u)."),
 					"since":          strSchema("Relative or absolute time (e.g. \"10 min ago\")."),
 					"priority":       strSchema("Priority filter (-p), e.g. err / warning / info."),
-					"lines":          intSchema(100, "Number of recent lines to fetch (-n)."),
+					"lines":          intSchema(50, "Number of recent lines to fetch (-n). Default 50 sized to fit under the 16 KiB result cap for typical line widths."),
 					"grep":           strSchema("Server-side regex filter (-g)."),
 					"follow_seconds": intSchema(0, "Follow for N seconds via progress notifications; 0 = one-shot. Capped at 60."),
 					"profile":        strSchema(""),
@@ -60,7 +43,7 @@ var tools = []tool{
 	{
 		def: toolDef{
 			Name:        "tail",
-			Description: "Read the last N lines of a remote file. With follow_seconds > 0, also streams new lines via `notifications/progress` for that duration. Use the one-shot form for log spot-checks; use the follow form when you actually need to watch a log change mid-deploy.\n\nToken-economy gates (MCP only):\n  - ANY follow_seconds > 0 REQUIRES a `grep` regex. Even short follows can flood progress notifications; the 64 KiB final-result cap does NOT cap the progress stream.\n  - `lines` is clamped to 1000.\n  - follow_seconds capped at 60s.\n\nFor one-shot reads (default), no grep is required -- the `lines` cap is the bound.\n\nSibling tools (pick by source):\n  - `journal`   -> systemd unit logs (use this for any service log on a systemd host; never `tail /var/log/journal/...`)\n  - `tail_log`  -> output of a detached srv job (by job_id, not path)",
+			Description: "Read the last N lines of a remote file. With follow_seconds > 0, also streams new lines via `notifications/progress` for that duration. Use the one-shot form for log spot-checks; use the follow form when you actually need to watch a log change mid-deploy.\n\nToken-economy gates (MCP only):\n  - ANY follow_seconds > 0 REQUIRES a `grep` regex. Even short follows can flood progress notifications; the 16 KiB final-result cap does NOT cap the progress stream.\n  - `lines` is clamped to 1000.\n  - follow_seconds capped at 60s.\n  - Output exceeding 16 KiB is rejected (not truncated); narrow the scope and retry.\n\nFor one-shot reads (default), no grep is required -- the `lines` cap is the bound.\n\nSibling tools (pick by source):\n  - `journal`   -> systemd unit logs (use this for any service log on a systemd host; never `tail /var/log/journal/...`)\n  - `tail_log`  -> output of a detached srv job (by job_id, not path)",
 			InputSchema: map[string]any{
 				"type": "object",
 				"properties": map[string]any{
@@ -77,19 +60,20 @@ var tools = []tool{
 	},
 	{
 		def: toolDef{
-			Name:        "run_stream",
-			Description: "Streaming variant of `run`. Output is pushed to the client as `notifications/progress` messages while the command runs, then the final tool result delivers the full captured output. Use this for medium-length commands (~20-90s builds, tests, deploys) where synchronous `run` would risk the per-tool timeout: progress keeps the call alive, the model sees partial output mid-flight, and the final result still arrives as the authoritative payload.\n\nThe client must pass `_meta.progressToken` on tools/call for the notifications to be delivered -- without it, this falls back to a synchronous shape identical to `run`.\n\nSame token-economy gate as `run`: `cat <file>` / bare `dmesg` / unfiltered `journalctl` / `find /` without flags are rejected. Streaming makes unbounded output WORSE (progress notifications add token cost on top of the final result), so the gate applies more aggressively here too.",
+			Name:        "run",
+			Description: "Run a remote shell command. Three execution modes, picked automatically:\n  - `background: true`            -> detach, return job_id immediately; pair with wait_job. Required for >30s commands.\n  - client passes `_meta.progressToken` -> stream stdout/stderr as `notifications/progress` while the command runs (good for 20-90s builds/tests; progress keeps the per-tool timeout alive).\n  - neither                       -> synchronous, warm daemon pool (~200ms for short commands).\n\nREJECTED in non-background modes (use background=true instead):\n  - `sleep N` where N > 5\n  - `tail -f`, `watch`, `journalctl -f` and similar never-terminating patterns\n\nREJECTED as unbounded-output (token economy -- add a slicer):\n  - `cat <file>`           -> use `head -n N <file>` or `tail -n N <file>` or the `tail` MCP tool\n  - `dmesg`                -> pipe into `tail -n N` or `grep PATTERN`\n  - `journalctl` w/o flags -> use the `journal` MCP tool or add -u/--since/-p/-g/-n\n  - `find /` w/o flags     -> add -maxdepth N / -name PATTERN / -type / etc.\nDownstream limiters (`| head`, `| tail`, `| grep`, `| wc`, etc.) satisfy the gate. Streaming does NOT exempt the gate -- progress notifications add token cost on top of the final result, so the unbounded-source rule applies the same.\n\nOutput exceeding 16 KiB is rejected (not truncated). When streaming mode hits the cap mid-execution, the remote command is killed via SSH close and the call returns the oversize reject with `terminated_early: true`. Narrow with `head -n N` / `tail -n N` / `grep PATTERN` and retry.",
 			InputSchema: map[string]any{
 				"type": "object",
 				"properties": map[string]any{
-					"command": strSchema("Remote shell command."),
-					"profile": strSchema(""),
-					"confirm": boolSchema(false, "Required when guard is on AND command hits a high-risk pattern."),
+					"command":    strSchema("Remote shell command."),
+					"profile":    strSchema(""),
+					"background": boolSchema(false, "Start as a detached job and return immediately. Required for long commands and for any sleep/wait/follow pattern."),
+					"confirm":    boolSchema(false, "Required when guard is on AND command hits a high-risk pattern (rm -rf, dd, mkfs, drop ...)."),
 				},
 				"required": []string{"command"},
 			},
 		},
-		handler: handleRunStream,
+		handler: handleRun,
 	},
 	{
 		def: toolDef{
@@ -285,7 +269,7 @@ var tools = []tool{
 	{
 		def: toolDef{
 			Name:        "run_group",
-			Description: "Run the same remote command across every profile in a named group, in parallel. Returns one result per member with exit code, stdout/stderr, and duration. Use this when you'd otherwise have to loop `run` over N hosts (deploys, restarts, status checks). Synchronous: subject to the same 60s MCP per-tool cap as `run`, so keep the command short or run it via `detach` per-profile and then poll.",
+			Description: "Run the same remote command across every profile in a named group, in parallel. Returns one result per member with exit code, stdout/stderr, and duration. Use this when you'd otherwise have to loop `run` over N hosts (deploys, restarts, status checks). Synchronous: subject to the same 60s MCP per-tool cap as `run`, so keep the command short or run it via `detach` per-profile and then poll.\n\nOutput exceeding 16 KiB (combined across all members) is rejected (not truncated). Narrow the `group` membership, or run the command per-profile with a slicer (`| head -n N`, `| grep PATTERN`).",
 			InputSchema: map[string]any{
 				"type": "object",
 				"properties": map[string]any{
@@ -328,12 +312,12 @@ var tools = []tool{
 	{
 		def: toolDef{
 			Name:        "tail_log",
-			Description: "Read the last N lines of a detached job's log file (by job_id). Resolves the id to ~/.srv-jobs/<id>.log on the remote and runs `tail -n LINES` there. One-shot only -- use `wait_job` for the polling pattern that pairs with `detach` / `run background=true`.\n\nSibling tools (pick by source):\n  - `tail`     -> any remote file by path (with optional follow + grep)\n  - `journal`  -> systemd unit logs",
+			Description: "Read the last N lines of a detached job's log file (by job_id). Resolves the id to ~/.srv-jobs/<id>.log on the remote and runs `tail -n LINES` there. One-shot only -- use `wait_job` for the polling pattern that pairs with `detach` / `run background=true`.\n\nOutput exceeding 16 KiB is rejected (not truncated). Lower `lines`, or use `run \"grep PATTERN ~/.srv-jobs/<id>.log | head -n N\"` to filter directly.\n\nSibling tools (pick by source):\n  - `tail`     -> any remote file by path (with optional follow + grep)\n  - `journal`  -> systemd unit logs",
 			InputSchema: map[string]any{
 				"type": "object",
 				"properties": map[string]any{
 					"id":    strSchema(""),
-					"lines": intSchema(200, ""),
+					"lines": intSchema(100, "Lines of log to fetch (tail -n). Default 100 sized to fit under the 16 KiB result cap for typical line widths."),
 				},
 				"required": []string{"id"},
 			},
@@ -343,7 +327,7 @@ var tools = []tool{
 	{
 		def: toolDef{
 			Name:        "wait_job",
-			Description: "Poll a detached job for completion, returning exit code + log tail when done. Designed to pair with `detach` or `run background=true`: long commands run in the background, and the model loops wait_job until status=completed. Defaults to short 8s polls and caps each call at 15s so Claude Code stays responsive. status=running means \"call wait_job again\"; status=completed means it's done and the local job record has been cleaned up.",
+			Description: "Poll a detached job for completion, returning exit code + log tail when done. Designed to pair with `detach` or `run background=true`: long commands run in the background, and the model loops wait_job until status=completed. Defaults to short 8s polls and caps each call at 15s so Claude Code stays responsive. status=running means \"call wait_job again\"; status=completed means it's done and the local job record has been cleaned up.\n\nIf the response (status hint + log tail) exceeds 16 KiB, the response body is rejected but the structured fields (status, exit_code) still flow back so the polling loop can advance. Lower `tail_lines`, or fetch the log separately with `tail_log` + smaller `lines`.",
 			InputSchema: map[string]any{
 				"type": "object",
 				"properties": map[string]any{

@@ -151,7 +151,6 @@ func TestDescribeArgs(t *testing.T) {
 	}{
 		// command-position tools pick "command".
 		{"run", map[string]any{"command": "ls -la /tmp"}, "ls -la /tmp"},
-		{"run_stream", map[string]any{"command": "make build"}, "make build"},
 		{"detach", map[string]any{"command": "sleep 60"}, "sleep 60"},
 		// run_group prefixes with [group=X] when group is set.
 		{"run_group", map[string]any{"group": "prod", "command": "uptime"}, "[prod] uptime"},
