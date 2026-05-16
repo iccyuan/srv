@@ -96,6 +96,8 @@ _srv() {
     subs=(
         'init:configure a profile'
         'config:manage profiles'
+        'settings:manage app settings (hints/lang/default profile)'
+        'guard:high-risk-op confirmation guard + deny/allow rules'
         'use:pin a profile for this shell'
         'cd:change persistent remote cwd'
         'pwd:show remote cwd'

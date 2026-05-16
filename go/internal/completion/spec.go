@@ -78,14 +78,15 @@ var compSpecs = map[string]compSpec{
 	// `srv tunnel <TAB>` lists the management actions. The one-shot
 	// numeric-port form is unconfigurable here (the catch-all takes
 	// over for anything not matching an enum value).
-	"tunnel": {positions: []argSlot{{typ: argEnum, choices: []string{"add", "remove", "list", "show", "up", "down"}}}},
-	"guard":  {positions: []argSlot{{typ: argEnum, choices: []string{"on", "off", "status"}}}},
-	"daemon": {positions: []argSlot{{typ: argEnum, choices: []string{"status", "stop", "restart", "logs"}}}},
-	"color":  {positions: []argSlot{{typ: argEnum, choices: []string{"on", "off", "auto", "use", "list", "status"}}}},
-	"env":    {positions: []argSlot{{typ: argEnum, choices: []string{"list", "set", "unset", "clear"}}}},
+	"tunnel":   {positions: []argSlot{{typ: argEnum, choices: []string{"add", "remove", "list", "show", "up", "down"}}}},
+	"guard":    {positions: []argSlot{{typ: argEnum, choices: []string{"on", "off", "status", "list", "add", "rm", "allow", "defaults", "test"}}}},
+	"daemon":   {positions: []argSlot{{typ: argEnum, choices: []string{"status", "stop", "restart", "logs"}}}},
+	"color":    {positions: []argSlot{{typ: argEnum, choices: []string{"on", "off", "auto", "use", "list", "status"}}}},
+	"env":      {positions: []argSlot{{typ: argEnum, choices: []string{"list", "set", "unset", "clear"}}}},
+	"settings": {positions: []argSlot{{typ: argEnum, choices: []string{"hints", "lang", "default_profile"}}}},
 
 	"config": {
-		positions: []argSlot{{typ: argEnum, choices: []string{"list", "default", "global", "remove", "show", "set", "edit"}}},
+		positions: []argSlot{{typ: argEnum, choices: []string{"list", "default", "remove", "show", "set", "edit"}}},
 		actions: map[string]*compSpec{
 			"default": {positions: []argSlot{{typ: argProfile}}},
 			"remove":  {positions: []argSlot{{typ: argProfile}}},

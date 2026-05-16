@@ -243,7 +243,7 @@ func (p *Profile) GetDialBackoff() time.Duration {
 // Top-level fields beyond DefaultProfile are user-tunable globals that
 // don't belong on a single profile -- they affect srv's local behavior
 // regardless of which server you're talking to. Set via
-// `srv config global <key> <value>`. nil pointer fields distinguish
+// `srv settings <key> <value>`. nil pointer fields distinguish
 // "user hasn't said" from "user said false".
 type Config struct {
 	Version        int    `json:"_version,omitempty"`

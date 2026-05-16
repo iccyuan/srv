@@ -172,12 +172,12 @@ var messages = map[lang]map[string]string{
 		"err.sync_one_root":       "error: only one remote root accepted, got %v",
 		"err.delete_requires_git": "error: --delete currently requires git mode",
 		"err.config_action":       "error: unknown config action %q",
-		"err.global_key_required": "error: srv config global <key> [<value> | --clear] (key required)",
+		"err.global_key_required": "error: srv settings <key> [<value> | --clear] (key required)",
 		"err.global_unknown_key":  "error: unknown global key %q (supported: hints, lang, default_profile)",
 		"err.global_lang_value":   "error: lang must be one of: en, zh, auto (got %q)",
 
 		// usage lines
-		"usage.config":      "usage: srv config <list|default|global|remove|show|set|edit> [args]",
+		"usage.config":      "usage: srv config <list|default|remove|show|set|edit> [args]",
 		"usage.config_set":  "usage: srv config set <profile> <key> <value>",
 		"usage.config_def":  "usage: srv config default <name>  (or no arg for interactive picker on a TTY)",
 		"usage.config_rm":   "usage: srv config remove <name>",
@@ -215,12 +215,12 @@ var messages = map[lang]map[string]string{
 		"err.sync_one_root":       "error: 只接受一个远端根目录,收到 %v",
 		"err.delete_requires_git": "error: --delete 目前只支持 git 模式",
 		"err.config_action":       "error: config 子动作未知 %q",
-		"err.global_key_required": "error: srv config global <key> [<value> | --clear](需要 key)",
+		"err.global_key_required": "error: srv settings <key> [<value> | --clear](需要 key)",
 		"err.global_unknown_key":  "error: 未知顶层配置 %q(支持:hints / lang / default_profile)",
 		"err.global_lang_value":   "error: lang 取值只能是 en / zh / auto,收到 %q",
 
 		// usage lines
-		"usage.config":      "用法:srv config <list|default|global|remove|show|set|edit> [args]",
+		"usage.config":      "用法:srv config <list|default|remove|show|set|edit> [args]",
 		"usage.config_set":  "用法:srv config set <profile> <key> <value>",
 		"usage.config_def":  "用法:srv config default <name>  (无参在 TTY 下弹 ↑↓ 选择器)",
 		"usage.config_rm":   "用法:srv config remove <name>",

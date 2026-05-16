@@ -3,6 +3,10 @@
 // when on, destructive remote commands (rm -rf, mkfs, drop database,
 // ...) require an explicit confirm flag from the MCP client.
 //
+// Rule management (list/add/rm/allow/defaults) and the on/off/status
+// toggle share one flat `guard` action space: `srv guard list`,
+// `srv guard add <name> <re>`, `srv guard on`, etc.
+//
 // Storage lives in internal/session (the sessions.json file). This
 // package is just the CLI shim that toggles / reports state and
 // echoes the SRV_GUARD env override so users can tell where a yes/no
@@ -21,10 +25,10 @@ import (
 	"strings"
 )
 
-// Cmd implements `srv guard [on|off|status|rules|test]`. Default
-// action is `status`. Output is intentionally one-line so it pipes
-// cleanly. Rule management lives under `rules` so the existing
-// `on`/`off` muscle memory still works.
+// Cmd implements `srv guard [on|off|status|list|add|rm|allow|defaults|test]`.
+// Default action is `status`. Output is intentionally one-line so it
+// pipes cleanly. list/add/rm/allow/defaults manage the persisted
+// deny/allow rule set; on/off/status toggle the per-session gate.
 func Cmd(args []string) error {
 	envHint := func() string {
 		if v := os.Getenv("SRV_GUARD"); v != "" {
@@ -37,8 +41,10 @@ func Cmd(args []string) error {
 		action = strings.ToLower(args[0])
 	}
 	switch action {
-	case "rules":
-		return cmdRules(args[1:])
+	case "list", "add", "rm", "remove", "allow", "defaults":
+		// Rule management, flat under `guard`. cmdRules treats
+		// args[0] as the rule action, so pass the full args.
+		return cmdRules(args)
 	case "test", "dry-run":
 		if len(args) < 2 {
 			return clierr.Errf(2, "usage: srv guard test \"<command>\"")
@@ -76,12 +82,13 @@ func Cmd(args []string) error {
 		fmt.Printf("guard: %s (session=%s)%s\n", state, sid, envHint())
 		return nil
 	}
-	fmt.Fprintln(os.Stderr, "usage: srv guard [on|off|status|rules ...|test \"<cmd>\"]")
+	fmt.Fprintln(os.Stderr, "usage: srv guard [on|off|status|list|add|rm|allow|defaults|test \"<cmd>\"]")
 	return clierr.Code(2)
 }
 
-// cmdRules dispatches `srv guard rules <list|add|rm|allow|...>`.
-// Reads / writes the persisted GuardConfig in ~/.srv/config.json.
+// cmdRules dispatches the flat rule actions `srv guard <list|add|rm|
+// allow|defaults>` (args[0] is the action). Reads / writes the
+// persisted GuardConfig in ~/.srv/config.json.
 func cmdRules(args []string) error {
 	cfg, err := config.Load()
 	if err != nil {
@@ -96,12 +103,12 @@ func cmdRules(args []string) error {
 	switch args[0] {
 	case "add":
 		if len(args) < 3 {
-			return clierr.Errf(2, "usage: srv guard rules add <name> <regex>")
+			return clierr.Errf(2, "usage: srv guard add <name> <regex>")
 		}
 		return rulesAdd(cfg, args[1], strings.Join(args[2:], " "))
 	case "rm", "remove":
 		if len(args) < 2 {
-			return clierr.Errf(2, "usage: srv guard rules rm <name>")
+			return clierr.Errf(2, "usage: srv guard rm <name>")
 		}
 		return rulesRm(cfg, args[1])
 	case "allow":
@@ -110,7 +117,7 @@ func cmdRules(args []string) error {
 		}
 		if args[1] == "rm" {
 			if len(args) < 3 {
-				return clierr.Errf(2, "usage: srv guard rules allow rm <regex>")
+				return clierr.Errf(2, "usage: srv guard allow rm <regex>")
 			}
 			return rulesAllowRm(cfg, args[2])
 		}
@@ -131,7 +138,7 @@ func cmdRules(args []string) error {
 		fmt.Printf("defaults: %s\n", boolDisplay(on))
 		return nil
 	}
-	return clierr.Errf(2, "usage: srv guard rules [list|add|rm|allow|defaults]")
+	return clierr.Errf(2, "usage: srv guard [list|add|rm|allow|defaults]")
 }
 
 func rulesList(cfg *config.Config) error {

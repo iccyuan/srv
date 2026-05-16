@@ -98,8 +98,6 @@ func cmdConfig(args []string, cfg *config.Config) error {
 	action := args[0]
 	rest := args[1:]
 	switch action {
-	case "global":
-		return cmdConfigGlobal(rest, cfg)
 	case "list":
 		if len(cfg.Profiles) == 0 {
 			fmt.Println(i18n.T("misc.no_profiles_run_init"))
@@ -251,13 +249,16 @@ func cmdConfig(args []string, cfg *config.Config) error {
 	return exitErr(1, "%s", i18n.T("err.config_action", action))
 }
 
-// cmdConfigGlobal manages top-level (non-per-profile) config keys.
+// cmdSettings manages app-level (non-per-profile) settings. Profile
+// management is a separate concern under `config`.
 //
-//	srv config global                    # list all globals + current values
-//	srv config global <key>              # show one
-//	srv config global <key> <value>      # set one
-//	srv config global <key> --clear      # reset to default
-func cmdConfigGlobal(args []string, cfg *config.Config) error {
+//	srv settings                    # list all settings + current values
+//	srv settings <key>              # show one
+//	srv settings <key> <value>      # set one
+//	srv settings <key> --clear      # reset to default
+//
+// Keys: hints, lang, default_profile.
+func cmdSettings(args []string, cfg *config.Config) error {
 	if len(args) == 0 {
 		printGlobalConfig(cfg)
 		return nil

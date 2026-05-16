@@ -114,6 +114,7 @@ var subcommands = []subcommand{
 
 	// Profile / cwd / status.
 	{name: "config", handler: func(c cmdCtx) error { return cmdConfig(c.args, c.cfg) }},
+	{name: "settings", handler: func(c cmdCtx) error { return cmdSettings(c.args, c.cfg) }},
 	{name: "use", handler: func(c cmdCtx) error { return cmdUse(c.args, c.cfg) }},
 	{name: "cd", handler: func(c cmdCtx) error {
 		p := ""

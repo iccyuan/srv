@@ -172,7 +172,7 @@ func riskyMatchWithRules(command string, rules []riskyPattern, allow []*regexp.R
 }
 
 // RiskyMatchPublic exposes riskyMatchWithRules to the guard CLI so
-// `srv guard test "..."` and `srv guard rules dry-run "..."` reuse
+// `srv guard test "..."` reuses
 // the same engine the live MCP server uses, including the allow-list
 // short-circuit. Always reads the current config.
 func RiskyMatchPublic(command string) string {

@@ -16,6 +16,8 @@ Quick start:
   srv use --clear                unpin (fall back to default)
   srv config default             interactive picker: set the global default profile
   srv config default <profile>   set the global default profile (persists)
+  srv settings                   show app settings (hints / lang / default_profile)
+  srv settings <key> <value>     set an app setting (e.g. srv settings lang en)
   srv cd /opt                    set persistent remote cwd (per session+profile)
   srv cd -                       swap to the previously-recorded cwd (shell-style)
   srv pwd                        show current remote cwd
@@ -141,8 +143,7 @@ Integrations:
   srv mcp                                run as a stdio MCP server
   srv guard [on|off|status]              MCP confirmation guard for high-risk ops (default off)
   srv guard test "<cmd>"                 dry-run: report which rule would block <cmd>
-  srv guard rules [list|add|rm|allow|defaults]
-                                         manage the deny-pattern set + allow-list
+  srv guard [list|add|rm|allow|defaults] manage the deny-pattern set + allow-list
   srv mcp replay [list|show <i>|clear|path]
                                          full args+result log of every MCP tools/call
   srv recipe [list|show|save|rm|run]     named multi-step playbooks; positional $1..$9
@@ -185,6 +186,8 @@ const helpZH = `srv - 跨平台 SSH 远端命令工具,持久 cwd / 连接复用
   srv use --clear                取消 pin,回落到全局默认
   srv config default             TTY 下:↑↓ 选择器,设全局默认
   srv config default <profile>   设全局默认(写 ~/.srv/config.json,所有 shell 共用)
+  srv settings                   查看应用设置(hints / lang / default_profile)
+  srv settings <key> <value>     设置应用项(如 srv settings lang zh)
   srv cd /opt                    设持久远端 cwd(per session+profile)
   srv cd -                       回到上一个 cwd(类似 shell 的 cd -)
   srv pwd                        显示当前远端 cwd
@@ -307,8 +310,7 @@ Supervisor / 资源限制(对 srv run 和 srv -d 都生效):
   srv mcp                                以 stdio MCP server 跑
   srv guard [on|off|status]              MCP 高危操作确认开关(默认关闭,可针对当前 shell 开启)
   srv guard test "<cmd>"                 dry-run: 给出哪条规则会拦截 <cmd>
-  srv guard rules [list|add|rm|allow|defaults]
-                                         管理拦截正则集合 + 允许列表
+  srv guard [list|add|rm|allow|defaults] 管理拦截正则集合 + 允许列表
   srv mcp replay [list|show <i>|clear|path]
                                          每次 tools/call 完整参数+结果回放
   srv recipe [list|show|save|rm|run]     命名多步剧本,支持 $1..$9 和 ${KEY} 替换。
