@@ -538,6 +538,9 @@ func CollectFiles(o *Options, localRoot string, allExcludes []string) ([]string,
 		}
 		files = globFiles(localRoot, o.Include)
 	case "list":
+		if len(o.Files) == 0 {
+			return nil, fmt.Errorf("--files requires at least one path")
+		}
 		for _, p := range o.Files {
 			rel := normalizeForTar(localRoot, p)
 			if rel == "" {

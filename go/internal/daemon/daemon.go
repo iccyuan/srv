@@ -801,8 +801,24 @@ func (s *daemonState) runLs(c *sshx.Client, target string) ([]string, error) {
 	if err != nil {
 		return nil, err
 	}
+	return parseLsOutput(res)
+}
+
+// parseLsOutput turns a `ls -1Ap` capture into entries. A non-zero
+// exit (typically "No such file or directory" on a missing target)
+// is surfaced as an error rather than swallowed as an empty success:
+// otherwise list_dir on a bogus path is indistinguishable from an
+// empty directory and the caller silently believes the dir exists.
+// handleLs already maps this error to Response{OK:false}, which makes
+// TryLs fall back to the direct-dial path that errors the same way,
+// so the failure reaches the user instead of vanishing.
+func parseLsOutput(res *sshx.RunCaptureResult) ([]string, error) {
 	if res.ExitCode != 0 {
-		return []string{}, nil
+		msg := strings.TrimSpace(res.Stderr)
+		if msg == "" {
+			msg = fmt.Sprintf("ls failed (exit %d)", res.ExitCode)
+		}
+		return nil, fmt.Errorf("%s", msg)
 	}
 	out := []string{}
 	for _, line := range strings.Split(res.Stdout, "\n") {

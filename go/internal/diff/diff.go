@@ -50,7 +50,10 @@ func Cmd(args []string, cfg *config.Config, profileOverride string) error {
 // code, error). Used by the CLI (Cmd) and by the MCP `diff` tool.
 func Compare(cfg *config.Config, profileOverride, local, remoteArg string) (string, int, error) {
 	if _, err := os.Stat(local); err != nil {
-		return "", 1, err
+		if os.IsNotExist(err) {
+			return "", 1, fmt.Errorf("local path missing: %q", local)
+		}
+		return "", 1, fmt.Errorf("local %q: %w", local, err)
 	}
 	name, profile, err := config.Resolve(cfg, profileOverride)
 	if err != nil {
