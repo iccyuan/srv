@@ -471,6 +471,22 @@ srv sessions clear    # drop current session record
 srv sessions prune    # GC: remove records whose pid no longer exists
 ```
 
+### Prune accumulated caches
+
+`srv prune <target>` keeps the live/recent part and drops only the stale part — full erasure is a different verb (e.g. `srv stats --clear` / `srv sessions clear`). The target is tab-completable.
+
+```
+srv prune jobs              # drop FINISHED records from the local jobs.json ledger (running kept)
+srv prune jobs <id>         # only that id's finished record (errors if it's still running)
+srv prune sessions          # drop DEAD-pid session records (alias of `srv sessions prune`)
+srv prune mcp-log           # trim mcp.log to its recent ~256 KB tail (line-aligned)
+srv prune mcp-stats         # drop mcp-stats.jsonl rows older than 7d (incl. the rotated .1)
+srv prune all               # all four above, in one pass
+srv prune jobs --remote     # ALSO delete COMPLETED jobs' ~/.srv-jobs/*.log + *.exit on the
+srv prune all  --remote     # server, gated on the remote .exit marker so running jobs are
+                            # never touched. Explicit opt-in, never implied; jobs/all only.
+```
+
 ### Daemon management
 
 `srv` auto-spawns a daemon (`~/.srv/daemon.sock`) the first time it needs `_ls`, a non-TTY command, or `cd` — pooling SSH connections so subsequent calls skip the ~2.7s handshake. You usually don't touch it; for direct control:
@@ -526,6 +542,7 @@ echo 'source <(srv completion zsh)' >> ~/.zshrc
 | `srv use <TAB>` | profile names + `--clear` |
 | `srv -P <TAB>` | profile names |
 | `srv sessions <TAB>` | list/show/clear/prune |
+| `srv prune <TAB>` | jobs/sessions/mcp-log/mcp-stats/all |
 | `srv completion <TAB>` | bash/zsh/powershell |
 | `srv push <TAB>` | local files |
 | `srv push <local> <TAB>` | **remote** dirs / files |

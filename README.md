@@ -73,7 +73,7 @@ srv "ps aux | grep nginx"    # 带管道的命令需要本地 shell 引号
 | 日志与实时视图 | `tail`, `journal`, `watch`, `top` |
 | 端口转发 | `tunnel` |
 | 批量与提权 | `group`, `-G`, `sudo` |
-| 诊断与本地辅助 | `check`, `doctor`, `disconnect` |
+| 诊断与本地辅助 | `check`, `doctor`, `disconnect`, `prune` |
 | 集成、服务与界面 | `mcp`, `guard`, `color`, `daemon`, `ui` |
 | 历史与钩子 | `history`, `hooks` |
 | 剧本 | `recipe` |
@@ -372,6 +372,20 @@ srv -G web "systemctl restart nginx"
 | `no-route` | 网络不可达。 |
 | `tcp-timeout` | TCP 连接超时。 |
 | `perm-denied` | 通用认证失败。 |
+
+### 清理累积缓存 (`srv prune <target>`)
+
+留活/留近、只删陈旧 —— 每个 target 只丢弃陈旧部分,保留运行中/最近的;整文件清空是另一个动词(如 `srv stats --clear` / `srv sessions clear`)。target 可 Tab 补全。
+
+| 命令 | 作用 |
+|---|---|
+| `srv prune jobs` | 删本地账本(`jobs.json`)里**已完成**的 job 记录,运行中的保留。 |
+| `srv prune jobs <id>` | 只删指定 id 的已完成记录(该 job 仍在运行则报错,先 `srv kill`)。 |
+| `srv prune sessions` | 删 PID 已死的 session 记录,存活的保留(等价于 `srv sessions prune`)。 |
+| `srv prune mcp-log` | 把 `mcp.log` 裁剪到最近约 256 KB 尾部(按行边界)。 |
+| `srv prune mcp-stats` | 删 `mcp-stats.jsonl` 里超过 7 天的遥测行(含轮转副本 `.1`)。 |
+| `srv prune all` | 上面四项一次跑完。 |
+| `srv prune jobs --remote` / `srv prune all --remote` | 额外删服务器 `~/.srv-jobs/` 里**已完成**作业的 `*.log` + `*.exit`(以远端 `.exit` 标记判定完成,运行中的绝不触碰)。`--remote` 必须显式 opt-in,绝不隐含,且只对 `jobs`/`all` 生效。 |
 
 ## 10. 集成、服务与界面
 
