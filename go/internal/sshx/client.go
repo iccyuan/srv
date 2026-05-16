@@ -670,13 +670,20 @@ func detachSpawnCmd(encoded, cwd, logPath string) string {
 	return fmt.Sprintf(
 		// `setsid` puts the job in its own session/process group so
 		// kill_job can signal the WHOLE tree (`kill -SIG -PID`) instead
-		// of just the bash wrapper -- without it the real workload (e.g.
-		// the `sleep` child) survived kill and orphaned. `nohup` is kept
-		// for SIGHUP-immunity on SSH drop; setsid execs nohup execs bash,
-		// so `$!` is still that single pid and (being the session leader)
-		// equals the process-group id.
-		"mkdir -p ~/.srv-jobs && cd %s && (setsid nohup bash -c \"$(echo %s | { base64 -d 2>/dev/null || base64 -D; })\" </dev/null >%s 2>&1 & echo $!)",
-		srvtty.ShQuotePath(cwd), encoded, logPath,
+		// of just the bash wrapper -- otherwise the real workload (e.g.
+		// the `sleep` child) survived kill and orphaned.
+		//
+		// setsid(1) is util-linux only: macOS and the *BSDs don't ship
+		// it (same portability class as the base64 -d/-D split below).
+		// So gate it on `command -v setsid` and fall back to plain
+		// `nohup` there -- detach still works, the host just keeps the
+		// pre-fix "kill reaches only the wrapper pid" behavior (kill_job
+		// already falls back from `-PID` to the bare pid). `nohup` is
+		// kept for SIGHUP-immunity on SSH drop; either way `$!` is the
+		// single backgrounded pid (the setsid session leader on Linux,
+		// whose pid == its process-group id).
+		"mkdir -p ~/.srv-jobs && cd %s && (if command -v setsid >/dev/null 2>&1; then setsid nohup bash -c \"$(echo %s | { base64 -d 2>/dev/null || base64 -D; })\" </dev/null >%s 2>&1 & else nohup bash -c \"$(echo %s | { base64 -d 2>/dev/null || base64 -D; })\" </dev/null >%s 2>&1 & fi; echo $!)",
+		srvtty.ShQuotePath(cwd), encoded, logPath, encoded, logPath,
 	)
 }
 
