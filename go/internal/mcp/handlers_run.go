@@ -195,6 +195,14 @@ func handleRunGroup(args map[string]any, cfg *config.Config, profileOverride str
 	if why := rejectSync(cmd); why != "" {
 		return textErr(rejectMessage(cmd, why))
 	}
+	// Token-economy gate, same as `run` -- and it matters MORE here:
+	// an unbounded source (cat <file>, bare dmesg, unfiltered
+	// journalctl / find /) is paid once per group member, so a
+	// 10-host group multiplies the blow-up 10x. Gate before
+	// group.Run so no SSH fan-out happens on a rejected shape.
+	if label, msg := rejectUnfiltered(cmd); label != "" {
+		return rejectUnfilteredMessage(label, msg)
+	}
 	results, err := group.Run(cfg, groupName, cmd)
 	if err != nil {
 		return textErr(err.Error())
