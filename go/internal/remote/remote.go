@@ -163,6 +163,36 @@ func ResolvePath(remote, cwd string) string {
 	return strings.TrimRight(cwd, "/") + "/" + remote
 }
 
+// ValidateRemotePath rejects remote targets that are really
+// Windows-shaped local paths. ResolvePath anchors any non-/,
+// non-~ string under cwd, so `srv push foo C:\tmp\x` (or a
+// script/test that reuses a Windows local path as the remote
+// arg) used to MkdirAll a literal `~/C:/.../x` garbage tree on
+// the server instead of erroring. Remote paths are POSIX by
+// contract: a drive-letter prefix or any backslash is never a
+// legitimate POSIX target and is always a leaked Windows path.
+// Empty stays valid -- callers read it as "use cwd".
+func ValidateRemotePath(p string) error {
+	if p == "" {
+		return nil
+	}
+	if strings.ContainsRune(p, '\\') {
+		return fmt.Errorf("remote path %q contains a backslash; remote paths must be POSIX (forward slashes, no Windows path)", p)
+	}
+	// Windows drive prefix: one ASCII letter, ':', then end / '/'
+	// / '\'. Tight enough not to flag a legit POSIX relative name
+	// that merely contains a colon (e.g. "a:b", "deploy:2024").
+	if len(p) >= 2 && isASCIILetter(p[0]) && p[1] == ':' &&
+		(len(p) == 2 || p[2] == '/' || p[2] == '\\') {
+		return fmt.Errorf("remote path %q looks like a Windows drive path; remote paths must be POSIX (no %c: prefix)", p, p[0])
+	}
+	return nil
+}
+
+func isASCIILetter(b byte) bool {
+	return (b >= 'a' && b <= 'z') || (b >= 'A' && b <= 'Z')
+}
+
 // ApplyEnv prepends `KEY=value ...` exports to the user's command
 // when the profile has an Env map. Order is deterministic (sorted
 // keys) so cache hits on the same cmd repeat byte-for-byte.

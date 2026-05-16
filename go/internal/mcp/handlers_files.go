@@ -50,6 +50,9 @@ func handlePush(args map[string]any, cfg *config.Config, profileOverride string)
 	if rpath == "" {
 		rpath = filepath.Base(local)
 	}
+	if err := remote.ValidateRemotePath(rpath); err != nil {
+		return textErr(err.Error())
+	}
 	abs := remote.ResolvePath(rpath, cwd)
 	st, _ := os.Stat(local)
 	recursive := false

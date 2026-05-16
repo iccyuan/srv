@@ -705,6 +705,9 @@ func cmdPush(args []string, cfg *config.Config, profileOverride string) error {
 	} else {
 		rpath = baseName(local)
 	}
+	if err := remote.ValidateRemotePath(rpath); err != nil {
+		return exitErr(1, "%v", err)
+	}
 	abs := remote.ResolvePath(rpath, cwd)
 	base := hookEvent(name, profile, cwd)
 	base.Local = local
