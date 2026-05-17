@@ -1,278 +1,240 @@
-# Architecture
+# 架构
 
-`srv` is a single-binary Go CLI for running commands on remote SSH hosts. It keeps local state under `~/.srv`, talks SSH directly through `golang.org/x/crypto/ssh`, and exposes both a human CLI and a stdio MCP server.
+[English](./ARCHITECTURE.en.md) | 中文
 
-## High-Level Model
+这是 `srv` 的技术参考文档:不只是高层架构,还包括各个非显然实现选择背后的**原因**(网络/性能、跨平台行为、guard 闸、包分层)。README 是面向用户的使用指南;本文面向贡献者,以及任何想知道"为什么这样实现"的人。
+
+## 目录
+
+- [概览](#概览)
+- [整体模型](#整体模型)
+- [仓库结构](#仓库结构)
+- [核心概念](#核心概念)
+- [命令分发](#命令分发)
+- [SSH 客户端](#ssh-客户端)
+- [Daemon](#daemon)
+- [网络与性能](#网络与性能)
+- [Sync](#sync)
+- [MCP](#mcp)
+- [Guard](#guard)
+- [跨平台说明](#跨平台说明)
+- [安装器](#安装器)
+- [状态文件](#状态文件)
+- [扩展清单](#扩展清单)
+- [测试](#测试)
+
+## 概览
+
+`srv` 是一个单二进制 Go CLI,用来在远端 SSH 主机上执行命令。本机状态放在 `~/.srv`,直接走 `golang.org/x/crypto/ssh` 说 SSH(不依赖系统 `ssh`,不依赖 Python),同时对人提供 CLI、对 AI 编码 agent 提供 stdio MCP server。
+
+## 整体模型
 
 ```text
-local shell / MCP client
+本机 shell / MCP 客户端
         |
         v
-     srv CLI
+   srv CLI / srv mcp
         |
-        +-- local state: config.json, sessions.json, jobs.json
+        +-- 本地状态: config.json, sessions.json, jobs.json
         |
-        +-- daemon client -> srv daemon -> pooled SSH clients
+        +-- daemon 客户端 -> srv daemon -> 池化的 SSH 连接
         |
-        +-- direct SSH client -> remote host
+        +-- 直连 SSH -> 远端主机
 ```
 
-The daemon is an optimization, not a requirement. Heavy streaming operations can still use direct SSH where that is simpler or safer.
+daemon 是优化项,不是必需。重型流式操作在更简单或更安全时仍可走直连 SSH。
 
-## Core Concepts
+## 仓库结构
+
+标准 Go 布局:module 在仓库根,入口在 `cmd/srv`,其余都在 `internal/`(40 个职责单一的包)。
+
+```text
+cmd/srv/                入口、全局 flag 解析、命令分发
+internal/config         配置 schema、profile 解析、原子 JSON 写、
+                        GuardActive(guard 生效状态解析)
+internal/session        每 shell 记录、session id 推导、cwd 持久化、
+                        GuardPref(env+session 层)
+internal/sshx           SSH 拨号/认证/known_hosts/keepalive/ProxyJump、
+                        SFTP、capture 与流式执行辅助
+internal/daemon         连接池 daemon + CLI 侧协议
+internal/transfer       push/pull、并行分块传输、断点续传
+internal/syncx          sync 文件收集、tar 流、删除、watch
+internal/remote         裸 CLI 远端执行路径(流式)
+internal/runwrap        远端命令包装:cwd、失败重启、cpu/mem 限制
+internal/mcp            stdio MCP server、工具处理、执行前 gate
+internal/guard          `srv guard` CLI(开关 / 规则 / status)
+internal/group          profile group、并行扇出(-G)
+internal/sudo           远端 `sudo -S` 密码处理
+internal/streams        tail / journal 流式 + 自动重连
+internal/tunnel         端口转发定义
+internal/tunnelproc     独立进程模式 tunnel
+internal/jobs           后台任务记录(jobs.json)
+internal/jobcli         jobs / logs / kill CLI
+internal/jobnotify      任务完成 OS 通知 / webhook(叶子包)
+internal/check          连接诊断、RTT、带宽、换 key
+internal/prune          `srv prune` 各 target(选择性清理)
+internal/recipe         命名多步剧本
+internal/hooks          生命周期钩子(pre/post cd/sync/run/push/pull)
+internal/history        ~/.srv/history.jsonl CLI 命令记录
+internal/atrest         history / mcp-replay 的 AES-256-GCM 静态加密
+internal/completion     本地 + 远端 shell 补全
+internal/picker         TTY 选择器 UI
+internal/ui             一屏式 TUI dashboard
+internal/theme          颜色 preset
+internal/progress       传输进度条
+internal/platform       按 OS 的 stats/notify(platform_*.go 拆分)
+internal/install        浏览器安装器 + 平台 PATH 辅助
+internal/launcher       后台 daemon / detached 进程拉起辅助
+internal/srvtty         TTY / raw 模式 / shell 引用辅助
+internal/srvutil        共享工具:路径、文件锁、原子 JSON
+internal/mcplog         mcp.log 生命周期 + prune
+internal/i18n           帮助文本、中/英本地化
+internal/project        .srv-project pin 解析
+internal/diff           本地/远端文件 diff
+internal/editcmd        srv edit / open / code
+internal/hints          命令拼写提示
+```
+
+## 核心概念
 
 ### Profile
 
-A profile describes one SSH target:
-
-- host, user, port, identity file
-- default cwd
-- network settings such as keepalive and dial retry
-- sync defaults
-- ProxyJump chain
-- profile-level remote env vars
-
-Profiles live in `~/.srv/config.json`.
+一个 SSH 目标:host/user/port/identity、默认 cwd、网络设置(keepalive、拨号重试、连接池大小、压缩)、sync 默认值、ProxyJump 链、profile 级远端 env。存在 `~/.srv/config.json`。
 
 ### Session
 
-A session is one local shell or MCP process. It stores:
+一个本机 shell 或 MCP 进程。存:可选 pin 的 profile、按 profile 的 cwd map、上一次 cwd(给 `srv cd -`)、每 shell 的 guard 三态、last-seen 元数据。存在 `~/.srv/sessions.json`。
 
-- optional pinned profile
-- cwd map keyed by profile
-- last-seen metadata
+session id 的推导方式(对 guard 和 cwd 都是关键 —— 见[跨平台说明](#跨平台说明)):
 
-Sessions live in `~/.srv/sessions.json`.
+- 设了 `SRV_SESSION` 环境变量则用它。
+- Unix:父进程 pid(`os.Getppid()`)—— 你交互的那个 shell。
+- Windows:沿进程树上溯,跳过启动器包装(`python.exe` 等),停在第一个真正的 shell。
 
-Resolution order:
+profile 解析优先级:
 
 ```text
--P/--profile > session pin > SRV_PROFILE > config default
+-P/--profile > session pin > SRV_PROFILE > .srv-project > config 默认
 ```
 
 ### cwd
 
-Remote `cd` cannot persist across separate SSH commands, so `srv cd` validates the path remotely and stores the resulting absolute path locally. Later commands wrap the remote command with `cd <cwd> && (...)`.
+远端 `cd` 没法跨多次独立 SSH 命令保持,所以 `srv cd` 在远端校验路径、把解析出的绝对路径存到本地,后续命令用 `cd <cwd> && (...)` 包起来。
 
-## Main Packages / Files
+## 命令分发
 
-```text
-main.go                 entrypoint and command dispatch
-config.go               config schema, profile resolution, atomic JSON writes
-session.go              session records and cwd persistence
-client.go               SSH dial/auth/keepalive/ProxyJump/SFTP
-ops.go                  remote run and file operations
-cmds.go                 config/use/cd/pwd/status handlers
-feature_cmds.go         doctor/open/code/diff/env helpers
-check.go                connectivity diagnosis and RTT probe
-jobs.go                 detached job records and log/kill commands
-sync.go                 file collection, tar stream upload, delete support
-sync_watch.go           fsnotify watch mode
-tunnel.go               local and reverse port forwarding
-daemon.go               SSH connection pool daemon
-daemon_client.go        CLI side of daemon protocol
-completion*.go          local and remote shell completion
-mcp.go                  stdio MCP server and tool handlers
-install*.go             browser installer and platform-specific PATH helpers
-```
+`cmd/srv` 先解析全局 flag(`-P/--profile`、`-G/--group`、`-t`、`-d`、`--no-hints`)。保留子命令本地处理;不在保留集里的第一个参数当作对当前 profile 的远端命令。检测到 AI agent shell(`CLAUDECODE` / `CODEX_*` 标记)时,裸 CLI 的远端子命令被硬拒绝并指向 MCP server(逃生开关 `SRV_ALLOW_AI_CLI=1`)—— 裸 CLI 会绕过 MCP 的 token/sync/guard gate,所以 agent 必须走 MCP。
 
-## Command Dispatch
+## SSH 客户端
 
-`main.go` parses global flags first:
+`internal/sshx` 负责 SSH 行为:
 
-- `-P` / `--profile`
-- `-t`
-- `-d`
-- `--no-hints`
+- 设了 `SSH_AUTH_SOCK` 走 SSH-agent 认证,然后 profile `identity_file`,再默认 key 路径。
+- known_hosts 校验,首连 accept-new;key 变了一律拒。
+- 可选 ProxyJump 链;可选 SOCKS5/HTTP-CONNECT 代理(仅第一跳)。
+- TCP keepalive(SO_KEEPALIVE,15s)+ SSH 层 keepalive。
+- SFTP 客户端懒初始化,归 `*Client` 所有。
 
-Reserved subcommands are handled locally. Any first arg outside the reserved set is treated as a remote command and passed to the active profile.
-
-## SSH Client
-
-`client.go` owns SSH behavior:
-
-- SSH agent auth if `SSH_AUTH_SOCK` is present
-- profile `identity_file`, otherwise common default key paths
-- known_hosts verification with accept-new behavior
-- optional ProxyJump chain
-- TCP keepalive and SSH keepalive
-- SFTP client lazy initialization
-
-`Client.Close()` tears down SFTP, primary SSH connection, ProxyJump chain, and keepalive goroutine.
+`Client.Close()` 拆掉 SFTP、主连接、ProxyJump 链(反序)、keepalive goroutine(用 stop channel,这样短命的 MCP 客户端不会堆积空闲 goroutine)。
 
 ## Daemon
 
-The daemon listens on `~/.srv/daemon.sock` and pools SSH clients by profile.
+监听 `~/.srv/daemon.sock`,按 profile 池化 SSH 连接,提供 `ls`/`cd`/`pwd`/`run`/`stream_run`/`status`/`shutdown`。
 
-Supported operations include:
+设计规则:
 
-- `ls` for remote completion
-- `cd`
-- `pwd`
-- `run`
-- `stream_run`
-- `status`
-- `shutdown`
+- 拨号或跑远端命令时绝不持有 `daemonState.mu`。
+- 空闲超 30s 的池化连接复用前先健康探测,绝不把已死连接交出去。
+- 并发相同的 `ls`/`run` 请求单飞合并。
+- GC 时丢弃过期补全缓存;空闲 30 分钟自退出。
 
-Design rules:
+连接池大小:`pool_size` 默认 4(clamp 到 `[1,16]`)。单条 SSH 连接的流控窗口在高带宽时延积链路上会卡住吞吐;并发 MCP 调用 / 大 sync 树 / 繁忙的 `srv ui` 会在一条连接上排队。4 条并行连接填满管道,又不至于触到远端 `sshd` 的 `MaxStartups`/`MaxSessions` 预算。`GetPoolSize()` 把 unset 和 `<1` 当默认;`pool_size: 1` 回到旧的单连接行为。`autoconnect: true` 在 daemon 启动时把 profile 预热进池(首条命令从约 200-800ms 握手降到 0-RTT)。
 
-- Do not hold `daemonState.mu` while dialing or running remote commands.
-- Health-check idle pooled connections before reuse.
-- Drop expired completion cache entries during GC.
-- Self-exit after 30 minutes idle.
+## 网络与性能
 
-Pool sizing: `pool_size` defaults to 4 (clamped to [1,16]). A single
-SSH connection's flow-control window caps throughput on a high
-bandwidth-delay-product link, and concurrent MCP calls / large sync
-trees / a busy `srv ui` serialize behind one connection. Four parallel
-connections fill the pipe without risking the remote `sshd`
-`MaxStartups`/`MaxSessions` budget. `GetPoolSize()` treats unset and
-any value `<1` as the default; `pool_size: 1` restores the historical
-single-connection behavior.
+- **并行分块传输**:≥32 MiB 且无可续传 partial 的文件拆成 8 MiB 块,在一条 SSH 连接上走 N 路并行 `WriteAt`/`ReadAt`,让窗口刷新往返互相重叠。高 RTT 链路约 3-5×,LAN 上无副作用。`SRV_TRANSFER_CHUNK_{THRESHOLD,BYTES,PARALLEL}` 可调。
+- **目录并行**:递归 push/pull/sync 把文件扇到 `SRV_TRANSFER_WORKERS` 个 goroutine(默认 4,范围 1-32),共用同一条连接。
+- **断点续传 + 哈希前缀校验**:用远端 `sha256(head -c N)`(~80 字节回包)确认 partial 是真前缀,而不是把它重新下载来比对。
+- **压缩**:`compress_sync`(默认开)对 sync tar 流 gzip;`compress_streams`(默认关)在网络上 gzip 抓取的 stdout —— 只在慢/跨区域链路划算,解码失败回落明文。
+- **拨号重试**:`dial_attempts` / `dial_backoff`(指数退避,封顶 30s);认证和 host-key 错误绝不重试 —— 再来一次答案不变。
+- **Keepalive**:TCP SO_KEEPALIVE(内核快速发现死对端)+ SSH 层 keepalive(`keepalive_interval`/`keepalive_count`)。
 
 ## Sync
 
-`srv sync` has four collection modes:
-
-- git: modified/staged/untracked
-- mtime: changed since a duration
-- glob: include patterns, supports `**`
-- list: explicit files
-
-Transfer uses a Go tar stream piped into remote `tar -xf -`; when `compress_sync` is enabled it uses gzip and remote `tar -xzf -`.
-
-Delete support is intentionally limited to git mode. Deletes require preview discipline and have a default safety cap.
-
-`sync --watch` installs fsnotify watchers on non-excluded directories. Events are debounced and sync runs are serialized; events during an active sync queue one follow-up run.
+四种收集模式:git(modified/staged/untracked)、mtime(某时长内改动)、glob(支持 `**`)、显式列表。传输是 Go tar 流管进远端 `tar -xf -`(`compress_sync` 时 `-xzf -`)。删除支持刻意只在 git 模式,带预览纪律和默认安全上限。`sync --watch` 给非排除目录装 fsnotify;事件去抖、运行串行,最多排一个后续。
 
 ## MCP
 
-`mcp.go` implements JSON-RPC over stdio. The server exposes structured tools for remote command execution, cwd/profile management, sync, file transfer, detached jobs, diagnostics, and daemon status.
+`internal/mcp` 是 stdio 上的 JSON-RPC,暴露远端执行、cwd/profile、sync、传输、jobs、诊断、daemon 状态等结构化工具。token 纪律很重要,因为客户端把工具 schema 和结果都留在上下文里:
 
-Token discipline matters because MCP clients keep tool schemas and tool results in context:
-
-- `run` output is capped.
-- Large payloads are not duplicated in both text and structured fields.
-- `sync` success returns counts instead of full path lists.
-- Tool descriptions are intentionally short.
+- `run` 输出有上限(64 KiB)。
+- 大 payload 不在 text + structured 两处重复。
+- `sync` 返回计数而非完整路径列表。
+- 工具描述刻意短。
+- 无界源(`cat`、裸 `journalctl`/`find /`、`tail -f`)执行前被拒,并指向有界写法 / 后台任务。
 
 ## Guard
 
-The high-risk-op confirmation gate is ON by default. Rationale behind
-the non-obvious parts:
+高危操作确认闸默认开启。非显然部分的原因:
 
-**Narrow pattern set.** Only irreversible destruction (`rm -rf`,
-`dd of=`, `mkfs`, `DROP`/`TRUNCATE`, raw-disk redirects, the NoSQL
-equivalents, macOS `diskutil`/`newfs_*`) plus host power-control.
-Recoverable-but-disruptive ops and pure precursors (`chattr -i`) are
-deliberately excluded: with default-on, a false positive only costs a
-re-issue with `confirm=true`, but constant friction on routine ops
-would push users to disable the gate entirely. False negatives are
-not recoverable, so the bias is "few rules, all unambiguous".
+**规则集刻意收窄。** 只拦不可逆破坏(`rm -rf`、`dd of=`、`mkfs`、`DROP`/`TRUNCATE`、写裸盘、对应的 NoSQL、macOS `diskutil`/`newfs_*`)外加主机电源控制。可恢复但有破坏性的操作和纯前置动作(`chattr -i`)刻意排除:默认开下,误报只是带 `confirm=true` 重试一次,但日常操作上的持续摩擦会逼用户彻底关掉闸。漏报不可逆,所以偏向"规则少而全部无歧义"。
 
-**Quoted-payload matching.** `codePositions` classifies each byte as
-code vs string-literal so `echo "rm -rf /"` does not trip — quoted
-content is treated as inert. That same rule would let
-`mysql -e "DROP DATABASE x"` through. The DB-client rules work around
-it by anchoring the regex on the *unquoted client binary* (`mysql`,
-`psql`, `mongosh`, ...), which sits at a code position, then reaching
-forward into the quoted arg. The match start is what the gate checks,
-so the verb-in-quotes is caught, while an echo-wrapped form (where the
-client name itself is quoted) is still suppressed — no broad
-false-positive increase. `[^|;&\n]` on the client→flag and flag→verb
-gaps keeps the verb in the same simple command, so a later
-`&& echo "...drop database..."` cannot trip it. Bounded quantifiers
-keep RE2 linear.
+**引号 payload 匹配。** `codePositions` 把每个字节分类为代码位 vs 字符串字面量,所以 `echo "rm -rf /"` 不触发 —— 引号内容视为惰性。同一规则会放过 `mysql -e "DROP DATABASE x"`。DB 客户端规则的做法是:把正则锚在**未加引号的客户端二进制**(`mysql`/`psql`/`mongosh` 等)上,它在代码位,再向前伸进引号参数。闸检查的是匹配起点,所以引号里的 verb 被抓到,而整体被 echo 包住的形式(客户端名自己在引号里)仍被抑制 —— 不放大误报。客户端→flag、flag→verb 两段都用 `[^|;&\n]`,verb 必须和客户端在同一条简单命令里,后面的 `&& echo "...drop database..."` 不会触发。有界量词保持 RE2 线性。
 
-**Three-layer state, and why `--global` exists.** Effective state
-resolves as: `SRV_GUARD` env > per-session record > global config
-(`GuardConfig.GlobalOff`) > built-in ON. The per-session record is
-keyed by a ppid-derived session id (see Session). The MCP server is a
-child process of the AI client, not of the user's interactive shell,
-so its session id never matches. A per-shell `srv guard off` therefore
-cannot reach the model's path — that is the entire reason
-`srv guard off --global` exists. It writes `config.json`, which the
-MCP server re-reads on every call (live, no restart).
+**三层状态,以及 `--global` 为什么存在。** 生效状态解析为:`SRV_GUARD` env > 每 session 记录 > 全局 config(`GuardConfig.GlobalOff`)> 内置默认开。每 session 记录按 ppid 推导的 session id 取。MCP server 是 AI 客户端的子进程,不是你交互 shell 的子进程,所以它的 session id 永远对不上。因此每 shell 的 `srv guard off` 到不了模型那条路径 —— 这正是 `srv guard off --global` 存在的全部理由。它写 `config.json`,而 MCP server 每次调用都重读(实时,无需重启)。
 
-**Package layering.** `config` imports `session`, so the env+session
-slice lives in `session.GuardPref()` (tri-state: enabled/disabled/
-unset, no default applied) and the global+default layers live in
-`config.GuardActive()`. `session` cannot import `config` (cycle), so
-`GuardActive` is the single source of truth and every guard consumer
-holding a `*config.Config` must call it rather than
-`session.GuardOn()` (which only sees the env+session slice).
+**包分层。** `config` import `session`,所以 env+session 这层放在 `session.GuardPref()`(三态:enabled/disabled/unset,不带默认),全局+默认层放在 `config.GuardActive()`。`session` 不能 import `config`(成环),所以 `GuardActive` 是唯一真相源;凡是手里有 `*config.Config` 的 guard 消费方都必须调它,而不是只看 env+session 的 `session.GuardOn()`。
 
-## Installer
+## 跨平台说明
 
-`srv install` starts a localhost HTTP server with embedded `install.html`. It helps with:
+`srv` 用一个二进制覆盖 Windows、macOS、Linux、BSD。会咬人的不可移植细节:
 
-- adding `srv` to PATH
-- registering Claude Code MCP
-- creating the first profile
+- **session id**:Unix 用父进程 pid;Windows 沿进程树上溯跳过启动器包装。后果:MCP server 的 session 永远对不上交互 shell —— `srv guard --global` 为什么存在见 [Guard](#guard)。
+- **base64 解码**:GNU/busybox 是 `base64 -d`,macOS/BSD 是 `-D`。detached 任务的 spawn 行先试 `-d` 再回落 `-D`;没有它,macOS 上 detached 任务解码出空。
+- **`setsid`**:仅 util-linux。spawn 行用 `command -v setsid` 判断,macOS/BSD 回落到纯 `nohup`(此时 kill 只到包装 pid,`kill_job` 已处理这种回落)。
+- **裸盘节点**:macOS 用 `/dev/rdiskN` 做裸访问;guard 的 `> /dev/...` 规则匹配 `r?disk` 覆盖 macOS 形式。`dd of=` 不论目标都拦。
+- **按 OS 的代码**:`internal/platform` 和 `internal/install` 按 build tag 拆(`*_unix.go` / `*_darwin.go` / `*_bsd.go` / `*_windows.go`);业务代码不出现 `runtime.GOOS` 分支。Windows 上 `go test ./...` **不会**编译非 Windows 文件 —— 跨平台改动要用 `GOOS=darwin/linux go build ./... && go vet ./...` 验证。
 
-Platform-specific PATH and browser helpers live in `install_unix.go` and `install_windows.go`.
+## 安装器
 
-## State Files
+`srv install` 在 localhost 上提供内嵌的 `install.html`:配 PATH、注册 Claude Code MCP、建第一个 profile。PATH/浏览器辅助在 `install_unix.go` / `install_windows.go`。
 
-Default root: `~/.srv`, override with `SRV_HOME`.
+## 状态文件
+
+默认根 `~/.srv`,`SRV_HOME` 可覆盖。
 
 ```text
-config.json          profiles and global config
-sessions.json        per-session pin/cwd state
-jobs.json            detached job records
-cache/               remote completion cache
+config.json          profile、group、tunnel、hooks、全局配置
+sessions.json        每 session 的 pin/cwd/guard 状态
+jobs.json            后台任务记录
+history.jsonl        CLI 远端命令记录
+mcp.log              MCP 生命周期 + 工具调用日志
+cache/               远端补全缓存
 daemon.sock          daemon socket
-daemon.log           auto-spawn daemon output
-cm/                  legacy/control socket directory when applicable
+daemon.log           自动拉起的 daemon 输出
 ```
 
-Remote job logs:
+远端任务日志:`~/.srv-jobs/<job-id>.log`(+ `.exit` 标记)。
 
-```text
-~/.srv-jobs/<job-id>.log
-```
+## 扩展清单
 
-## Extension Checklist
+**加 CLI 命令**:在 `cmd/srv` 分发注册;在合适的 `internal/` 包实现处理;更新帮助文本 + README;加补全条目;加解析/行为测试。
 
-### Add a CLI command
+**加 MCP 工具**:在 `internal/mcp` 加紧凑的工具定义 + 处理分支;text/structured 输出不重复;大输出截断或汇总;更新 README 的 MCP 列表。
 
-1. Add the name to `reservedSubcommands` in `main.go`.
-2. Implement `cmd<Name>` in the appropriate file.
-3. Wire dispatch in `main.go`.
-4. Update help text and README.
-5. Add completion entries if relevant.
-6. Add tests for parsing or shared behavior when practical.
+**加 profile 配置**:给 `Profile` 加字段;加访问器默认值;保证老配置仍有效;在 README(面向用户)和本文(非显然时写原因)记录。
 
-### Add an MCP tool
-
-1. Add a compact tool definition in `mcpToolDefs`.
-2. Add a handler branch in `mcpHandleTool`.
-3. Keep text and structured output non-duplicative.
-4. Cap or summarize large outputs.
-5. Update README MCP tool list.
-
-### Add profile config
-
-1. Add a field to `Profile`.
-2. Add accessor defaults when needed.
-3. Update config docs and README.
-4. Ensure old configs remain valid.
-
-## Testing
-
-Core local tests:
+## 测试
 
 ```sh
 go test ./...
 ```
 
-Manual areas that usually need real SSH:
+Windows 上 `go test ./...` 只编译 Windows build tag。跨平台改动用以下验证:
 
-- `srv check`
-- `srv run` / `srv shell`
-- `srv push` / `srv pull`
-- `srv sync` and `srv sync --watch`
-- `srv tunnel`
-- MCP client registration and tool calls
+```sh
+GOOS=darwin GOARCH=arm64 go build ./... && GOOS=darwin GOARCH=arm64 go vet ./...
+GOOS=linux  GOARCH=amd64 go build ./... && GOOS=linux  GOARCH=amd64 go vet ./...
+```
 
-On Windows machines where Go cannot write the default build cache, point `GOCACHE` at a writable workspace directory.
+通常需要真实 SSH 的部分:`check`、`run`/`shell`、`push`/`pull`、`sync`(+`--watch`)、`tunnel`、MCP 注册。Live SSH 测试必须有界且 loop-safe。Windows 上 Go 写不了默认 build cache 时,把 `GOCACHE` 指到可写目录。

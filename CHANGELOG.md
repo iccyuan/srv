@@ -10,9 +10,9 @@
 - **同步 `run_group` 的 `rejectUnfiltered` gate**:此前 `run_group` 只走 guard + rejectSync,漏了 token-economy gate,无界源(`cat`/裸 `dmesg`/未过滤 `journalctl`/`find /`)会按组成员数 ×N 放大;现与 `run` 对齐,在 `group.Run` 扇出前拦截。
 
 ### Changed
-- **高危确认 guard 现在默认开启**(原来默认关)。命中"做了就回不来"的操作时,该次 MCP 调用需带 `confirm=true` 才放行,普通命令不受影响。拦截范围:删数据/毁盘(`rm -rf`、`dd of=`、`mkfs`、写裸盘、macOS `diskutil` 抹盘 / `newfs_*`)、清空数据库(SQL `DROP`/`TRUNCATE` 含 Cassandra `KEYSPACE`、MongoDB `dropDatabase()`/`.drop()`、Redis `FLUSHALL`/`FLUSHDB`、`dropdb`,也包括写在 `mysql -e "..."` / `mongosh --eval "..."` 引号里的)、关机重启(`shutdown`/`reboot`/`halt`/`poweroff`)。日常写法(pandas `df.drop(`、`> /dev/null`、`echo "rm -rf"` 等)不会误触发。**迁移注意**:此前没显式开过 guard 的会话,升级后都会变成默认开。设计取舍与匹配原理见 `docs/ARCHITECTURE.md` 的 Guard 一节。
+- **高危确认 guard 现在默认开启**(原来默认关)。命中"做了就回不来"的操作时,该次 MCP 调用需带 `confirm=true` 才放行,普通命令不受影响。拦截范围:删数据/毁盘(`rm -rf`、`dd of=`、`mkfs`、写裸盘、macOS `diskutil` 抹盘 / `newfs_*`)、清空数据库(SQL `DROP`/`TRUNCATE` 含 Cassandra `KEYSPACE`、MongoDB `dropDatabase()`/`.drop()`、Redis `FLUSHALL`/`FLUSHDB`、`dropdb`,也包括写在 `mysql -e "..."` / `mongosh --eval "..."` 引号里的)、关机重启(`shutdown`/`reboot`/`halt`/`poweroff`)。日常写法(pandas `df.drop(`、`> /dev/null`、`echo "rm -rf"` 等)不会误触发。**迁移注意**:此前没显式开过 guard 的会话,升级后都会变成默认开。设计取舍与匹配原理见[架构文档的 Guard 一节](./docs/ARCHITECTURE.md#guard)。
 - **新增 `srv guard off|on --global` 和 `srv guard status` 来源显示**。`srv guard off` 只影响当前 shell,关不到 Claude/MCP(它是独立后台进程);要连 AI 一起关用 `--global`(机器级,所有入口生效,AI 端下次调用即时读到,无需重启)。生效优先级:`SRV_GUARD` 环境变量 > 当前 shell > 全局 > 默认开。
-- **`pool_size` 默认值 1 → 4**:未配置时每 profile 默认保持 4 条并发 SSH 连接,并行 MCP / 大 sync / `srv ui` 等场景开箱即用更快;要回到旧的单连接行为显式设 `pool_size: 1`(上限仍 16)。原理见 `docs/ARCHITECTURE.md` 的 Daemon 一节。
+- **`pool_size` 默认值 1 → 4**:未配置时每 profile 默认保持 4 条并发 SSH 连接,并行 MCP / 大 sync / `srv ui` 等场景开箱即用更快;要回到旧的单连接行为显式设 `pool_size: 1`(上限仍 16)。原理见[架构文档的 Daemon 一节](./docs/ARCHITECTURE.md#daemon)。
 - **`srv jobs prune` 彻底替换为 `srv prune jobs`**:本地账本清理语义原样迁移到新的 `internal/prune` 包;旧 `srv jobs prune` 现在报错并指向新命令。`srv sessions prune` 保留作别名(行为不变)。
 
 ## [Go 2.6.7] - 2026-05-15

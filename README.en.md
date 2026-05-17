@@ -897,7 +897,7 @@ srv kill <id>                  # SIGTERM
 
 - [README.md](./README.md) — Chinese version
 - [CHANGELOG.md](./CHANGELOG.md) — version history
-- [docs/ARCHITECTURE.md](./docs/ARCHITECTURE.md) — code organization and how to extend
+- [docs/ARCHITECTURE.en.md](./docs/ARCHITECTURE.en.md) — architecture + the "why it's built this way" technical reference ([中文](./docs/ARCHITECTURE.md))
 
 ---
 
