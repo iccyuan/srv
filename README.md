@@ -356,7 +356,7 @@ srv -G web "systemctl restart nginx"
 | `srv check --rtt --interval 50ms` | 指定 RTT 采样间隔。 |
 | `srv check --rotate-key` | 生成新的 ed25519 key 推到远端 `authorized_keys`,验证可用,然后把 `profile.identity_file` 切到新 key。新 key 落到 `~/.srv/keys/<profile>-<time>{,.pub}`。 |
 | `srv check --rotate-key --revoke-old` | 完成上述流程后,把原来 `profile.identity_file` 对应的公钥从 `authorized_keys` 删掉。 |
-| `srv check --bandwidth [--duration 5s]` | 双向流量测量:远端 `dd /dev/zero` 流给本地 / 本地 `/dev/zero` 流给远端 `cat > /dev/null`,各方向跑 `duration` 秒(每方向上限 256 MiB),输出 Mbps 并给出 verdict 与方向差判定。 |
+| `srv check --bandwidth [--duration 5s]` | 双向带宽测速,每方向各跑 `duration` 秒,输出上下行 Mbps 并判定是否一方明显偏慢。 |
 | `srv doctor` | 输出本地配置、daemon、active profile 等诊断报告。 |
 | `srv doctor --json` | 以 JSON 输出诊断报告。 |
 | `srv disconnect [profile]` | 关闭某个 profile 的 daemon 连接池。 |
@@ -582,7 +582,7 @@ srv hooks set pre-sync 'cd $SRV_LOCAL && go vet ./...'
 | `SRV_HINTS` | 设置为 `0`、`false`、`off` 可关闭命令拼写提示。 |
 | `SRV_GUARD` | 强制覆盖 MCP guard:`1`/`true`/`on`/`yes` 强制开,`0`/`false`/`off`/`no` 强制关;优先级高于 session 设置。未设时 guard 默认开启。 |
 | `SRV_ALLOW_AI_CLI` | 设置为 `1`、`true`、`on`、`yes` 解除“AI agent 禁用裸 CLI 远端操作”限制。默认:检测到 AI 编码 agent 环境(`CLAUDECODE` / `CLAUDE_CODE_ENTRYPOINT` / Codex `CODEX_*` 标记)时,`srv` 的远端子命令(run/push/pull/sync/edit/diff/tail/watch/journal/top/sudo/shell/logs/kill/tunnel/recipe/ui 及隐式 `srv <cmd>` 远端执行)会被**硬拒绝**并提示改用 srv MCP server(MCP 路径不受影响,且带 token/高危 gate)。在 agent 终端里手动操作的人可设此变量绕过。 |
-| `SRV_TRANSFER_WORKERS` | 调整 `srv push`/`srv pull`/`srv sync` 目录递归时的并发 goroutine 数(默认 4,范围 1~32)。 |
+| `SRV_TRANSFER_WORKERS` | `srv push`/`srv pull`/`srv sync` 传目录时并行处理的文件数(默认 4,范围 1~32)。 |
 
 常用 profile key：
 
@@ -600,6 +600,7 @@ srv hooks set pre-sync 'cd $SRV_LOCAL && go vet ./...'
 | `keepalive_count` | `3` | 允许失败的 keepalive 次数。 |
 | `agent_forwarding` | `false` | `srv -t <cmd>` 和 `srv shell` 时请求 SSH agent forwarding。需要本地有 `SSH_AUTH_SOCK`。 |
 | `control_persist` | `10m` | ControlMaster 空闲保留时间。 |
+| `pool_size` | `4` | daemon 为该 profile 保持的并发 SSH 连接数(1~16)。并发多、传输大时更快;设 `1` 是旧的单连接行为。 |
 | `dial_attempts` | `1` | TCP/SSH 初始连接重试次数。 |
 | `dial_backoff` | `500ms` | 初始重试退避时间。 |
 | `sync_root` | 空 | `srv sync` 默认远端根目录。 |

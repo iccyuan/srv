@@ -121,6 +121,15 @@ Design rules:
 - Drop expired completion cache entries during GC.
 - Self-exit after 30 minutes idle.
 
+Pool sizing: `pool_size` defaults to 4 (clamped to [1,16]). A single
+SSH connection's flow-control window caps throughput on a high
+bandwidth-delay-product link, and concurrent MCP calls / large sync
+trees / a busy `srv ui` serialize behind one connection. Four parallel
+connections fill the pipe without risking the remote `sshd`
+`MaxStartups`/`MaxSessions` budget. `GetPoolSize()` treats unset and
+any value `<1` as the default; `pool_size: 1` restores the historical
+single-connection behavior.
+
 ## Sync
 
 `srv sync` has four collection modes:
