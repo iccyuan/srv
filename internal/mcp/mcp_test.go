@@ -47,6 +47,16 @@ func TestRiskyMatch_Catches(t *testing.T) {
 		{"flushdb", "redis flush"},
 		{"dropdb proddb", "dropdb"},
 
+		// Quoted -e/--eval payloads: caught because the match anchors
+		// on the unquoted client binary, not the quoted verb.
+		{`mysql -e "DROP DATABASE x"`, "sql -e drop"},
+		{`psql -c "DROP SCHEMA s CASCADE"`, "sql -e drop"},
+		{`mysql --execute='TRUNCATE TABLE sessions'`, "sql -e drop"},
+		{`PGPASSWORD=x psql -h db -U u -c "drop table t"`, "sql -e drop"},
+		{`cqlsh -e "DROP KEYSPACE app"`, "sql -e drop"},
+		{`mongosh --eval "db.dropDatabase()"`, "mongo --eval drop"},
+		{`mongo --eval 'db.users.drop()'`, "mongo --eval drop"},
+
 		{":> /etc/passwd", ":>/"},
 		{": > /home/user/.bashrc", ":>/"},
 
@@ -92,6 +102,12 @@ func TestRiskyMatch_Catches(t *testing.T) {
 		{"cache flush all keys", ""},       // "flush all" != flushall
 		{"echo x > /dev/null", ""},         // null is not a disk
 		{"cmd 2>/dev/null", ""},
+		// quoted-payload DB rule: must NOT over-fire
+		{`mysql -e "SELECT * FROM users"`, ""},                         // benign query
+		{`mongosh --eval "db.users.find()"`, ""},                       // benign query
+		{`psql -c "SELECT 1" && echo "do not drop database"`, ""},      // verb past && separator
+		{`cat /var/log/mysql-error.log | grep -e "drop database"`, ""}, // log grep, no -e payload on client
+		{`echo "mysql -e \"DROP DATABASE x\""`, ""},                    // whole thing echo-quoted
 	}
 	for _, tc := range cases {
 		got := riskyMatch(tc.cmd)

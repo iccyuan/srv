@@ -43,10 +43,12 @@ import (
 // Word boundaries (\b) keep us from matching `farm -rf` etc. Quoted
 // content (echo "rm -rf /") is filtered out separately by riskyMatch
 // via isInsideQuotes, since \b alone can't tell a real command
-// position from a string-literal occurrence. CONSEQUENCE: a risky op
-// hidden in a quoted argument (`mysql -e "DROP DATABASE x"`,
-// `mongosh --eval "db.dropDatabase()"`) is by-design NOT gated --
-// the guard targets command-position verbs, not REPL payloads.
+// position from a string-literal occurrence. The DB-client rules
+// (`sql -e drop`, `mongo --eval drop`) work around this for the
+// common `mysql -e "DROP DATABASE x"` shape by anchoring the match
+// on the unquoted client binary instead of the quoted verb -- see
+// their comment below. A verb in a quoted arg of a NON-DB command
+// is still not gated (that's the intended echo "rm -rf" exemption).
 type riskyPattern struct {
 	name string
 	re   *regexp.Regexp
@@ -68,14 +70,28 @@ var defaultRiskyPatterns = []riskyPattern{
 	// getSiblingDB(...).dropDatabase()); collection .drop() is
 	// constrained to a literal db.<name>.drop() with empty parens so
 	// pandas `df.drop(columns=...)` / lodash `_.drop(2)` don't trip.
-	// flushall/flushdb is Redis' destructive flush. NOTE: like every
-	// pattern here, an occurrence inside shell quotes is NOT caught
-	// (codePositions treats quoted bytes as literal), so
-	// `mongosh --eval "db.dropDatabase()"` slips through by design --
-	// same long-standing limitation as quoted SQL.
+	// flushall/flushdb is Redis' destructive flush. These bare forms
+	// only fire at a command position (`db.dropDatabase()` typed into
+	// a REPL, `redis-cli FLUSHALL` as bare args).
 	{"mongo drop", regexp.MustCompile(`(?i)\bdropDatabase\s*\(|\bdb\.[a-z_]\w*\.drop\s*\(\s*\)`)},
 	{"redis flush", regexp.MustCompile(`(?i)\bflush(?:all|db)\b`)},
 	{"dropdb", regexp.MustCompile(`(?i)\bdropdb\b`)},
+	// Quoted-payload DB destroyers. The bare rules above can't see a
+	// verb hidden in a client's quoted -e/--eval/-c arg
+	// (`mysql -e "DROP DATABASE x"`), because codePositions marks
+	// quoted bytes literal. These instead anchor the match on the
+	// *client binary* itself -- which IS at a code position -- and
+	// reach forward into the quoted arg. Net effect:
+	//   - `mysql -e "DROP DATABASE x"`            -> caught (match
+	//     starts at unquoted `mysql`)
+	//   - `echo "mysql -e \"DROP DATABASE x\""`   -> NOT caught: the
+	//     `mysql` is itself inside echo's quotes, so codePositions
+	//     suppresses it (no false-positive on echoed examples)
+	// Both gaps use [^|;&\n] so the verb must live in the SAME simple
+	// command as the client -- a later `&& echo "...drop database..."`
+	// segment can't trip it. Bounded quantifiers keep RE2 linear.
+	{"sql -e drop", regexp.MustCompile(`(?i)\b(?:mysql|mariadb|psql|cqlsh|clickhouse-client)\b[^|;&\n]{0,120}?(?:-e|--execute|-c|--command|-q|--query)['"=\s][^|;&\n]{0,200}?\b(?:drop\s+(?:database|table|schema|keyspace)|truncate\s+table)\b`)},
+	{"mongo --eval drop", regexp.MustCompile(`(?i)\bmongo(?:sh)?\b[^|;&\n]{0,120}?--eval['"=\s][^|;&\n]{0,200}?(?:dropDatabase\s*\(|\.drop\s*\(\s*\)|\bdrop\s+(?:database|collection)\b)`)},
 	{":>/", regexp.MustCompile(`:\s*>\s*/`)},
 	// r?disk so macOS raw-disk nodes (/dev/rdisk0) match too, not
 	// just /dev/disk0. dd of=/dev/rdisk0 is already caught by the dd

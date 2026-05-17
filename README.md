@@ -399,7 +399,9 @@ guard **默认开启**。内置拦截集(命中后该次 MCP 调用需带 `confi
 - **macOS 磁盘**:`newfs_*`、`diskutil erase*/partitionDisk/zeroDisk/secureErase/apfs delete*`(`diskutil list/info/mount` 不拦)。
 - **主机电源**:`shutdown`、`reboot`、`halt`、`poweroff`。
 
-纯前置类 `chattr -i` **不在**默认集,需要的话用 `srv guard rules add` 自行加。**局限**:引号里的 payload(`mysql -e "DROP DATABASE x"`、`mongosh --eval "db.dropDatabase()"`)按设计不拦,guard 只针对命令位 verb。`srv guard off` 关闭当前 shell 的 guard。
+- **DB 客户端引号内 payload**:`mysql -e "DROP DATABASE x"`、`psql -c "..."`、`cqlsh -e`、`mongosh --eval "db.dropDatabase()"`/`db.x.drop()` 也会拦(匹配锚在未加引号的客户端二进制上;`echo "mysql -e ..."` 整体被引号包住时仍不误杀)。
+
+纯前置类 `chattr -i` **不在**默认集,需要的话用 `srv guard rules add` 自行加。**残留局限**:仅 DB 客户端的 `-e/--eval/-c` 直传形式被覆盖,把 SQL 藏进文件 `mysql < f.sql` 或 heredoc 这类间接形式看不到(命中可带 `confirm=true` 绕过)。`srv guard off` 关闭当前 shell 的 guard。
 
 | 命令 | 作用 |
 |---|---|
