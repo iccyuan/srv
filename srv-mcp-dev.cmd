@@ -6,7 +6,7 @@ REM
 REM  Committed to the repo: SRV_ROOT is derived from this script's
 REM  own location (%~dp0), so it works from any clone path with no
 REM  per-machine edits. The script must live at the repo root
-REM  (sibling of the `go/` source dir and the built `srv.exe`).
+REM  (sibling of the `cmd/` source tree and the built `srv.exe`).
 REM
 REM  Registered as the `srv` MCP server command so that a single
 REM  `/mcp` reconnect in Claude Code rebuilds from source AND
@@ -37,7 +37,7 @@ REM 2) Rebuild from source. stdout must stay clean (it becomes the
 REM    JSON-RPC channel once mcp starts); build diagnostics go to
 REM    build.log. On failure, exit non-zero so Claude Code surfaces
 REM    the connection failure instead of running stale code.
-go build -C "%SRV_ROOT%\go" -o ..\srv.exe . 2> "%SRV_ROOT%\build.log"
+go build -C "%SRV_ROOT%" -o srv.exe .\cmd\srv 2> "%SRV_ROOT%\build.log"
 if errorlevel 1 exit /b 1
 
 REM 3) Exec the MCP server. First remote tool call lazily respawns

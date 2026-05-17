@@ -23,7 +23,7 @@ $bin  = Join-Path $here 'srv.exe'
 if (-not (Test-Path $bin)) {
     Write-Host "srv.exe not found at $bin" -ForegroundColor Yellow
     Write-Host "Build it first:" -ForegroundColor Yellow
-    Write-Host "  cd `"$here\go`"; go build -o ..\srv.exe ." -ForegroundColor Yellow
+    Write-Host "  cd `"$here`"; go build -o srv.exe .\cmd\srv" -ForegroundColor Yellow
     exit 1
 }
 

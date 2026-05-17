@@ -32,7 +32,7 @@ switch -Wildcard ($archLabel) {
     'AMD64' { $Arch = 'x86_64' }
     'ARM64' {
         Say "Windows ARM64 isn't shipped as a release."
-        Say "Build from source instead:  cd go; go build -o ..\srv.exe ."
+        Say "Build from source instead:  go build -o srv.exe .\cmd\srv"
         exit 1
     }
     default {

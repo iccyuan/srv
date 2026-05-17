@@ -14,15 +14,12 @@ jobs:
       matrix:
         os: [ubuntu-latest, macos-latest, windows-latest]
         go: ["1.25.x"]
-    defaults:
-      run:
-        working-directory: go
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
         with:
           go-version: ${{ matrix.go }}
-          cache-dependency-path: go/go.sum
+          cache-dependency-path: go.sum
 
       - name: go vet
         run: go vet ./...
@@ -40,4 +37,4 @@ jobs:
         run: go test -race ./...
 
       - name: go build
-        run: go build -o ../srv${{ runner.os == 'Windows' && '.exe' || '' }} .
+        run: go build -o srv${{ runner.os == 'Windows' && '.exe' || '' }} ./cmd/srv

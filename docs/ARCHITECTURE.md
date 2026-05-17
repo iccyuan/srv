@@ -208,7 +208,6 @@ Remote job logs:
 Core local tests:
 
 ```sh
-cd go
 go test ./...
 ```
 

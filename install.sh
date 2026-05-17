@@ -37,7 +37,7 @@ bin="$here/srv"
 if [ ! -x "$bin" ]; then
     echo "srv: binary not found at $bin" >&2
     echo "Build it first:" >&2
-    echo "  cd \"$here/go\" && go build -o ../srv ." >&2
+    echo "  cd \"$here\" && go build -o srv ./cmd/srv" >&2
     exit 1
 fi
 

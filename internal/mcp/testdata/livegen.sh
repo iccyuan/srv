@@ -1,5 +1,5 @@
 # livegen.sh -- deterministic, SELF-LIMITING data generator for the
-# srv MCP live test suite (go/internal/mcp/mcp_live_test.go).
+# srv MCP live test suite (internal/mcp/mcp_live_test.go).
 #
 # It is NOT run standalone. The test concatenates this file with a
 # single `livegen <args>` call and ships the whole thing as the body

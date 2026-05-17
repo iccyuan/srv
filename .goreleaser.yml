@@ -6,12 +6,11 @@ project_name: srv
 
 before:
   hooks:
-    - go -C go mod tidy
+    - go mod tidy
 
 builds:
   - id: srv
-    main: .
-    dir: go
+    main: ./cmd/srv
     binary: srv
     env:
       - CGO_ENABLED=0

@@ -125,9 +125,8 @@ Requires Go 1.25+.
 
 ```sh
 git clone https://github.com/iccyuan/srv && cd srv
-cd go && go build -o ../srv.exe .          # Windows
-cd go && go build -o ../srv     .          # macOS / Linux
-cd ..
+go build -o srv.exe ./cmd/srv               # Windows
+go build -o srv     ./cmd/srv               # macOS / Linux
 .\install.ps1 -Gui                          # Windows GUI install
 ./install.sh --gui                          # macOS / Linux GUI install
 ```

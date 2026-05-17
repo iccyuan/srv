@@ -45,9 +45,9 @@ srv install
 
 ```sh
 git clone https://github.com/iccyuan/srv
-cd srv/go
-go build -o ../srv.exe .    # Windows
-go build -o ../srv .        # macOS / Linux
+cd srv
+go build -o srv.exe ./cmd/srv    # Windows
+go build -o srv     ./cmd/srv    # macOS / Linux
 ```
 
 最小使用流程：
@@ -590,10 +590,9 @@ srv hooks set pre-sync 'cd $SRV_LOCAL && go vet ./...'
 ## 开发
 
 ```sh
-cd go
 go test ./...
-go build -o ../srv.exe .    # Windows
-go build -o ../srv .        # macOS / Linux
+go build -o srv.exe ./cmd/srv    # Windows
+go build -o srv     ./cmd/srv    # macOS / Linux
 ```
 
 启用仓库自带 pre-commit hook：

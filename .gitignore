@@ -32,8 +32,6 @@ Thumbs.db
 /srv.exe
 /srv.exe~
 /srv.exe.old*
-go/srv
-go/srv.exe
 *.test
 *.out
 

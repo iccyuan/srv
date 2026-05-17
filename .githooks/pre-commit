@@ -8,9 +8,9 @@
 
 set -e
 
-# Only enforce when go/ files are actually staged. Pure-doc commits
+# Only enforce when *.go files are actually staged. Pure-doc commits
 # shouldn't pay the gofmt round-trip.
-if ! git diff --cached --name-only | grep -q '^go/.*\.go$'; then
+if ! git diff --cached --name-only | grep -q '\.go$'; then
     exit 0
 fi
 
@@ -19,15 +19,13 @@ if ! command -v gofmt >/dev/null 2>&1; then
     exit 0
 fi
 
-cd go || exit 0
-
 # gofmt -l prints any file that's not canonically formatted.
 unformatted=$(gofmt -l .)
 if [ -n "$unformatted" ]; then
     echo "pre-commit: gofmt rejected the following files:" >&2
     echo "$unformatted" | sed 's/^/  /' >&2
     echo
-    echo "Fix with:  cd go && go fmt ./..." >&2
+    echo "Fix with:  go fmt ./..." >&2
     exit 1
 fi
 
