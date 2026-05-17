@@ -30,22 +30,46 @@ func TestRiskyMatch_Catches(t *testing.T) {
 		{"mkfs.ext4 /dev/sdb1", "mkfs"},
 		{"mkfs /dev/sdb", "mkfs"},
 
+		{"newfs_apfs -v Mac disk1s1", "newfs"},
+		{"newfs_hfs /dev/disk2s1", "newfs"},
+
+		{"DROP DATABASE prod", "drop database"},
+		{"drop table users", "drop database"},
+		{"DROP KEYSPACE app", "drop database"},
+		{"TRUNCATE TABLE sessions", "truncate table"},
+		{"truncate --size=0 file", "truncate table"},
+
+		// NoSQL / CLI-level DB wipes.
+		{"db.dropDatabase()", "mongo drop"},
+		{"db.getSiblingDB('x').dropDatabase()", "mongo drop"},
+		{"db.users.drop()", "mongo drop"},
+		{"redis-cli FLUSHALL", "redis flush"},
+		{"flushdb", "redis flush"},
+		{"dropdb proddb", "dropdb"},
+
+		{":> /etc/passwd", ":>/"},
+		{": > /home/user/.bashrc", ":>/"},
+
+		{"echo x > /dev/sda1", "> /dev/disk"},
+		{"cat foo > /dev/nvme0n1", "> /dev/disk"},
+		{"dd if=/dev/zero of=foo > /dev/rdisk0", "dd of=/..."},
+		{"echo x > /dev/rdisk0", "> /dev/disk"},
+		{"diskutil eraseDisk JHFS+ Empty disk2", "diskutil erase"},
+		{"diskutil partitionDisk disk2 1 GPT JHFS+ a 0b", "diskutil erase"},
+		{"diskutil apfs deleteContainer disk1", "diskutil erase"},
+
+		// Host power-control: data survives but an unintended
+		// reboot/halt of a prod box is worth a confirm. Back in the
+		// default set.
 		{"shutdown -h now", "shutdown"},
 		{"sudo reboot", "reboot"},
 		{"halt -p", "halt"},
 		{"poweroff", "poweroff"},
 
-		{"DROP DATABASE prod", "drop database"},
-		{"drop table users", "drop database"},
-		{"TRUNCATE TABLE sessions", "truncate table"},
-		{"truncate --size=0 file", "truncate table"},
-
-		{":> /etc/passwd", ":>/"},
-		{": > /home/user/.bashrc", ":>/"},
-
-		{"chattr -i /etc/shadow", "chattr -i"},
-		{"echo x > /dev/sda1", "> /dev/disk"},
-		{"cat foo > /dev/nvme0n1", "> /dev/disk"},
+		// chattr -i only clears the immutable bit (a destruction
+		// precursor, not destruction). Stays OUT of the default set
+		// unless re-added via `srv guard add`.
+		{"chattr -i /etc/shadow", ""},
 
 		// safe / unrelated commands
 		{"ls -la", ""},
@@ -57,6 +81,17 @@ func TestRiskyMatch_Catches(t *testing.T) {
 		{"farm -rfast", ""},
 		{"docker run --rm -ti alpine sh", ""},
 		{"ls /dev/sda", ""},
+		// new-pattern false-positive guards
+		{"df.drop(columns=['a'])", ""},     // pandas, not db.<x>.drop()
+		{"_.drop(arr, 2)", ""},             // lodash
+		{"createdb newshop", ""},           // creating, not dropdb
+		{"diskutil list", ""},              // recoverable
+		{"diskutil info disk0", ""},        // recoverable
+		{"diskutil unmountDisk disk2", ""}, // recoverable
+		{"diskutil apfs list", ""},         // not delete/erase
+		{"cache flush all keys", ""},       // "flush all" != flushall
+		{"echo x > /dev/null", ""},         // null is not a disk
+		{"cmd 2>/dev/null", ""},
 	}
 	for _, tc := range cases {
 		got := riskyMatch(tc.cmd)
@@ -106,11 +141,11 @@ func TestRiskyMatch_CmdSubstitutionInQuotes(t *testing.T) {
 		// Backticks inside double quotes: same story.
 		{"echo \"`rm -rf /tmp/foo`\"", "rm -rf"},
 		// Backticks at command position.
-		{"x=`shutdown -h now`", "shutdown"},
+		{"x=`mkfs.ext4 /dev/sdb`", "mkfs"},
 		// Single quotes ARE literal, even with $(...) inside.
 		{`echo '$(rm -rf foo)'`, ""},
 		// Nested $() depth -- innermost trips the gate.
-		{`echo $(echo $(reboot))`, "reboot"},
+		{`echo $(echo $(rm -rf /tmp/x))`, "rm -rf"},
 	}
 	for _, c := range cases {
 		if got := riskyMatch(c.cmd); got != c.want {

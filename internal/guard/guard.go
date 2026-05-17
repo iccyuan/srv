@@ -1,7 +1,12 @@
 // Package guard implements `srv guard [on|off|status]` -- the
-// per-session high-risk-op confirmation toggle. Off by default;
-// when on, destructive remote commands (rm -rf, mkfs, drop database,
-// ...) require an explicit confirm flag from the MCP client.
+// per-session high-risk-op confirmation toggle. ON by default; the
+// gate fires unless the user runs `srv guard off`. When on, the
+// built-in set requires an explicit confirm flag from the MCP
+// client for: irreversible destruction (rm -rf, mkfs, dd of=, drop
+// database, truncate table, :> /path, > /dev/disk) plus host
+// power-control (shutdown, reboot, halt, poweroff). Pure precursors
+// like `chattr -i` are NOT in the default set -- add them with
+// `srv guard add` if you want them gated too.
 //
 // Rule management (list/add/rm/allow/defaults) and the on/off/status
 // toggle share one flat `guard` action space: `srv guard list`,

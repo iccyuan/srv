@@ -21,15 +21,32 @@ import (
 // a regex matched against the full command string; `name` is the
 // human-readable label surfaced to the model in the block reason.
 //
-// The list is intentionally short and conservative -- false-positives
-// are recoverable (re-issue with confirm=true), false-negatives are
-// not. We cover the canonical "oh no" set: recursive force delete,
-// raw-disk writes, mkfs, system halt, SQL drops, explicit truncates.
+// Because the session guard now defaults to ON (see session.GuardOn),
+// this list is kept narrow: irreversible destruction of data / a
+// filesystem / a raw disk, PLUS the host power-control verbs
+// (shutdown / reboot / halt / poweroff) -- an unintended reboot or
+// halt of a prod box is high-impact enough to be worth a confirm
+// even though the data survives. False-positives are recoverable
+// (re-issue with confirm=true). Pure destruction *precursors* that
+// don't themselves lose anything (chattr -i just clears the
+// immutable bit; the rm still has to come after and would trip its
+// own rule) stay OUT of the built-in set to keep default-on
+// unobtrusive -- add them with `srv guard add <name> <regex>` if
+// your environment wants them gated too.
+//
+// Coverage is cross-platform and not SQL-only: relational DROP/
+// TRUNCATE incl. Cassandra KEYSPACE, MongoDB dropDatabase()/.drop(),
+// Redis FLUSHALL/FLUSHDB, PostgreSQL `dropdb`; and macOS-native disk
+// destroyers (newfs_*, diskutil erase*/partitionDisk, /dev/rdisk*)
+// since macOS has no mkfs and uses /dev/rdiskN for raw access.
 //
 // Word boundaries (\b) keep us from matching `farm -rf` etc. Quoted
 // content (echo "rm -rf /") is filtered out separately by riskyMatch
 // via isInsideQuotes, since \b alone can't tell a real command
-// position from a string-literal occurrence.
+// position from a string-literal occurrence. CONSEQUENCE: a risky op
+// hidden in a quoted argument (`mysql -e "DROP DATABASE x"`,
+// `mongosh --eval "db.dropDatabase()"`) is by-design NOT gated --
+// the guard targets command-position verbs, not REPL payloads.
 type riskyPattern struct {
 	name string
 	re   *regexp.Regexp
@@ -39,15 +56,35 @@ var defaultRiskyPatterns = []riskyPattern{
 	{"rm -rf", regexp.MustCompile(`(?i)\brm\s+(?:-[a-zA-Z]*[rR][a-zA-Z]*[fF]\b|-[a-zA-Z]*[fF][a-zA-Z]*[rR]\b|--recursive\s+--force|--force\s+--recursive|-[rRfF]\s+--(?:recursive|force)\b|--(?:recursive|force)\s+-[rRfF]\b)`)},
 	{"dd of=/...", regexp.MustCompile(`(?i)\bdd\s+(?:[^|;&\n]*\s)?(?:of=|if=/dev/(?:zero|random|urandom)\b)`)},
 	{"mkfs", regexp.MustCompile(`(?i)\bmkfs(?:\.[a-z0-9]+)?\b`)},
+	{"newfs", regexp.MustCompile(`(?i)\bnewfs_[a-z0-9]+\b`)},
 	{"shutdown", regexp.MustCompile(`(?i)\bshutdown\b`)},
 	{"reboot", regexp.MustCompile(`(?i)\breboot\b`)},
 	{"halt", regexp.MustCompile(`(?i)\bhalt\b`)},
 	{"poweroff", regexp.MustCompile(`(?i)\bpoweroff\b`)},
-	{"drop database", regexp.MustCompile(`(?i)\bdrop\s+(?:database|table|schema)\b`)},
+	{"drop database", regexp.MustCompile(`(?i)\bdrop\s+(?:database|table|schema|keyspace)\b`)},
 	{"truncate table", regexp.MustCompile(`(?i)\btruncate\s+(?:table\b|-)`)},
+	// NoSQL "wipe it all" verbs. dropDatabase() is mongo-specific
+	// enough to match anywhere (covers db.dropDatabase() and
+	// getSiblingDB(...).dropDatabase()); collection .drop() is
+	// constrained to a literal db.<name>.drop() with empty parens so
+	// pandas `df.drop(columns=...)` / lodash `_.drop(2)` don't trip.
+	// flushall/flushdb is Redis' destructive flush. NOTE: like every
+	// pattern here, an occurrence inside shell quotes is NOT caught
+	// (codePositions treats quoted bytes as literal), so
+	// `mongosh --eval "db.dropDatabase()"` slips through by design --
+	// same long-standing limitation as quoted SQL.
+	{"mongo drop", regexp.MustCompile(`(?i)\bdropDatabase\s*\(|\bdb\.[a-z_]\w*\.drop\s*\(\s*\)`)},
+	{"redis flush", regexp.MustCompile(`(?i)\bflush(?:all|db)\b`)},
+	{"dropdb", regexp.MustCompile(`(?i)\bdropdb\b`)},
 	{":>/", regexp.MustCompile(`:\s*>\s*/`)},
-	{"chattr -i", regexp.MustCompile(`(?i)\bchattr\s+-i\b`)},
-	{"> /dev/disk", regexp.MustCompile(`>\s*/dev/(?:sd|nvme|disk|hd)`)},
+	// r?disk so macOS raw-disk nodes (/dev/rdisk0) match too, not
+	// just /dev/disk0. dd of=/dev/rdisk0 is already caught by the dd
+	// rule; this covers a bare `> /dev/rdisk0` redirect.
+	{"> /dev/disk", regexp.MustCompile(`>\s*/dev/(?:sd|nvme|r?disk|hd)`)},
+	// macOS has no mkfs; diskutil erase*/partitionDisk/zeroDisk/
+	// secureErase and `apfs delete*` are the real disk destroyers.
+	// diskutil list/info/mount/unmount are recoverable -> not matched.
+	{"diskutil erase", regexp.MustCompile(`(?i)\bdiskutil\s+(?:erase\w*|reformat|partitiondisk|zerodisk|secureerase|apfs\s+(?:delete|erase)\w*)\b`)},
 }
 
 // activePatterns is the effective rule set after merging defaults with

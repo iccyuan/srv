@@ -392,6 +392,15 @@ srv -G web "systemctl restart nginx"
 
 ### MCP 与安全 guard
 
+guard **默认开启**。内置拦截集(命中后该次 MCP 调用需带 `confirm=true` 才放行):
+
+- **不可逆破坏**:`rm -rf`、`dd of=`/`if=/dev/{zero,random,urandom}`、`mkfs`、`:> /path`、`> /dev/{sd,nvme,r?disk,hd}`(`/dev/rdisk0` 等 macOS 裸盘也算;`>/dev/null`、`2>/dev/null`、`/dev/zero` 不受影响)。
+- **数据库**:SQL `DROP DATABASE/TABLE/SCHEMA/KEYSPACE`、`TRUNCATE TABLE`;MongoDB `dropDatabase()`/`db.<coll>.drop()`;Redis `FLUSHALL`/`FLUSHDB`;PostgreSQL `dropdb`。
+- **macOS 磁盘**:`newfs_*`、`diskutil erase*/partitionDisk/zeroDisk/secureErase/apfs delete*`(`diskutil list/info/mount` 不拦)。
+- **主机电源**:`shutdown`、`reboot`、`halt`、`poweroff`。
+
+纯前置类 `chattr -i` **不在**默认集,需要的话用 `srv guard rules add` 自行加。**局限**:引号里的 payload(`mysql -e "DROP DATABASE x"`、`mongosh --eval "db.dropDatabase()"`)按设计不拦,guard 只针对命令位 verb。`srv guard off` 关闭当前 shell 的 guard。
+
 | 命令 | 作用 |
 |---|---|
 | `srv mcp` | 以 stdio MCP server 模式运行，供 Claude Code / Codex 调用。 |
@@ -558,7 +567,7 @@ srv hooks set pre-sync 'cd $SRV_LOCAL && go vet ./...'
 | `SRV_CWD` | 没有 session cwd 时的 cwd fallback。 |
 | `SRV_LANG` | 指定 UI 语言：`zh`、`en`、`auto`。 |
 | `SRV_HINTS` | 设置为 `0`、`false`、`off` 可关闭命令拼写提示。 |
-| `SRV_GUARD` | 设置为 `1`、`true`、`on`、`yes` 可强制启用 MCP guard。 |
+| `SRV_GUARD` | 强制覆盖 MCP guard:`1`/`true`/`on`/`yes` 强制开,`0`/`false`/`off`/`no` 强制关;优先级高于 session 设置。未设时 guard 默认开启。 |
 | `SRV_ALLOW_AI_CLI` | 设置为 `1`、`true`、`on`、`yes` 解除“AI agent 禁用裸 CLI 远端操作”限制。默认:检测到 AI 编码 agent 环境(`CLAUDECODE` / `CLAUDE_CODE_ENTRYPOINT` / Codex `CODEX_*` 标记)时,`srv` 的远端子命令(run/push/pull/sync/edit/diff/tail/watch/journal/top/sudo/shell/logs/kill/tunnel/recipe/ui 及隐式 `srv <cmd>` 远端执行)会被**硬拒绝**并提示改用 srv MCP server(MCP 路径不受影响,且带 token/高危 gate)。在 agent 终端里手动操作的人可设此变量绕过。 |
 | `SRV_TRANSFER_WORKERS` | 调整 `srv push`/`srv pull`/`srv sync` 目录递归时的并发 goroutine 数(默认 4,范围 1~32)。 |
 

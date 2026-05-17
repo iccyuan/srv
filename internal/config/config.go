@@ -95,14 +95,14 @@ type Profile struct {
 	// every other profile.
 	Autoconnect *bool `json:"autoconnect,omitempty"`
 	// PoolSize caps the number of concurrent SSH connections the daemon
-	// will keep open for this profile. Default 1 (the historical
-	// behaviour: one connection per profile, all sessions multiplexed
-	// over its channels). Crank to 4-8 for profiles that drive high
-	// concurrency (parallel MCP storms, big sync trees, busy `srv ui`
-	// dashboards) -- multi-conn fills more of the underlying TCP
-	// bandwidth-delay product than a single connection's SSH window
-	// allows. Hard-clamped to [1,16] at use time so a stray big
-	// number can't exhaust local fd or sshd's MaxStartups budget.
+	// will keep open for this profile. Default 4 when unset -- a small
+	// pool fills more of the underlying TCP bandwidth-delay product than
+	// a single connection's SSH window allows and absorbs parallel MCP
+	// storms / big sync trees / busy `srv ui` dashboards without any
+	// manual tuning. Set 1 for the old single-connection behaviour;
+	// crank to 8 for very high concurrency. Hard-clamped to [1,16] at
+	// use time so a stray big number can't exhaust local fd or sshd's
+	// MaxStartups budget.
 	PoolSize int `json:"pool_size,omitempty"`
 	// Proxy routes the SSH TCP dial through an HTTP-CONNECT or SOCKS5
 	// proxy. URL forms:
@@ -186,14 +186,17 @@ func (p *Profile) GetAutoconnect() bool {
 	return p.Autoconnect != nil && *p.Autoconnect
 }
 
-// GetPoolSize returns the clamped concurrent-connection cap. Default 1
-// preserves historical single-conn behaviour; values outside [1,16]
-// are clamped silently because a stray 0 or 999 in the JSON would
-// otherwise be hard to diagnose.
+// GetPoolSize returns the clamped concurrent-connection cap. Default 4
+// when unset (or <1): a small pool absorbs parallel MCP / sync / `srv
+// ui` load without the user tuning anything, and fills more of the TCP
+// bandwidth-delay product than a single SSH window allows. Values
+// outside [1,16] are clamped silently because a stray 0 or 999 in the
+// JSON would otherwise be hard to diagnose. Set pool_size:1 explicitly
+// for the old single-connection behaviour.
 func (p *Profile) GetPoolSize() int {
 	n := p.PoolSize
 	if n < 1 {
-		return 1
+		return 4
 	}
 	if n > 16 {
 		return 16

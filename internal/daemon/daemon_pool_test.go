@@ -86,8 +86,8 @@ func TestPoolSizeClamps(t *testing.T) {
 	cases := []struct {
 		raw, want int
 	}{
-		{0, 1},
-		{-1, 1},
+		{0, 4},
+		{-1, 4},
 		{1, 1},
 		{4, 4},
 		{16, 16},

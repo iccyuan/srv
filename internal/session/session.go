@@ -26,11 +26,14 @@ import (
 
 // Record mirrors one entry in sessions.json.
 //
-// Guard, when true, makes the MCP server refuse high-risk operations
-// (destructive `run`/`detach` patterns, `sync` with delete) unless the
-// caller passes confirm=true. Default off so existing flows are
-// unchanged. Toggled per-shell via `srv guard on|off`, or globally via
-// the SRV_GUARD env var (which trumps the session record).
+// Guard makes the MCP server refuse high-risk operations (destructive
+// `run`/`detach` patterns, `sync` with delete) unless the caller
+// passes confirm=true. Default ON: the gate fires unless the user
+// explicitly ran `srv guard off`. The built-in pattern set is
+// deliberately narrow (irreversible data/disk destruction + host
+// power-control -- see defaultRiskyPatterns in internal/mcp) so
+// default-on stays unobtrusive. Toggled per-shell via `srv guard on|off`, or globally
+// via the SRV_GUARD env var (which trumps the session record).
 //
 // ColorPreset names a shell snippet under ~/.srv/init/<name>.sh that
 // `srv <cmd>` (CLI non-TTY) inlines before the user's command. Empty
@@ -44,11 +47,19 @@ type Record struct {
 	// PrevCwds tracks the immediately-previous cwd per profile so `srv
 	// cd -` can swap to it the way shell `cd -` does. Maintained by
 	// config.SetCwd; never written to directly outside that helper.
-	PrevCwds    map[string]string `json:"prev_cwds,omitempty"`
-	Guard       bool              `json:"guard,omitempty"`
-	ColorPreset string            `json:"color_preset,omitempty"`
-	Started     string            `json:"started"`
-	LastSeen    string            `json:"last_seen"`
+	PrevCwds map[string]string `json:"prev_cwds,omitempty"`
+	// Guard is tri-state. nil = never set -> the high-risk-op gate is
+	// ON by default. *true = explicitly on. *false = the user ran `srv
+	// guard off`. omitempty drops the field when nil so a fresh session
+	// inherits the default-on behaviour. (Old records that stored a
+	// bare `"guard":true` from the pre-tri-state bool still decode to
+	// *true; old implicit-off sessions had the field omitted, so they
+	// migrate to default-on -- which is the intended effect of this
+	// change.)
+	Guard       *bool  `json:"guard,omitempty"`
+	ColorPreset string `json:"color_preset,omitempty"`
+	Started     string `json:"started"`
+	LastSeen    string `json:"last_seen"`
 }
 
 type file struct {
@@ -172,8 +183,9 @@ func SaveWith(sid string, rec *Record) error {
 //  1. SRV_GUARD env: "1"/"true"/"on"/"yes" -> on; "0"/"false"/"off"/"no" -> off.
 //     Use this in MCP server registrations so the guard travels with
 //     the subprocess regardless of which shell session id it inherits.
-//  2. Record.Guard, set via `srv guard on|off`.
-//  3. Default: off.
+//  2. Record.Guard, set via `srv guard on|off` (nil = never set).
+//  3. Default: ON. The gate is active unless the user explicitly ran
+//     `srv guard off` for this session (Record.Guard == *false).
 func GuardOn() bool {
 	if v := os.Getenv("SRV_GUARD"); v != "" {
 		switch strings.ToLower(strings.TrimSpace(v)) {
@@ -186,7 +198,11 @@ func GuardOn() bool {
 	sid := ID()
 	s := loadFile()
 	rec, ok := s.Sessions[sid]
-	return ok && rec.Guard
+	if ok && rec.Guard != nil {
+		return *rec.Guard
+	}
+	// No record, or a record that never touched guard: default ON.
+	return true
 }
 
 // SetGuard toggles the calling session's guard flag and persists.
@@ -195,7 +211,7 @@ func GuardOn() bool {
 // *which* session it bound to -- handy when SRV_SESSION is set).
 func SetGuard(on bool) (string, error) {
 	sid, rec := Touch()
-	rec.Guard = on
+	rec.Guard = &on
 	if err := SaveWith(sid, rec); err != nil {
 		return sid, err
 	}

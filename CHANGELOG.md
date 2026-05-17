@@ -10,6 +10,9 @@
 - **同步 `run_group` 的 `rejectUnfiltered` gate**:此前 `run_group` 只走 guard + rejectSync,漏了 token-economy gate,无界源(`cat`/裸 `dmesg`/未过滤 `journalctl`/`find /`)会按组成员数 ×N 放大;现与 `run` 对齐,在 `group.Run` 扇出前拦截。
 
 ### Changed
+- **MCP 高危确认 guard 默认开启**:`session.GuardOn()` 默认返回 true,仅在用户显式 `srv guard off` 时关闭(`Record.Guard` 改为三态 `*bool`:nil=默认开 / *true=显式开 / *false=显式关;`SRV_GUARD` 环境变量优先级不变,可强制开/关)。配套调整内置 `defaultRiskyPatterns`:保留不可逆破坏类(`rm -rf` / `dd of=,if=/dev/zero|random|urandom` / `mkfs` / `drop database|table|schema` / `truncate table` / `:> /path` / `> /dev/(sd|nvme|disk|hd)`)+ 主机电源控制(`shutdown` / `reboot` / `halt` / `poweroff`,误重启 prod 影响大,值得 confirm);仅移除纯前置类 `chattr -i`(需要的话 `srv guard rules add` 自行加回)。老 session 隐式 off 的会迁移成默认开。
+- **guard 内置集补全跨平台 / NoSQL 盲区**:① 关系库 `DROP` 增加 Cassandra `KEYSPACE`;② NoSQL —— MongoDB `dropDatabase()`/`db.<coll>.drop()`、Redis `FLUSHALL`/`FLUSHDB`、PostgreSQL CLI `dropdb`;③ macOS —— `> /dev/disk` 正则扩成 `r?disk`(裸盘 `/dev/rdisk0`)、新增 `newfs_*`(macOS 无 `mkfs`)和 `diskutil erase*/partitionDisk/zeroDisk/secureErase/apfs delete*`(`diskutil list/info/mount` 不拦)。已加 FP 防护:pandas `df.drop(`、lodash `_.drop(`、`createdb`、`>/dev/null` 等不误判。**已知局限**:引号里的 payload(`mysql -e "DROP DATABASE x"`、`mongosh --eval "db.dropDatabase()"`)按设计不拦 —— guard 只针对命令位 verb,不解析 REPL 字符串(与历史 quoted-SQL 行为一致)。
+- **`pool_size` 默认值 1 → 4**:未显式配置时每 profile 默认开 4 条 SSH 连接池(`GetPoolSize` 对 unset/`<1` 返回 4,clamp 上限仍 16)。并行 MCP / 大 sync / `srv ui` 场景开箱即填满 TCP 窗口,不再需要手动调参;要回到旧的单连接行为显式设 `pool_size: 1`。
 - **`srv jobs prune` 彻底替换为 `srv prune jobs`**:本地账本清理语义原样迁移到新的 `internal/prune` 包;旧 `srv jobs prune` 现在报错并指向新命令。`srv sessions prune` 保留作别名(行为不变)。
 
 ## [Go 2.6.7] - 2026-05-15
