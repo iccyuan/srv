@@ -114,8 +114,9 @@ srv "ps aux | grep nginx"    # 带管道的命令需要本地 shell 引号
 | `srv config remove <name>` | 删除 profile。 |
 | `srv config set <profile> <key> <value>` | 设置 profile 的某个字段，布尔值和整数会自动转换。 |
 | `srv config edit [name]` | 用 `$EDITOR` 编辑 profile JSON。 |
-| `srv config global <key> <value>` | 设置全局配置，例如 `lang`、`hints`。 |
-| `srv config global <key> --clear` | 清除某个全局配置，回到默认行为。 |
+| `srv settings` | 列出所有应用级配置及当前值。 |
+| `srv settings <key> <value>` | 设置应用级配置，key 为 `hints`、`lang`、`default_profile`。 |
+| `srv settings <key> --clear` | 清除某个应用级配置，回到默认行为。 |
 
 ### 快速切换与 cwd
 

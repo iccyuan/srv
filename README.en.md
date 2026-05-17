@@ -777,8 +777,8 @@ exit 127
 ```sh
 SRV_HINTS=0 srv staus            # this shell, ad-hoc
 srv --no-hints staus             # one call
-srv config global hints false    # permanent (writes ~/.srv/config.json)
-srv config global hints --clear  # back to default (on)
+srv settings hints false         # permanent (writes ~/.srv/config.json)
+srv settings hints --clear       # back to default (on)
 ```
 
 The MCP path never fires hints — keeps Claude Code's tool stderr clean.
@@ -790,9 +790,9 @@ The MCP path never fires hints — keeps Claude Code's tool stderr clean.
 **Force it**:
 
 ```sh
-srv config global lang zh        # pin Chinese
-srv config global lang en        # pin English
-srv config global lang auto      # back to auto-detect
+srv settings lang zh             # pin Chinese
+srv settings lang en             # pin English
+srv settings lang auto           # back to auto-detect
 SRV_LANG=zh srv help             # ad-hoc
 ```
 
