@@ -18,10 +18,10 @@ import (
 	"os"
 	"regexp"
 	"sort"
-	"srv/internal/clierr"
 	"srv/internal/config"
 	"srv/internal/mcp"
 	"srv/internal/session"
+	"srv/internal/srvutil"
 	"strings"
 )
 
@@ -47,7 +47,7 @@ func Cmd(args []string) error {
 		return cmdRules(args)
 	case "test", "dry-run":
 		if len(args) < 2 {
-			return clierr.Errf(2, "usage: srv guard test \"<command>\"")
+			return srvutil.Errf(2, "usage: srv guard test \"<command>\"")
 		}
 		cmd := strings.Join(args[1:], " ")
 		hit := mcp.RiskyMatchPublic(cmd)
@@ -56,12 +56,12 @@ func Cmd(args []string) error {
 			return nil
 		}
 		fmt.Printf("BLOCK matches rule %q\n", hit)
-		return clierr.Code(1)
+		return srvutil.Code(1)
 	case "on", "enable":
 		sid, err := session.SetGuard(true)
 		if err != nil {
 			fmt.Fprintln(os.Stderr, "guard on:", err)
-			return clierr.Code(1)
+			return srvutil.Code(1)
 		}
 		fmt.Printf("guard: on  (session=%s)%s\n", sid, envHint())
 		return nil
@@ -69,7 +69,7 @@ func Cmd(args []string) error {
 		sid, err := session.SetGuard(false)
 		if err != nil {
 			fmt.Fprintln(os.Stderr, "guard off:", err)
-			return clierr.Code(1)
+			return srvutil.Code(1)
 		}
 		fmt.Printf("guard: off (session=%s)%s\n", sid, envHint())
 		return nil
@@ -83,7 +83,7 @@ func Cmd(args []string) error {
 		return nil
 	}
 	fmt.Fprintln(os.Stderr, "usage: srv guard [on|off|status|list|add|rm|allow|defaults|test \"<cmd>\"]")
-	return clierr.Code(2)
+	return srvutil.Code(2)
 }
 
 // cmdRules dispatches the flat rule actions `srv guard <list|add|rm|
@@ -92,7 +92,7 @@ func Cmd(args []string) error {
 func cmdRules(args []string) error {
 	cfg, err := config.Load()
 	if err != nil {
-		return clierr.Errf(1, "config load: %v", err)
+		return srvutil.Errf(1, "config load: %v", err)
 	}
 	if cfg == nil {
 		cfg = config.New()
@@ -103,12 +103,12 @@ func cmdRules(args []string) error {
 	switch args[0] {
 	case "add":
 		if len(args) < 3 {
-			return clierr.Errf(2, "usage: srv guard add <name> <regex>")
+			return srvutil.Errf(2, "usage: srv guard add <name> <regex>")
 		}
 		return rulesAdd(cfg, args[1], strings.Join(args[2:], " "))
 	case "rm", "remove":
 		if len(args) < 2 {
-			return clierr.Errf(2, "usage: srv guard rm <name>")
+			return srvutil.Errf(2, "usage: srv guard rm <name>")
 		}
 		return rulesRm(cfg, args[1])
 	case "allow":
@@ -117,7 +117,7 @@ func cmdRules(args []string) error {
 		}
 		if args[1] == "rm" {
 			if len(args) < 3 {
-				return clierr.Errf(2, "usage: srv guard allow rm <regex>")
+				return srvutil.Errf(2, "usage: srv guard allow rm <regex>")
 			}
 			return rulesAllowRm(cfg, args[2])
 		}
@@ -133,12 +133,12 @@ func cmdRules(args []string) error {
 		}
 		cfg.Guard.DisableDefaults = !on
 		if err := config.Save(cfg); err != nil {
-			return clierr.Errf(1, "%v", err)
+			return srvutil.Errf(1, "%v", err)
 		}
 		fmt.Printf("defaults: %s\n", boolDisplay(on))
 		return nil
 	}
-	return clierr.Errf(2, "usage: srv guard [list|add|rm|allow|defaults]")
+	return srvutil.Errf(2, "usage: srv guard [list|add|rm|allow|defaults]")
 }
 
 func rulesList(cfg *config.Config) error {
@@ -176,7 +176,7 @@ func rulesList(cfg *config.Config) error {
 
 func rulesAdd(cfg *config.Config, name, pattern string) error {
 	if _, err := regexp.Compile(pattern); err != nil {
-		return clierr.Errf(2, "bad regex %q: %v", pattern, err)
+		return srvutil.Errf(2, "bad regex %q: %v", pattern, err)
 	}
 	if cfg.Guard == nil {
 		cfg.Guard = &config.GuardConfig{}
@@ -186,7 +186,7 @@ func rulesAdd(cfg *config.Config, name, pattern string) error {
 		if r.Name == name {
 			cfg.Guard.Rules[i].Pattern = pattern
 			if err := config.Save(cfg); err != nil {
-				return clierr.Errf(1, "%v", err)
+				return srvutil.Errf(1, "%v", err)
 			}
 			fmt.Printf("updated rule %q\n", name)
 			return nil
@@ -194,7 +194,7 @@ func rulesAdd(cfg *config.Config, name, pattern string) error {
 	}
 	cfg.Guard.Rules = append(cfg.Guard.Rules, config.GuardRule{Name: name, Pattern: pattern})
 	if err := config.Save(cfg); err != nil {
-		return clierr.Errf(1, "%v", err)
+		return srvutil.Errf(1, "%v", err)
 	}
 	fmt.Printf("added rule %q\n", name)
 	return nil
@@ -202,7 +202,7 @@ func rulesAdd(cfg *config.Config, name, pattern string) error {
 
 func rulesRm(cfg *config.Config, name string) error {
 	if cfg.Guard == nil {
-		return clierr.Errf(1, "no rule %q", name)
+		return srvutil.Errf(1, "no rule %q", name)
 	}
 	out := cfg.Guard.Rules[:0]
 	removed := false
@@ -214,11 +214,11 @@ func rulesRm(cfg *config.Config, name string) error {
 		out = append(out, r)
 	}
 	if !removed {
-		return clierr.Errf(1, "no rule %q", name)
+		return srvutil.Errf(1, "no rule %q", name)
 	}
 	cfg.Guard.Rules = out
 	if err := config.Save(cfg); err != nil {
-		return clierr.Errf(1, "%v", err)
+		return srvutil.Errf(1, "%v", err)
 	}
 	fmt.Printf("removed rule %q\n", name)
 	return nil
@@ -237,7 +237,7 @@ func rulesAllowList(cfg *config.Config) error {
 
 func rulesAllowAdd(cfg *config.Config, pattern string) error {
 	if _, err := regexp.Compile(pattern); err != nil {
-		return clierr.Errf(2, "bad regex %q: %v", pattern, err)
+		return srvutil.Errf(2, "bad regex %q: %v", pattern, err)
 	}
 	if cfg.Guard == nil {
 		cfg.Guard = &config.GuardConfig{}
@@ -250,7 +250,7 @@ func rulesAllowAdd(cfg *config.Config, pattern string) error {
 	}
 	cfg.Guard.Allow = append(cfg.Guard.Allow, pattern)
 	if err := config.Save(cfg); err != nil {
-		return clierr.Errf(1, "%v", err)
+		return srvutil.Errf(1, "%v", err)
 	}
 	fmt.Printf("added allow %q\n", pattern)
 	return nil
@@ -258,7 +258,7 @@ func rulesAllowAdd(cfg *config.Config, pattern string) error {
 
 func rulesAllowRm(cfg *config.Config, pattern string) error {
 	if cfg.Guard == nil {
-		return clierr.Errf(1, "no allow pattern %q", pattern)
+		return srvutil.Errf(1, "no allow pattern %q", pattern)
 	}
 	out := cfg.Guard.Allow[:0]
 	removed := false
@@ -270,11 +270,11 @@ func rulesAllowRm(cfg *config.Config, pattern string) error {
 		out = append(out, p)
 	}
 	if !removed {
-		return clierr.Errf(1, "no allow pattern %q", pattern)
+		return srvutil.Errf(1, "no allow pattern %q", pattern)
 	}
 	cfg.Guard.Allow = out
 	if err := config.Save(cfg); err != nil {
-		return clierr.Errf(1, "%v", err)
+		return srvutil.Errf(1, "%v", err)
 	}
 	fmt.Printf("removed allow %q\n", pattern)
 	return nil

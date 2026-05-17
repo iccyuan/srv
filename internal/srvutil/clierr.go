@@ -7,7 +7,7 @@
 // package main's translateExit recognises -- previously errExit was
 // pinned to main, so any extracted feature had to swallow exit codes
 // or duplicate the type.
-package clierr
+package srvutil
 
 import "fmt"
 

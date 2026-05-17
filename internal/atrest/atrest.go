@@ -36,7 +36,7 @@ import (
 	"os"
 	"path/filepath"
 	"srv/internal/platform"
-	"srv/internal/srvpath"
+	"srv/internal/srvutil"
 	"sync"
 )
 
@@ -92,7 +92,7 @@ func Key() ([]byte, error) {
 }
 
 func keyPath() string {
-	return filepath.Join(srvpath.Dir(), "secret", "key")
+	return filepath.Join(srvutil.Dir(), "secret", "key")
 }
 
 func loadOrCreateKey() ([]byte, error) {

@@ -6,7 +6,6 @@ import (
 	"srv/internal/check"
 	"srv/internal/config"
 	"srv/internal/daemon"
-	"srv/internal/doctor"
 	"srv/internal/remote"
 	"srv/internal/session"
 	"strings"
@@ -159,7 +158,7 @@ func handleCheck(args map[string]any, cfg *config.Config, profileOverride string
 }
 
 func handleDoctor(args map[string]any, cfg *config.Config, profileOverride string) toolResult {
-	checks, ok := doctor.Checks(cfg, profileOverride, version)
+	checks, ok := check.Checks(cfg, profileOverride, version)
 	res := jsonResult(map[string]any{"ok": ok, "checks": checks})
 	res.IsError = !ok
 	return res

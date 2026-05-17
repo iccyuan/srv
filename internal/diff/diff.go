@@ -16,9 +16,9 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"srv/internal/clierr"
 	"srv/internal/config"
 	"srv/internal/remote"
+	"srv/internal/srvutil"
 	"srv/internal/syncx"
 	"srv/internal/transfer"
 	"strings"
@@ -28,7 +28,7 @@ import (
 // [scope]`.
 func Cmd(args []string, cfg *config.Config, profileOverride string) error {
 	if len(args) == 0 {
-		return clierr.Errf(2, "usage: srv diff <local_file> [remote_file]")
+		return srvutil.Errf(2, "usage: srv diff <local_file> [remote_file]")
 	}
 	if args[0] == "--changed" {
 		return cmdChanged(args[1:], cfg, profileOverride)
@@ -40,10 +40,10 @@ func Cmd(args []string, cfg *config.Config, profileOverride string) error {
 	}
 	text, rc, err := Compare(cfg, profileOverride, local, remoteArg)
 	if err != nil {
-		return clierr.Errf(1, "srv diff: %v", err)
+		return srvutil.Errf(1, "srv diff: %v", err)
 	}
 	fmt.Print(text)
-	return clierr.Code(rc)
+	return srvutil.Code(rc)
 }
 
 // Compare runs the local-vs-remote diff and returns (text, exit
@@ -113,7 +113,7 @@ func cmdChanged(args []string, cfg *config.Config, profileOverride string) error
 	root := syncx.FindGitRoot(syncx.MustCwd())
 	if root == "" {
 		fmt.Fprintln(os.Stderr, "srv diff --changed: not in a git repo")
-		return clierr.Code(2)
+		return srvutil.Code(2)
 	}
 	scope := "all"
 	if len(args) > 0 {
@@ -122,7 +122,7 @@ func cmdChanged(args []string, cfg *config.Config, profileOverride string) error
 	files, err := syncx.GitChangedFiles(root, scope)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "srv diff --changed:", err)
-		return clierr.Code(1)
+		return srvutil.Code(1)
 	}
 	if len(files) == 0 {
 		fmt.Fprintln(os.Stderr, "(no changed files)")

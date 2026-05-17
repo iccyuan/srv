@@ -22,7 +22,7 @@ import (
 	"sync"
 	"time"
 
-	"srv/internal/srvpath"
+	"srv/internal/srvutil"
 )
 
 const (
@@ -38,13 +38,13 @@ var (
 )
 
 // Path returns the absolute path of the active mcp.log.
-func Path() string { return srvpath.MCPLog() }
+func Path() string { return srvutil.MCPLog() }
 
 // open lazily opens the log file on first write. Failure is silent:
 // logging must never disrupt the MCP request loop.
 func open() *os.File {
 	logOnce.Do(func() {
-		_ = os.MkdirAll(srvpath.Dir(), 0o755)
+		_ = os.MkdirAll(srvutil.Dir(), 0o755)
 		path := Path()
 		// Trim oversize log: read tail, rewrite. Cheap on disk because
 		// 256 KB is small; matters only when the file is e.g. 100 MB.

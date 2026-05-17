@@ -10,7 +10,6 @@ import (
 	"os/exec"
 	"path/filepath"
 	"sort"
-	"srv/internal/clierr"
 	"srv/internal/config"
 	"srv/internal/hooks"
 	"srv/internal/mcplog"
@@ -747,7 +746,7 @@ func Cmd(args []string, cfg *config.Config, profileOverride string) error {
 	o := ParseOptions(args)
 	name, profile, err := config.Resolve(cfg, profileOverride)
 	if err != nil {
-		return clierr.Errf(1, "%v", err)
+		return srvutil.Errf(1, "%v", err)
 	}
 
 	// local root
@@ -762,11 +761,11 @@ func Cmd(args []string, cfg *config.Config, profileOverride string) error {
 	}
 	abs, err := filepath.Abs(localRoot)
 	if err != nil {
-		return clierr.Errf(1, "error: bad local root: %v", err)
+		return srvutil.Errf(1, "error: bad local root: %v", err)
 	}
 	localRoot = abs
 	if st, err := os.Stat(localRoot); err != nil || !st.IsDir() {
-		return clierr.Errf(1, "error: local root not a directory: %s", localRoot)
+		return srvutil.Errf(1, "error: local root not a directory: %s", localRoot)
 	}
 
 	// auto-detect mode
@@ -778,7 +777,7 @@ func Cmd(args []string, cfg *config.Config, profileOverride string) error {
 			if o.NoGit {
 				reason = "git auto-detect disabled (--no-git)"
 			}
-			return clierr.Errf(1, "error: %s. Specify --include / --since / --files.", reason)
+			return srvutil.Errf(1, "error: %s. Specify --include / --since / --files.", reason)
 		}
 	}
 
@@ -811,10 +810,10 @@ func Cmd(args []string, cfg *config.Config, profileOverride string) error {
 	// Validate flag combos that don't make sense for the chosen direction.
 	if o.Pull {
 		if o.Delete {
-			return clierr.Errf(1, "error: --pull --delete is not supported (would clobber local files; remove manually instead)")
+			return srvutil.Errf(1, "error: --pull --delete is not supported (would clobber local files; remove manually instead)")
 		}
 		if o.Watch {
-			return clierr.Errf(1, "error: --pull --watch is not supported (needs remote inotify)")
+			return srvutil.Errf(1, "error: --pull --watch is not supported (needs remote inotify)")
 		}
 	}
 
@@ -825,7 +824,7 @@ func Cmd(args []string, cfg *config.Config, profileOverride string) error {
 		files, err = CollectFiles(o, localRoot, allExcludes)
 	}
 	if err != nil {
-		return clierr.Errf(1, "error: %v", err)
+		return srvutil.Errf(1, "error: %v", err)
 	}
 	// Post-filter pull results through the same exclude pipeline so
 	// .srvignore and --exclude still keep junk out of the local tree.
@@ -847,10 +846,10 @@ func Cmd(args []string, cfg *config.Config, profileOverride string) error {
 		}
 		deletes, err = CollectDeletes(o, localRoot, allExcludes)
 		if err != nil {
-			return clierr.Errf(1, "error: %v", err)
+			return srvutil.Errf(1, "error: %v", err)
 		}
 		if len(deletes) > limit && !o.DryRun && !o.Yes {
-			return clierr.Errf(1, "error: --delete would remove %d files (limit %d). Re-run with --dry-run, --yes, or --delete-limit N.", len(deletes), limit)
+			return srvutil.Errf(1, "error: --delete would remove %d files (limit %d). Re-run with --dry-run, --yes, or --delete-limit N.", len(deletes), limit)
 		}
 	}
 
@@ -939,9 +938,9 @@ func Cmd(args []string, cfg *config.Config, profileOverride string) error {
 	if rc == 0 && len(deletes) > 0 {
 		if drc, derr := DeleteRemoteFiles(profile, o.RemoteRoot, deletes); derr != nil {
 			fmt.Fprintln(os.Stderr, derr)
-			return clierr.Code(1)
+			return srvutil.Code(1)
 		} else if drc != 0 {
-			return clierr.Code(drc)
+			return srvutil.Code(drc)
 		}
 	}
 	hookBase.Name = "post-sync"
@@ -949,9 +948,9 @@ func Cmd(args []string, cfg *config.Config, profileOverride string) error {
 	hooks.Run(hookBase)
 	if o.Watch {
 		fmt.Fprintln(os.Stderr)
-		return clierr.Code(runWatch(o, profile, localRoot, o.RemoteRoot, allExcludes))
+		return srvutil.Code(runWatch(o, profile, localRoot, o.RemoteRoot, allExcludes))
 	}
-	return clierr.Code(rc)
+	return srvutil.Code(rc)
 }
 
 func MustCwd() string {

@@ -15,9 +15,9 @@ import (
 	"os"
 	"regexp"
 	"sort"
-	"srv/internal/clierr"
 	"srv/internal/config"
 	"srv/internal/remote"
+	"srv/internal/srvutil"
 	"strings"
 )
 
@@ -31,23 +31,23 @@ func Cmd(args []string, cfg *config.Config, profileOverride string) error {
 		return list(cfg)
 	case "show":
 		if len(args) < 2 {
-			return clierr.Errf(2, "usage: srv recipe show <name>")
+			return srvutil.Errf(2, "usage: srv recipe show <name>")
 		}
 		return show(cfg, args[1])
 	case "save", "add":
 		return save(args[1:], cfg, profileOverride)
 	case "rm", "remove":
 		if len(args) < 2 {
-			return clierr.Errf(2, "usage: srv recipe rm <name>")
+			return srvutil.Errf(2, "usage: srv recipe rm <name>")
 		}
 		return remove(cfg, args[1])
 	case "run":
 		if len(args) < 2 {
-			return clierr.Errf(2, "usage: srv recipe run <name> [args...]")
+			return srvutil.Errf(2, "usage: srv recipe run <name> [args...]")
 		}
 		return run(args[1:], cfg, profileOverride)
 	}
-	return clierr.Errf(2, `usage: srv recipe [list|show|save|rm|run] [args]
+	return srvutil.Errf(2, `usage: srv recipe [list|show|save|rm|run] [args]
   srv recipe save <name> [--profile P] [--ignore-errors] [--desc "..."] -- cmd1 ;; cmd2 ;; ...
   srv recipe run <name> [pos1 pos2 ...] [KEY=value ...]
   srv recipe show <name>
@@ -85,7 +85,7 @@ func list(cfg *config.Config) error {
 func show(cfg *config.Config, name string) error {
 	r, ok := cfg.Recipes[name]
 	if !ok {
-		return clierr.Errf(1, "no recipe %q", name)
+		return srvutil.Errf(1, "no recipe %q", name)
 	}
 	fmt.Printf("name:        %s\n", name)
 	if r.Description != "" {
@@ -113,7 +113,7 @@ func show(cfg *config.Config, name string) error {
 // step.
 func save(args []string, cfg *config.Config, profileOverride string) error {
 	if len(args) == 0 {
-		return clierr.Errf(2, "usage: srv recipe save <name> [...] -- <step...>")
+		return srvutil.Errf(2, "usage: srv recipe save <name> [...] -- <step...>")
 	}
 	name := args[0]
 	rest := args[1:]
@@ -131,7 +131,7 @@ func save(args []string, cfg *config.Config, profileOverride string) error {
 			dashSeen = true
 		case a == "--profile":
 			if i+1 >= len(rest) {
-				return clierr.Errf(2, "--profile needs a value")
+				return srvutil.Errf(2, "--profile needs a value")
 			}
 			rec.Profile = rest[i+1]
 			i++
@@ -139,7 +139,7 @@ func save(args []string, cfg *config.Config, profileOverride string) error {
 			rec.Profile = strings.TrimPrefix(a, "--profile=")
 		case a == "--desc" || a == "--description":
 			if i+1 >= len(rest) {
-				return clierr.Errf(2, "--desc needs a value")
+				return srvutil.Errf(2, "--desc needs a value")
 			}
 			rec.Description = rest[i+1]
 			i++
@@ -150,16 +150,16 @@ func save(args []string, cfg *config.Config, profileOverride string) error {
 		case a == "--ignore-errors":
 			rec.IgnoreErrors = true
 		default:
-			return clierr.Errf(2, "unexpected arg %q before --", a)
+			return srvutil.Errf(2, "unexpected arg %q before --", a)
 		}
 	}
 	if len(tail) == 0 {
-		return clierr.Errf(2, "no steps provided (put step text after `--`, separate multiple with `;;`)")
+		return srvutil.Errf(2, "no steps provided (put step text after `--`, separate multiple with `;;`)")
 	}
 	rec.Steps = parseSteps(tail)
 	if rec.Profile != "" {
 		if _, ok := cfg.Profiles[rec.Profile]; !ok {
-			return clierr.Errf(1, "pinned profile %q not found", rec.Profile)
+			return srvutil.Errf(1, "pinned profile %q not found", rec.Profile)
 		}
 	}
 	if cfg.Recipes == nil {
@@ -167,7 +167,7 @@ func save(args []string, cfg *config.Config, profileOverride string) error {
 	}
 	cfg.Recipes[name] = rec
 	if err := config.Save(cfg); err != nil {
-		return clierr.Errf(1, "save: %v", err)
+		return srvutil.Errf(1, "save: %v", err)
 	}
 	fmt.Printf("saved recipe %q (%d step(s))\n", name, len(rec.Steps))
 	return nil
@@ -190,11 +190,11 @@ func parseSteps(tail []string) []string {
 
 func remove(cfg *config.Config, name string) error {
 	if _, ok := cfg.Recipes[name]; !ok {
-		return clierr.Errf(1, "no recipe %q", name)
+		return srvutil.Errf(1, "no recipe %q", name)
 	}
 	delete(cfg.Recipes, name)
 	if err := config.Save(cfg); err != nil {
-		return clierr.Errf(1, "save: %v", err)
+		return srvutil.Errf(1, "save: %v", err)
 	}
 	fmt.Printf("removed recipe %q\n", name)
 	return nil
@@ -207,7 +207,7 @@ func run(args []string, cfg *config.Config, profileOverride string) error {
 	name := args[0]
 	rec, ok := cfg.Recipes[name]
 	if !ok {
-		return clierr.Errf(1, "no recipe %q", name)
+		return srvutil.Errf(1, "no recipe %q", name)
 	}
 	posArgs := []string{}
 	kwargs := map[string]string{}
@@ -227,7 +227,7 @@ func run(args []string, cfg *config.Config, profileOverride string) error {
 	}
 	resolvedName, profile, err := config.Resolve(cfg, prof)
 	if err != nil {
-		return clierr.Errf(1, "%v", err)
+		return srvutil.Errf(1, "%v", err)
 	}
 	cwd := config.GetCwd(resolvedName, profile)
 
@@ -239,7 +239,7 @@ func run(args []string, cfg *config.Config, profileOverride string) error {
 		if rc != 0 {
 			fmt.Fprintf(os.Stderr, "  -> exit %d\n\n", rc)
 			if !rec.IgnoreErrors {
-				return clierr.Code(rc)
+				return srvutil.Code(rc)
 			}
 		} else {
 			fmt.Fprintln(os.Stderr)

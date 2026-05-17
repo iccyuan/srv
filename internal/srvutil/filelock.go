@@ -1,4 +1,4 @@
-package srvio
+package srvutil
 
 import (
 	"fmt"

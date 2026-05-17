@@ -8,11 +8,11 @@ package main
 import (
 	"fmt"
 	"os"
-	"srv/internal/clierr"
 	"srv/internal/config"
 	"srv/internal/group"
 	"srv/internal/hints"
 	"srv/internal/jobcli"
+	"srv/internal/srvutil"
 	"strconv"
 	"strings"
 	"time"
@@ -178,12 +178,12 @@ func parseGlobalFlags(args []string) (globalOpts, []string) {
 // so feature subpackages can produce ExitError values translateExit
 // recognises. The aliases below keep every package-main call site
 // unchanged while the types live in the new shared package.
-type errExit = clierr.ExitError
+type errExit = srvutil.ExitError
 
 var (
-	exitErr    = clierr.Errf
-	exitCode   = clierr.Code
-	exitCodeOf = clierr.CodeOf
+	exitErr    = srvutil.Errf
+	exitCode   = srvutil.Code
+	exitCodeOf = srvutil.CodeOf
 )
 
 // translateExit converts a cmd handler's error return into the int

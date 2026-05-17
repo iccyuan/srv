@@ -4,8 +4,8 @@ import (
 	"fmt"
 	"os"
 	"sort"
-	"srv/internal/clierr"
 	"srv/internal/config"
+	"srv/internal/srvutil"
 	"strings"
 )
 
@@ -34,27 +34,27 @@ func Cmd(args []string, cfg *config.Config) error {
 		return cmdList(cfg)
 	case "show":
 		if len(rest) == 0 {
-			return clierr.Errf(1, "%s", usageText())
+			return srvutil.Errf(1, "%s", usageText())
 		}
 		return cmdShow(cfg, rest[0])
 	case "set":
 		if len(rest) < 2 {
-			return clierr.Errf(1, "%s", usageText())
+			return srvutil.Errf(1, "%s", usageText())
 		}
 		return cmdSet(cfg, rest[0], strings.Join(rest[1:], " "), false)
 	case "add":
 		if len(rest) < 2 {
-			return clierr.Errf(1, "%s", usageText())
+			return srvutil.Errf(1, "%s", usageText())
 		}
 		return cmdSet(cfg, rest[0], strings.Join(rest[1:], " "), true)
 	case "rm", "remove":
 		if len(rest) == 0 {
-			return clierr.Errf(1, "%s", usageText())
+			return srvutil.Errf(1, "%s", usageText())
 		}
 		return cmdRm(cfg, rest)
 	case "run":
 		if len(rest) == 0 {
-			return clierr.Errf(1, "%s", usageText())
+			return srvutil.Errf(1, "%s", usageText())
 		}
 		return cmdRun(rest[0])
 	case "events":
@@ -63,7 +63,7 @@ func Cmd(args []string, cfg *config.Config) error {
 		}
 		return nil
 	}
-	return clierr.Errf(1, "%s", usageText())
+	return srvutil.Errf(1, "%s", usageText())
 }
 
 func cmdList(cfg *config.Config) error {
@@ -112,7 +112,7 @@ func cmdShow(cfg *config.Config, event string) error {
 
 func cmdSet(cfg *config.Config, event, cmdStr string, appendMode bool) error {
 	if !IsKnownEvent(event) {
-		return clierr.Errf(1, "srv: unknown event %q (known: %s)",
+		return srvutil.Errf(1, "srv: unknown event %q (known: %s)",
 			event, strings.Join(KnownEvents, ", "))
 	}
 	if cfg.Hooks == nil {
@@ -124,7 +124,7 @@ func cmdSet(cfg *config.Config, event, cmdStr string, appendMode bool) error {
 		cfg.Hooks[event] = []string{cmdStr}
 	}
 	if err := config.Save(cfg); err != nil {
-		return clierr.Errf(1, "error: %v", err)
+		return srvutil.Errf(1, "error: %v", err)
 	}
 	verb := "set"
 	if appendMode {
@@ -143,7 +143,7 @@ func cmdRm(cfg *config.Config, args []string) error {
 	if len(args) == 1 {
 		delete(cfg.Hooks, event)
 		if err := config.Save(cfg); err != nil {
-			return clierr.Errf(1, "error: %v", err)
+			return srvutil.Errf(1, "error: %v", err)
 		}
 		fmt.Printf("removed all hooks for %s\n", event)
 		return nil
@@ -151,11 +151,11 @@ func cmdRm(cfg *config.Config, args []string) error {
 	// Numeric index removal: keep stable ordering of remaining.
 	idx, err := parseIndex(args[1])
 	if err != nil {
-		return clierr.Errf(1, "%v", err)
+		return srvutil.Errf(1, "%v", err)
 	}
 	cmds := cfg.Hooks[event]
 	if idx < 0 || idx >= len(cmds) {
-		return clierr.Errf(1, "srv: index %d out of range [0,%d)", idx, len(cmds))
+		return srvutil.Errf(1, "srv: index %d out of range [0,%d)", idx, len(cmds))
 	}
 	removed := cmds[idx]
 	cfg.Hooks[event] = append(cmds[:idx], cmds[idx+1:]...)
@@ -163,7 +163,7 @@ func cmdRm(cfg *config.Config, args []string) error {
 		delete(cfg.Hooks, event)
 	}
 	if err := config.Save(cfg); err != nil {
-		return clierr.Errf(1, "error: %v", err)
+		return srvutil.Errf(1, "error: %v", err)
 	}
 	fmt.Printf("removed %s[%d]: %s\n", event, idx, removed)
 	return nil

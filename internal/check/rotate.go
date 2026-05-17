@@ -8,10 +8,9 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
-	"srv/internal/clierr"
 	"srv/internal/config"
-	"srv/internal/srvpath"
 	"srv/internal/srvtty"
+	"srv/internal/srvutil"
 	"srv/internal/sshx"
 	"strings"
 	"time"
@@ -45,7 +44,7 @@ func RotateKey(profile *config.Profile, profileName string, cfg *config.Config, 
 	fmt.Println("  step 1/5: verifying current access...")
 	c, err := sshx.Dial(profile)
 	if err != nil {
-		return clierr.Errf(1, "cannot rotate -- current credentials don't connect: %v", err)
+		return srvutil.Errf(1, "cannot rotate -- current credentials don't connect: %v", err)
 	}
 	defer c.Close()
 
@@ -53,7 +52,7 @@ func RotateKey(profile *config.Profile, profileName string, cfg *config.Config, 
 	fmt.Println("  step 2/5: generating ed25519 keypair...")
 	pub, priv, err := ed25519.GenerateKey(rand.Reader)
 	if err != nil {
-		return clierr.Errf(1, "key gen: %v", err)
+		return srvutil.Errf(1, "key gen: %v", err)
 	}
 	hostname, _ := os.Hostname()
 	if hostname == "" {
@@ -62,29 +61,29 @@ func RotateKey(profile *config.Profile, profileName string, cfg *config.Config, 
 	comment := fmt.Sprintf("srv-rotated@%s-%s", hostname, time.Now().Format("20060102"))
 	block, err := ssh.MarshalPrivateKey(priv, comment)
 	if err != nil {
-		return clierr.Errf(1, "marshal private: %v", err)
+		return srvutil.Errf(1, "marshal private: %v", err)
 	}
 	privPEM := pem.EncodeToMemory(block)
 	sshPub, err := ssh.NewPublicKey(pub)
 	if err != nil {
-		return clierr.Errf(1, "wrap public: %v", err)
+		return srvutil.Errf(1, "wrap public: %v", err)
 	}
 	pubLine := ssh.MarshalAuthorizedKey(sshPub) // includes trailing newline
 	pubWithComment := strings.TrimRight(string(pubLine), "\n") + " " + comment + "\n"
 
 	// Write keys to ~/.srv/keys/<profile>-<timestamp>{,.pub}.
-	keyDir := filepath.Join(srvpath.Dir(), "keys")
+	keyDir := filepath.Join(srvutil.Dir(), "keys")
 	if err := os.MkdirAll(keyDir, 0o700); err != nil {
-		return clierr.Errf(1, "mkdir keys: %v", err)
+		return srvutil.Errf(1, "mkdir keys: %v", err)
 	}
 	stamp := time.Now().Format("20060102-150405")
 	keyPath := filepath.Join(keyDir, fmt.Sprintf("%s-%s", profileName, stamp))
 	pubPath := keyPath + ".pub"
 	if err := os.WriteFile(keyPath, privPEM, 0o600); err != nil {
-		return clierr.Errf(1, "write private key: %v", err)
+		return srvutil.Errf(1, "write private key: %v", err)
 	}
 	if err := os.WriteFile(pubPath, []byte(pubWithComment), 0o644); err != nil {
-		return clierr.Errf(1, "write public key: %v", err)
+		return srvutil.Errf(1, "write public key: %v", err)
 	}
 	fmt.Printf("    saved %s\n", keyPath)
 
@@ -96,10 +95,10 @@ func RotateKey(profile *config.Profile, profileName string, cfg *config.Config, 
 		` ~/.ssh/authorized_keys >/dev/null 2>&1 || printf '%s' ` + quoted + ` >> ~/.ssh/authorized_keys`
 	res, err := c.RunCapture(authShell, "")
 	if err != nil {
-		return clierr.Errf(1, "push pubkey: %v", err)
+		return srvutil.Errf(1, "push pubkey: %v", err)
 	}
 	if res.ExitCode != 0 {
-		return clierr.Errf(1, "push pubkey: exit %d: %s", res.ExitCode, strings.TrimSpace(res.Stderr))
+		return srvutil.Errf(1, "push pubkey: exit %d: %s", res.ExitCode, strings.TrimSpace(res.Stderr))
 	}
 
 	// 4. Verify by dialing with ONLY the new key.
@@ -115,7 +114,7 @@ func RotateKey(profile *config.Profile, profileName string, cfg *config.Config, 
 		_ = removeKeyLine(c, strings.TrimRight(pubWithComment, "\n"))
 		_ = os.Remove(keyPath)
 		_ = os.Remove(pubPath)
-		return clierr.Errf(1, "rotation aborted: %v", err)
+		return srvutil.Errf(1, "rotation aborted: %v", err)
 	}
 
 	// 5. Update profile.identity_file in config.
@@ -124,7 +123,7 @@ func RotateKey(profile *config.Profile, profileName string, cfg *config.Config, 
 	profile.IdentityFile = keyPath
 	cfg.Profiles[profileName] = profile
 	if err := config.Save(cfg); err != nil {
-		return clierr.Errf(1, "save config: %v", err)
+		return srvutil.Errf(1, "save config: %v", err)
 	}
 
 	fmt.Printf("\nrotated: %s now uses %s\n", profileName, keyPath)

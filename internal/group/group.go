@@ -4,9 +4,9 @@ import (
 	"encoding/json"
 	"fmt"
 	"sort"
-	"srv/internal/clierr"
 	"srv/internal/config"
 	"srv/internal/remote"
+	"srv/internal/srvutil"
 	"strings"
 	"sync"
 	"time"
@@ -33,21 +33,21 @@ func Cmd(args []string, cfg *config.Config) error {
 		return listCmd(cfg)
 	case "show":
 		if len(args) < 2 {
-			return clierr.Errf(2, "usage: srv group show <name>")
+			return srvutil.Errf(2, "usage: srv group show <name>")
 		}
 		return showCmd(cfg, args[1])
 	case "set":
 		if len(args) < 3 {
-			return clierr.Errf(2, "usage: srv group set <name> <profile> [profile...]")
+			return srvutil.Errf(2, "usage: srv group set <name> <profile> [profile...]")
 		}
 		return setCmd(cfg, args[1], args[2:])
 	case "remove", "rm":
 		if len(args) < 2 {
-			return clierr.Errf(2, "usage: srv group remove <name>")
+			return srvutil.Errf(2, "usage: srv group remove <name>")
 		}
 		return removeCmd(cfg, args[1])
 	default:
-		return clierr.Errf(2, "unknown group action %q (expected list/show/set/remove)", args[0])
+		return srvutil.Errf(2, "unknown group action %q (expected list/show/set/remove)", args[0])
 	}
 }
 
@@ -71,7 +71,7 @@ func listCmd(cfg *config.Config) error {
 func showCmd(cfg *config.Config, name string) error {
 	members, ok := cfg.Groups[name]
 	if !ok {
-		return clierr.Errf(1, "group %q not found", name)
+		return srvutil.Errf(1, "group %q not found", name)
 	}
 	if len(members) == 0 {
 		fmt.Printf("%s: (empty)\n", name)
@@ -95,11 +95,11 @@ func showCmd(cfg *config.Config, name string) error {
 // ghost name.
 func setCmd(cfg *config.Config, name string, members []string) error {
 	if len(members) == 0 {
-		return clierr.Errf(2, "set requires at least one member; use `srv group remove %s` to delete", name)
+		return srvutil.Errf(2, "set requires at least one member; use `srv group remove %s` to delete", name)
 	}
 	for _, m := range members {
 		if _, ok := cfg.Profiles[m]; !ok {
-			return clierr.Errf(1, "profile %q not found", m)
+			return srvutil.Errf(1, "profile %q not found", m)
 		}
 	}
 	// De-duplicate while preserving the order the user typed -- order
@@ -127,7 +127,7 @@ func setCmd(cfg *config.Config, name string, members []string) error {
 
 func removeCmd(cfg *config.Config, name string) error {
 	if _, ok := cfg.Groups[name]; !ok {
-		return clierr.Errf(1, "group %q not found", name)
+		return srvutil.Errf(1, "group %q not found", name)
 	}
 	delete(cfg.Groups, name)
 	if err := config.Save(cfg); err != nil {
@@ -215,16 +215,16 @@ func Run(cfg *config.Config, groupName, cmd string) ([]Result, error) {
 // pipelines can detect partial failure.
 func RunCmd(args []string, cfg *config.Config, groupName string) error {
 	if len(args) == 0 {
-		return clierr.Errf(2, "usage: srv -G <group> <command>")
+		return srvutil.Errf(2, "usage: srv -G <group> <command>")
 	}
 	cmd := strings.Join(args, " ")
 	results, err := Run(cfg, groupName, cmd)
 	if err != nil {
-		return clierr.Errf(1, "%v", err)
+		return srvutil.Errf(1, "%v", err)
 	}
 	maxExit, failed := RenderResults(results)
 	fmt.Printf("\n%d profile(s), %d succeeded, %d failed.\n", len(results), len(results)-failed, failed)
-	return clierr.Code(maxExit)
+	return srvutil.Code(maxExit)
 }
 
 // RenderResults prints one section per result and returns

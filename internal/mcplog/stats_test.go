@@ -1,4 +1,4 @@
-package mcpstats
+package mcplog
 
 import (
 	"os"

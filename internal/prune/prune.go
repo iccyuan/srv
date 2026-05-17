@@ -32,11 +32,9 @@ import (
 	"strings"
 	"time"
 
-	"srv/internal/clierr"
 	"srv/internal/config"
 	"srv/internal/jobs"
 	"srv/internal/mcplog"
-	"srv/internal/mcpstats"
 	"srv/internal/remote"
 	"srv/internal/session"
 	"srv/internal/srvutil"
@@ -89,11 +87,11 @@ func Cmd(args []string, cfg *config.Config, profileOverride string) error {
 	case "all":
 		return pruneAll(cfg, profileOverride, remoteSweep)
 	}
-	return clierr.Errf(2, "unknown prune target %q (try: %s)", target, strings.Join(Targets, ", "))
+	return srvutil.Errf(2, "unknown prune target %q (try: %s)", target, strings.Join(Targets, ", "))
 }
 
 func usage() error {
-	return clierr.Errf(2, `usage: srv prune <target> [--remote]
+	return srvutil.Errf(2, `usage: srv prune <target> [--remote]
 
 every target keeps the live/recent part and drops only the stale part
 (full erasure is a different verb -- e.g. srv stats --clear):
@@ -157,10 +155,10 @@ func pruneJobs(rest []string, cfg *config.Config, profileOverride string, remote
 
 	pruned, err := PruneLedger(jf, target)
 	if err != nil {
-		return clierr.Errf(1, "%v", err)
+		return srvutil.Errf(1, "%v", err)
 	}
 	if err := jobs.Save(jf); err != nil {
-		return clierr.Errf(1, "save: %v", err)
+		return srvutil.Errf(1, "save: %v", err)
 	}
 	if pruned == 0 {
 		fmt.Println("(no finished job records to prune)")
@@ -183,11 +181,11 @@ func pruneJobs(rest []string, cfg *config.Config, profileOverride string, remote
 func sweepRemoteJobs(target string, cfg *config.Config, profileOverride string) error {
 	name, profile, err := config.Resolve(cfg, profileOverride)
 	if err != nil {
-		return clierr.Errf(1, "--remote: %v", err)
+		return srvutil.Errf(1, "--remote: %v", err)
 	}
 	res, err := remote.RunCapture(profile, "", remoteSweepScript(target))
 	if err != nil {
-		return clierr.Errf(1, "--remote sweep on %q failed: %v", name, err)
+		return srvutil.Errf(1, "--remote sweep on %q failed: %v", name, err)
 	}
 	cnt := strings.TrimSpace(res.Stdout)
 	if cnt == "" {
@@ -235,7 +233,7 @@ func pruneSessions() error {
 func pruneMCPLog() error {
 	kept, dropped, err := mcplog.Prune()
 	if err != nil {
-		return clierr.Errf(1, "mcp.log: %v", err)
+		return srvutil.Errf(1, "mcp.log: %v", err)
 	}
 	if dropped == 0 {
 		fmt.Printf("(mcp.log within retention; nothing to prune)\n")
@@ -250,9 +248,9 @@ func pruneMCPLog() error {
 // cut). Nothing old enough is success, not a no-op-worthy error.
 func pruneMCPStats() error {
 	cutoff := time.Now().Add(-StatsKeepWindow)
-	kept, dropped, err := mcpstats.PruneOlderThan(cutoff)
+	kept, dropped, err := mcplog.PruneOlderThan(cutoff)
 	if err != nil {
-		return clierr.Errf(1, "mcp-stats.jsonl: %v", err)
+		return srvutil.Errf(1, "mcp-stats.jsonl: %v", err)
 	}
 	if dropped == 0 {
 		fmt.Printf("(mcp-stats.jsonl: nothing older than %s)\n", StatsKeepWindow)

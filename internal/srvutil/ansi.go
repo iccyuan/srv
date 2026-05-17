@@ -6,10 +6,10 @@
 // Naming follows the ECMA-48 / xterm convention but in
 // PascalCase to fit Go's export rules:
 //
-//	ansi.Reset / ansi.Bold / ansi.Dim / ansi.Reverse
-//	ansi.Red / ansi.Green / ansi.Yellow / ansi.Blue / ansi.Magenta / ansi.Cyan
-//	ansi.Hide / ansi.Show  -- cursor visibility
-package ansi
+//	srvutil.Reset / srvutil.Bold / srvutil.Dim / srvutil.Reverse
+//	srvutil.Red / srvutil.Green / srvutil.Yellow / srvutil.Blue / srvutil.Magenta / srvutil.Cyan
+//	srvutil.Hide / srvutil.Show  -- cursor visibility
+package srvutil
 
 const (
 	Reset   = "\x1b[0m"

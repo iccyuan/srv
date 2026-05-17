@@ -4,8 +4,8 @@ import (
 	"fmt"
 	"os"
 	"sort"
-	"srv/internal/clierr"
 	"srv/internal/config"
+	"srv/internal/srvutil"
 	"strings"
 )
 
@@ -35,16 +35,16 @@ func DisconnectCmd(args []string, cfg *config.Config, profileOverride string) er
 			fmt.Println(disconnectHelp)
 			return nil
 		case strings.HasPrefix(a, "-"):
-			return clierr.Errf(2, "unknown flag %q (try --help)", a)
+			return srvutil.Errf(2, "unknown flag %q (try --help)", a)
 		default:
 			if target != "" {
-				return clierr.Errf(2, "too many arguments (expected one profile name or --all)")
+				return srvutil.Errf(2, "too many arguments (expected one profile name or --all)")
 			}
 			target = a
 		}
 	}
 	if all && target != "" {
-		return clierr.Errf(2, "--all and an explicit profile are mutually exclusive")
+		return srvutil.Errf(2, "--all and an explicit profile are mutually exclusive")
 	}
 
 	if !Ping() {
@@ -58,7 +58,7 @@ func DisconnectCmd(args []string, cfg *config.Config, profileOverride string) er
 	if all {
 		res := DisconnectAll()
 		if !res.OK {
-			return clierr.Errf(1, "daemon disconnect_all call failed")
+			return srvutil.Errf(1, "daemon disconnect_all call failed")
 		}
 		if len(res.Freed) == 0 {
 			fmt.Println("(no profiles connected)")
@@ -75,7 +75,7 @@ func DisconnectCmd(args []string, cfg *config.Config, profileOverride string) er
 	if target == "" {
 		name, _, err := config.Resolve(cfg, profileOverride)
 		if err != nil {
-			return clierr.Errf(1, "%v", err)
+			return srvutil.Errf(1, "%v", err)
 		}
 		target = name
 	} else {
@@ -89,7 +89,7 @@ func DisconnectCmd(args []string, cfg *config.Config, profileOverride string) er
 	}
 	res := Disconnect(target)
 	if !res.OK {
-		return clierr.Errf(1, "daemon disconnect call failed")
+		return srvutil.Errf(1, "daemon disconnect call failed")
 	}
 	if len(res.Freed) == 0 {
 		fmt.Printf("(%s: not connected)\n", target)

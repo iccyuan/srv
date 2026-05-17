@@ -4,9 +4,9 @@ import (
 	"strings"
 	"testing"
 
-	"srv/internal/clierr"
 	"srv/internal/config"
 	"srv/internal/jobs"
+	"srv/internal/srvutil"
 )
 
 // These three guard the local-ledger semantics that moved here verbatim
@@ -154,7 +154,7 @@ func TestRemoteSweepScriptGatesOnExit(t *testing.T) {
 func TestCmdDispatch(t *testing.T) {
 	t.Run("bare prune is usage exit 2", func(t *testing.T) {
 		err := Cmd(nil, nil, "")
-		if err == nil || clierr.CodeOf(err) != 2 {
+		if err == nil || srvutil.CodeOf(err) != 2 {
 			t.Fatalf("bare prune: want exit-2 usage error, got %v", err)
 		}
 		if !strings.Contains(err.Error(), "usage:") {
@@ -163,7 +163,7 @@ func TestCmdDispatch(t *testing.T) {
 	})
 	t.Run("unknown target is exit 2", func(t *testing.T) {
 		err := Cmd([]string{"bogus"}, nil, "")
-		if err == nil || clierr.CodeOf(err) != 2 {
+		if err == nil || srvutil.CodeOf(err) != 2 {
 			t.Fatalf("unknown target: want exit-2, got %v", err)
 		}
 		if !strings.Contains(err.Error(), "unknown prune target") {

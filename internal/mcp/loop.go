@@ -8,7 +8,6 @@ import (
 	"srv/internal/config"
 	"srv/internal/i18n"
 	"srv/internal/mcplog"
-	"srv/internal/mcpstats"
 	"srv/internal/progress"
 	"srv/internal/project"
 	"strings"
@@ -133,10 +132,10 @@ func Run(cfg *config.Config, versionStr string) error {
 			// not authoritative state.
 			argsJSON, _ := json.Marshal(args)
 			resJSON, _ := json.Marshal(res)
-			_ = mcpstats.AppendCall(mcpstats.Call{
+			_ = mcplog.AppendCall(mcplog.Call{
 				TS:            start,
 				Tool:          p.Name,
-				Cmd:           mcpstats.DescribeArgs(p.Name, args),
+				Cmd:           mcplog.DescribeArgs(p.Name, args),
 				DurMs:         dur.Milliseconds(),
 				InBytes:       len(argsJSON),
 				OutBytes:      len(resJSON),

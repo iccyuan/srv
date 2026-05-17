@@ -4,7 +4,7 @@
 // dragging in config / session / etc.
 //
 // All paths derive from Dir() (= $SRV_HOME or ~/.srv).
-package srvpath
+package srvutil
 
 import (
 	"os"

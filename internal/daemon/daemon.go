@@ -11,10 +11,9 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
-	"srv/internal/clierr"
 	"srv/internal/config"
-	"srv/internal/srvpath"
 	"srv/internal/srvtty"
+	"srv/internal/srvutil"
 	"srv/internal/sshx"
 	"strings"
 	"sync"
@@ -238,14 +237,14 @@ const (
 )
 
 func daemonSocketPath() string {
-	return filepath.Join(srvpath.Dir(), "daemon.sock")
+	return filepath.Join(srvutil.Dir(), "daemon.sock")
 }
 
 // daemonPortPath holds the TCP loopback port number when we couldn't
 // bind a unix socket -- the old-Windows / Server 2016 fallback path
 // described in daemonListen's comment.
 func daemonPortPath() string {
-	return filepath.Join(srvpath.Dir(), "daemon.port")
+	return filepath.Join(srvutil.Dir(), "daemon.port")
 }
 
 // daemonListen picks a transport for the daemon listener. Unix
@@ -303,12 +302,12 @@ func Cmd(args []string) error {
 	if len(args) > 0 {
 		switch args[0] {
 		case "status":
-			return clierr.Code(daemonClientStatus(args[1:]))
+			return srvutil.Code(daemonClientStatus(args[1:]))
 		case "stop":
-			return clierr.Code(daemonClientStop())
+			return srvutil.Code(daemonClientStop())
 		case "restart":
 			if rc := daemonClientStop(); rc != 0 {
-				return clierr.Code(rc)
+				return srvutil.Code(rc)
 			}
 			// Wait for the old daemon to actually exit before
 			// spawning a new one. daemonClientStop only waits for
@@ -325,7 +324,7 @@ func Cmd(args []string) error {
 			}
 			return fmt.Errorf("daemon: restart failed")
 		case "logs":
-			return clierr.Code(daemonClientLogs())
+			return srvutil.Code(daemonClientLogs())
 		}
 	}
 	sockPath := daemonSocketPath()

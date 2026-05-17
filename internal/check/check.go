@@ -16,8 +16,8 @@ import (
 	"net"
 	"os"
 	"sort"
-	"srv/internal/clierr"
 	"srv/internal/config"
+	"srv/internal/srvutil"
 	"srv/internal/sshx"
 	"strconv"
 	"strings"
@@ -313,14 +313,14 @@ func Cmd(args []string, cfg *config.Config, profileOverride string) error {
 			}
 		default:
 			if strings.HasPrefix(a, "-") {
-				return clierr.Errf(1, "error: unknown check flag %q", a)
+				return srvutil.Errf(1, "error: unknown check flag %q", a)
 			}
 		}
 	}
 
 	name, profile, err := config.Resolve(cfg, profileOverride)
 	if err != nil {
-		return clierr.Errf(1, "%v", err)
+		return srvutil.Errf(1, "%v", err)
 	}
 
 	if rotate {
@@ -328,11 +328,11 @@ func Cmd(args []string, cfg *config.Config, profileOverride string) error {
 	}
 
 	if bandwidth {
-		return clierr.Code(RunBandwidthProbe(profile, name, bwDuration))
+		return srvutil.Code(RunBandwidthProbe(profile, name, bwDuration))
 	}
 
 	if rtt {
-		return clierr.Code(runRTTProbe(profile, name, count, interval))
+		return srvutil.Code(runRTTProbe(profile, name, count, interval))
 	}
 
 	user := profile.User
@@ -367,7 +367,7 @@ func Cmd(args []string, cfg *config.Config, profileOverride string) error {
 	for _, line := range Advice(res.Diagnosis, profile, name) {
 		fmt.Println(line)
 	}
-	return clierr.Code(1)
+	return srvutil.Code(1)
 }
 
 // runRTTProbe times `count` SSH-level keepalive round trips against

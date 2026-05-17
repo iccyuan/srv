@@ -4,10 +4,10 @@ import (
 	"fmt"
 	"os"
 	"regexp"
-	"srv/internal/clierr"
 	"srv/internal/config"
 	"srv/internal/remote"
 	"srv/internal/srvtty"
+	"srv/internal/srvutil"
 	"srv/internal/sshx"
 	"strconv"
 	"strings"
@@ -34,7 +34,7 @@ func Journal(args []string, cfg *config.Config, profileOverride string) error {
 	}
 	profName, profile, err := config.Resolve(cfg, profileOverride)
 	if err != nil {
-		return clierr.Errf(1, "%v", err)
+		return srvutil.Errf(1, "%v", err)
 	}
 	remoteCmd := jc.ToRemoteCommand()
 	cwd := config.GetCwd(profName, profile)
@@ -45,14 +45,14 @@ func Journal(args []string, cfg *config.Config, profileOverride string) error {
 		if res.Stderr != "" {
 			os.Stderr.WriteString(res.Stderr)
 		}
-		return clierr.Code(res.ExitCode)
+		return srvutil.Code(res.ExitCode)
 	}
 
 	var re *regexp.Regexp
 	if jc.LocalGrep != "" {
 		r, gerr := regexp.Compile(jc.LocalGrep)
 		if gerr != nil {
-			return clierr.Errf(2, "bad regex %q: %v", jc.LocalGrep, gerr)
+			return srvutil.Errf(2, "bad regex %q: %v", jc.LocalGrep, gerr)
 		}
 		re = r
 	}
@@ -177,7 +177,7 @@ func ParseJournalArgs(args []string) (JournalCmd, error) {
 			}
 			n, perr := strconv.Atoi(v)
 			if perr != nil || n < 0 {
-				return jc, clierr.Errf(2, "bad %s value %q", a, v)
+				return jc, srvutil.Errf(2, "bad %s value %q", a, v)
 			}
 			jc.Lines = n
 			i++
@@ -198,7 +198,7 @@ func ParseJournalArgs(args []string) (JournalCmd, error) {
 		case a == "-f" || a == "--follow":
 			jc.Follow = true
 		case a == "-h" || a == "--help":
-			return jc, clierr.Errf(0, `usage: srv journal [-u UNIT] [--since TIME] [-p PRI] [-g RE] [-n LINES] [-f]
+			return jc, srvutil.Errf(0, `usage: srv journal [-u UNIT] [--since TIME] [-p PRI] [-g RE] [-n LINES] [-f]
   systemd journal viewer (one-shot or live-follow on the remote)
 
 see also:
@@ -208,7 +208,7 @@ see also:
 			// No positional args expected; ignore the rest.
 			return jc, nil
 		default:
-			return jc, clierr.Errf(2, "unknown journal arg %q (try -u UNIT, --since DUR, -f, -n LINES, -g RE; --help for more)", a)
+			return jc, srvutil.Errf(2, "unknown journal arg %q (try -u UNIT, --since DUR, -f, -n LINES, -g RE; --help for more)", a)
 		}
 	}
 	return jc, nil
@@ -216,7 +216,7 @@ see also:
 
 func needValue(args []string, i int, flag string) (string, error) {
 	if i+1 >= len(args) {
-		return "", clierr.Errf(2, "%s requires a value", flag)
+		return "", srvutil.Errf(2, "%s requires a value", flag)
 	}
 	return args[i+1], nil
 }

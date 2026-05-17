@@ -13,10 +13,10 @@ import (
 	"os/exec"
 	"path"
 	"path/filepath"
-	"srv/internal/clierr"
 	"srv/internal/config"
 	"srv/internal/platform"
 	"srv/internal/remote"
+	"srv/internal/srvutil"
 	"srv/internal/transfer"
 	"strings"
 )
@@ -28,31 +28,31 @@ import (
 func Open(args []string, cfg *config.Config, profileOverride string) error {
 	if len(args) == 0 {
 		fmt.Fprintln(os.Stderr, "usage: srv open <remote_file>")
-		return clierr.Code(2)
+		return srvutil.Code(2)
 	}
 	name, profile, err := config.Resolve(cfg, profileOverride)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)
-		return clierr.Code(1)
+		return srvutil.Code(1)
 	}
 	cwd := config.GetCwd(name, profile)
 	rpath := remote.ResolvePath(args[0], cwd)
 	tmpDir, err := os.MkdirTemp("", "srv-open-")
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "srv open:", err)
-		return clierr.Code(1)
+		return srvutil.Code(1)
 	}
 	local := filepath.Join(tmpDir, path.Base(strings.TrimRight(rpath, "/")))
 	if rc, _, err := transfer.PullPath(profile, rpath, local, false); err != nil || rc != 0 {
 		if err != nil {
 			fmt.Fprintln(os.Stderr, "srv open:", err)
 		}
-		return clierr.Code(1)
+		return srvutil.Code(1)
 	}
 	fmt.Fprintln(os.Stderr, "opened local copy:", local)
 	if err := openLocal(local); err != nil {
 		fmt.Fprintln(os.Stderr, "srv open:", err)
-		return clierr.Code(1)
+		return srvutil.Code(1)
 	}
 	return nil
 }
@@ -72,7 +72,7 @@ func Code(args []string, cfg *config.Config, profileOverride string) error {
 	name, profile, err := config.Resolve(cfg, profileOverride)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)
-		return clierr.Code(1)
+		return srvutil.Code(1)
 	}
 	cwd := config.GetCwd(name, profile)
 	target := cwd
@@ -85,7 +85,7 @@ func Code(args []string, cfg *config.Config, profileOverride string) error {
 	}
 	uri := "vscode-remote://ssh-remote+" + host + target
 	if code, err := exec.LookPath("code"); err == nil {
-		return clierr.Code(runLocal(code, "--folder-uri", uri))
+		return srvutil.Code(runLocal(code, "--folder-uri", uri))
 	}
 	fmt.Println("code --folder-uri", uri)
 	return nil

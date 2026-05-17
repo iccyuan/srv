@@ -7,8 +7,8 @@ import (
 	"fmt"
 	"os"
 	"sort"
-	"srv/internal/ansi"
 	"srv/internal/session"
+	"srv/internal/srvutil"
 	"strings"
 	"time"
 
@@ -99,8 +99,8 @@ func Run(items []*Item, prompt string, labels Labels) (string, bool) {
 		return "", false
 	}
 	defer term.Restore(fd, state)
-	fmt.Fprint(os.Stderr, ansi.Hide)
-	defer fmt.Fprint(os.Stderr, ansi.Show)
+	fmt.Fprint(os.Stderr, srvutil.Hide)
+	defer fmt.Fprint(os.Stderr, srvutil.Show)
 
 	kr := srvtty.NewKeyReader()
 
@@ -252,11 +252,11 @@ func drawPicker(prompt string, items []*Item, cursor int, filter string, filterM
 	w := os.Stderr
 	lines := 0
 
-	fmt.Fprintf(w, "%s%s%s\r\n", ansi.Bold+ansi.Cyan, prompt, ansi.Reset)
+	fmt.Fprintf(w, "%s%s%s\r\n", srvutil.Bold+srvutil.Cyan, prompt, srvutil.Reset)
 	lines++
 
 	if filterMode {
-		fmt.Fprintf(w, "%sFilter:%s %s_\r\n", ansi.Bold, ansi.Reset, filter)
+		fmt.Fprintf(w, "%sFilter:%s %s_\r\n", srvutil.Bold, srvutil.Reset, filter)
 		lines++
 	}
 
@@ -278,17 +278,17 @@ func drawPicker(prompt string, items []*Item, cursor int, filter string, filterM
 	for i, it := range items {
 		marker := "  "
 		if i == cursor {
-			marker = ansi.Cyan + ansi.Bold + "> " + ansi.Reset
+			marker = srvutil.Cyan + srvutil.Bold + "> " + srvutil.Reset
 		}
 		row := fmt.Sprintf("%-*s  %s", maxName, it.Name, it.Meta)
 		if it.IsPinned {
-			row += " " + ansi.Yellow + ansi.Bold + "[" + labels.Pin + "]" + ansi.Reset
+			row += " " + srvutil.Yellow + srvutil.Bold + "[" + labels.Pin + "]" + srvutil.Reset
 		}
 		if it.IsDefault {
-			row += " " + ansi.Cyan + ansi.Bold + "[" + labels.Def + "]" + ansi.Reset
+			row += " " + srvutil.Cyan + srvutil.Bold + "[" + labels.Def + "]" + srvutil.Reset
 		}
 		if i == cursor {
-			fmt.Fprintf(w, "%s%s%s%s\r\n", marker, ansi.Reverse+ansi.Bold, row, ansi.Reset)
+			fmt.Fprintf(w, "%s%s%s%s\r\n", marker, srvutil.Reverse+srvutil.Bold, row, srvutil.Reset)
 		} else {
 			fmt.Fprintf(w, "%s%s\r\n", marker, row)
 		}
@@ -299,7 +299,7 @@ func drawPicker(prompt string, items []*Item, cursor int, filter string, filterM
 	if filterMode {
 		hint = "type to filter  ENTER select  ESC exit filter  Ctrl-C cancel"
 	}
-	fmt.Fprintf(w, "%s%s%s\r\n", ansi.Dim, hint, ansi.Reset)
+	fmt.Fprintf(w, "%s%s%s\r\n", srvutil.Dim, hint, srvutil.Reset)
 	lines++
 
 	return lines

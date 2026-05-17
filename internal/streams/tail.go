@@ -5,9 +5,9 @@ import (
 	"os"
 	"os/signal"
 	"regexp"
-	"srv/internal/clierr"
 	"srv/internal/config"
 	"srv/internal/srvtty"
+	"srv/internal/srvutil"
 	"srv/internal/sshx"
 	"strconv"
 	"strings"
@@ -29,7 +29,7 @@ import (
 //     hide partial lines; doing it locally keeps line-rate latency.
 func Tail(args []string, cfg *config.Config, profileOverride string) error {
 	if len(args) == 0 {
-		return clierr.Errf(2, `usage: srv tail [-n LINES] [--grep REGEX] <remote-path>...  any remote file (auto-reconnect)
+		return srvutil.Errf(2, `usage: srv tail [-n LINES] [--grep REGEX] <remote-path>...  any remote file (auto-reconnect)
 see also:
   srv journal -u UNIT [-f]                      systemd journal for a service
   srv logs <id> [-f]                            output of a detached srv job`)
@@ -43,23 +43,23 @@ see also:
 		switch {
 		case a == "-n" || a == "--lines":
 			if i+1 >= len(args) {
-				return clierr.Errf(2, "%s requires a value", a)
+				return srvutil.Errf(2, "%s requires a value", a)
 			}
 			n, err := strconv.Atoi(args[i+1])
 			if err != nil || n < 0 {
-				return clierr.Errf(2, "bad %s value %q (want non-negative int)", a, args[i+1])
+				return srvutil.Errf(2, "bad %s value %q (want non-negative int)", a, args[i+1])
 			}
 			initial = n
 			i++
 		case strings.HasPrefix(a, "-n"):
 			n, err := strconv.Atoi(a[2:])
 			if err != nil || n < 0 {
-				return clierr.Errf(2, "bad -n value %q", a[2:])
+				return srvutil.Errf(2, "bad -n value %q", a[2:])
 			}
 			initial = n
 		case a == "--grep":
 			if i+1 >= len(args) {
-				return clierr.Errf(2, "--grep requires a value")
+				return srvutil.Errf(2, "--grep requires a value")
 			}
 			grepPat = args[i+1]
 			i++
@@ -71,21 +71,21 @@ see also:
 		}
 	}
 	if len(paths) == 0 {
-		return clierr.Errf(2, "missing remote path")
+		return srvutil.Errf(2, "missing remote path")
 	}
 
 	var re *regexp.Regexp
 	if grepPat != "" {
 		r, err := regexp.Compile(grepPat)
 		if err != nil {
-			return clierr.Errf(2, "bad regex %q: %v", grepPat, err)
+			return srvutil.Errf(2, "bad regex %q: %v", grepPat, err)
 		}
 		re = r
 	}
 
 	_, profile, err := config.Resolve(cfg, profileOverride)
 	if err != nil {
-		return clierr.Errf(1, "%v", err)
+		return srvutil.Errf(1, "%v", err)
 	}
 
 	fmt.Fprintf(os.Stderr,
@@ -261,7 +261,7 @@ func StreamWithReconnectResumable(profile *config.Profile, resumer StreamResumer
 		c, err := sshx.Dial(profile)
 		if err != nil {
 			if !sshx.IsRetryableDialErr(err) {
-				return clierr.Errf(1, "tail: dial: %v", err)
+				return srvutil.Errf(1, "tail: dial: %v", err)
 			}
 			fmt.Fprintf(os.Stderr, "srv tail: dial failed: %v (retry in %s)\n", err, backoff)
 			if !waitOrStop(backoff, stopCh) {

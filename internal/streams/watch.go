@@ -4,11 +4,10 @@ import (
 	"fmt"
 	"os"
 	"os/signal"
-	"srv/internal/ansi"
-	"srv/internal/clierr"
 	"srv/internal/config"
 	"srv/internal/remote"
 	"srv/internal/srvtty"
+	"srv/internal/srvutil"
 	"srv/internal/sshx"
 	"strconv"
 	"strings"
@@ -37,18 +36,18 @@ func Watch(args []string, cfg *config.Config, profileOverride string) error {
 		switch {
 		case a == "-n" || a == "--interval":
 			if i+1 >= len(args) {
-				return clierr.Errf(2, "%s requires a value (seconds)", a)
+				return srvutil.Errf(2, "%s requires a value (seconds)", a)
 			}
 			n, err := strconv.ParseFloat(args[i+1], 64)
 			if err != nil || n <= 0 {
-				return clierr.Errf(2, "bad %s value %q (want positive number)", a, args[i+1])
+				return srvutil.Errf(2, "bad %s value %q (want positive number)", a, args[i+1])
 			}
 			interval = time.Duration(n * float64(time.Second))
 			i++
 		case strings.HasPrefix(a, "-n"):
 			n, err := strconv.ParseFloat(a[2:], 64)
 			if err != nil || n <= 0 {
-				return clierr.Errf(2, "bad -n value %q", a[2:])
+				return srvutil.Errf(2, "bad -n value %q", a[2:])
 			}
 			interval = time.Duration(n * float64(time.Second))
 		case a == "-d" || a == "--diff":
@@ -61,13 +60,13 @@ func Watch(args []string, cfg *config.Config, profileOverride string) error {
 		}
 	}
 	if len(cmdArgs) == 0 {
-		return clierr.Errf(2, "usage: srv watch [-n SECONDS] [--diff] <command>")
+		return srvutil.Errf(2, "usage: srv watch [-n SECONDS] [--diff] <command>")
 	}
 	cmd := strings.Join(cmdArgs, " ")
 
 	profName, profile, err := config.Resolve(cfg, profileOverride)
 	if err != nil {
-		return clierr.Errf(1, "%v", err)
+		return srvutil.Errf(1, "%v", err)
 	}
 
 	stopCh := make(chan struct{})
@@ -113,11 +112,11 @@ func buildWatchFrame(cmd, profile string, interval, latency time.Duration, res *
 	var sb strings.Builder
 	now := time.Now().Format("15:04:05")
 	fmt.Fprintf(&sb, "%sEvery %s on %s%s   %s   %s$ %s%s\n\n",
-		ansi.Bold, fmtSecs(interval), profile, ansi.Reset, now,
-		ansi.Dim, cmd, ansi.Reset)
+		srvutil.Bold, fmtSecs(interval), profile, srvutil.Reset, now,
+		srvutil.Dim, cmd, srvutil.Reset)
 	if runErr != nil {
 		fmt.Fprintf(&sb, "%s[srv watch: capture failed: %v]%s\n",
-			ansi.Dim, runErr, ansi.Reset)
+			srvutil.Dim, runErr, srvutil.Reset)
 		return sb.String()
 	}
 	if res == nil {
@@ -138,7 +137,7 @@ func buildWatchFrame(cmd, profile string, interval, latency time.Duration, res *
 		sb.WriteByte('\n')
 	}
 	fmt.Fprintf(&sb, "%s[exit %d  capture %.2fs]%s\n",
-		ansi.Dim, res.ExitCode, latency.Seconds(), ansi.Reset)
+		srvutil.Dim, res.ExitCode, latency.Seconds(), srvutil.Reset)
 	return sb.String()
 }
 
@@ -156,9 +155,9 @@ func highlightDiffLines(current, prev string) string {
 		if i < len(prevLines) && prevLines[i] == line {
 			sb.WriteString(line)
 		} else {
-			sb.WriteString(ansi.Reverse)
+			sb.WriteString(srvutil.Reverse)
 			sb.WriteString(line)
-			sb.WriteString(ansi.Reset)
+			sb.WriteString(srvutil.Reset)
 		}
 		if i < len(curLines)-1 {
 			sb.WriteByte('\n')

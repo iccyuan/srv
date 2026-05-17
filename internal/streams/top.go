@@ -3,8 +3,8 @@ package streams
 import (
 	"fmt"
 	"os"
-	"srv/internal/clierr"
 	"srv/internal/config"
+	"srv/internal/srvutil"
 	"srv/internal/sshx"
 	"strconv"
 	"strings"
@@ -29,27 +29,27 @@ func Top(args []string, cfg *config.Config, profileOverride string) error {
 		switch {
 		case a == "-n" || a == "--interval":
 			if i+1 >= len(args) {
-				return clierr.Errf(2, "%s requires a value (seconds)", a)
+				return srvutil.Errf(2, "%s requires a value (seconds)", a)
 			}
 			n, err := strconv.ParseFloat(args[i+1], 64)
 			if err != nil || n <= 0 {
-				return clierr.Errf(2, "bad %s value %q", a, args[i+1])
+				return srvutil.Errf(2, "bad %s value %q", a, args[i+1])
 			}
 			interval = n
 			i++
 		case strings.HasPrefix(a, "-n"):
 			n, err := strconv.ParseFloat(a[2:], 64)
 			if err != nil || n <= 0 {
-				return clierr.Errf(2, "bad -n value %q", a[2:])
+				return srvutil.Errf(2, "bad -n value %q", a[2:])
 			}
 			interval = n
 		case a == "-w" || a == "--width":
 			if i+1 >= len(args) {
-				return clierr.Errf(2, "%s requires a value", a)
+				return srvutil.Errf(2, "%s requires a value", a)
 			}
 			n, err := strconv.Atoi(args[i+1])
 			if err != nil || n <= 0 {
-				return clierr.Errf(2, "bad %s value %q", a, args[i+1])
+				return srvutil.Errf(2, "bad %s value %q", a, args[i+1])
 			}
 			width = n
 			i++
@@ -66,7 +66,7 @@ func Top(args []string, cfg *config.Config, profileOverride string) error {
 
 	_, profile, err := config.Resolve(cfg, profileOverride)
 	if err != nil {
-		return clierr.Errf(1, "%v", err)
+		return srvutil.Errf(1, "%v", err)
 	}
 
 	parts := []string{"top", "-b", "-c", "-w", strconv.Itoa(width), "-d", strconv.FormatFloat(interval, 'f', -1, 64)}

@@ -9,8 +9,7 @@ import (
 	"time"
 
 	"srv/internal/i18n"
-	"srv/internal/srvio"
-	"srv/internal/srvpath"
+	"srv/internal/srvutil"
 )
 
 // Path helpers (Dir / Config / Sessions / Jobs) live in
@@ -234,9 +233,9 @@ func (p *Profile) GetDialBackoff() time.Duration {
 	return d
 }
 
-// SchemaVersion moved to srv/internal/srvio.SchemaVersion. Existing
+// SchemaVersion moved to srv/internal/srvutil.SchemaVersion. Existing
 // references in this file (and config.json `_version` handling) read
-// srvio.SchemaVersion directly.
+// srvutil.SchemaVersion directly.
 
 // Config maps to ~/.srv/config.json.
 //
@@ -390,31 +389,31 @@ func New() *Config {
 
 // Load returns nil with nil error when the file doesn't exist yet.
 func Load() (*Config, error) {
-	data, err := os.ReadFile(srvpath.Config())
+	data, err := os.ReadFile(srvutil.Config())
 	if err != nil {
 		if os.IsNotExist(err) {
 			return nil, nil
 		}
-		return nil, fmt.Errorf("read %s: %w", srvpath.Config(), err)
+		return nil, fmt.Errorf("read %s: %w", srvutil.Config(), err)
 	}
 	cfg := New()
 	if err := json.Unmarshal(data, cfg); err != nil {
-		return nil, fmt.Errorf("parse %s: %w", srvpath.Config(), err)
+		return nil, fmt.Errorf("parse %s: %w", srvutil.Config(), err)
 	}
 	if cfg.Profiles == nil {
 		cfg.Profiles = map[string]*Profile{}
 	}
-	srvio.WarnIfNewerSchema(srvpath.Config(), cfg.Version)
+	srvutil.WarnIfNewerSchema(srvutil.Config(), cfg.Version)
 	return cfg, nil
 }
 
 func Save(cfg *Config) error {
-	cfg.Version = srvio.SchemaVersion
-	return srvio.WriteJSONFile(srvpath.Config(), cfg)
+	cfg.Version = srvutil.SchemaVersion
+	return srvutil.WriteJSONFile(srvutil.Config(), cfg)
 }
 
-// srvio.WriteJSONFile / srvio.WriteFileAtomic / srvio.WarnIfNewerSchema / srvio.SchemaVersion
-// live in srv/internal/srvio now. Use srvio.WriteJSONFile etc.
+// srvutil.WriteJSONFile / srvutil.WriteFileAtomic / srvutil.WarnIfNewerSchema / srvutil.SchemaVersion
+// live in srv/internal/srvio now. Use srvutil.WriteJSONFile etc.
 
 // Resolve picks the active profile by precedence:
 // override > session pin > $SRV_PROFILE > .srv-project pin > config default.

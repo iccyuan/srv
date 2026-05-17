@@ -1,11 +1,10 @@
-package mcpstats
+package mcplog
 
 import (
 	"encoding/json"
 	"fmt"
 	"sort"
-	"srv/internal/ansi"
-	"srv/internal/clierr"
+	"srv/internal/srvutil"
 	"strings"
 	"time"
 )
@@ -50,27 +49,27 @@ func Cmd(args []string) error {
 		case a == "--since" && i+1 < len(args):
 			d, err := time.ParseDuration(args[i+1])
 			if err != nil {
-				return clierr.Errf(2, "bad --since %q: %v", args[i+1], err)
+				return srvutil.Errf(2, "bad --since %q: %v", args[i+1], err)
 			}
 			since = d
 			i++
 		case strings.HasPrefix(a, "--since="):
 			d, err := time.ParseDuration(strings.TrimPrefix(a, "--since="))
 			if err != nil {
-				return clierr.Errf(2, "bad --since %q: %v", a, err)
+				return srvutil.Errf(2, "bad --since %q: %v", a, err)
 			}
 			since = d
 		case a == "--top" && i+1 < len(args):
 			n, err := strconvPositive(args[i+1])
 			if err != nil {
-				return clierr.Errf(2, "bad --top %q: %v", args[i+1], err)
+				return srvutil.Errf(2, "bad --top %q: %v", args[i+1], err)
 			}
 			topLimit = n
 			i++
 		case a == "--calls" && i+1 < len(args):
 			n, err := strconvPositive(args[i+1])
 			if err != nil {
-				return clierr.Errf(2, "bad --calls %q: %v", args[i+1], err)
+				return srvutil.Errf(2, "bad --calls %q: %v", args[i+1], err)
 			}
 			callsLimit = n
 			i++
@@ -78,7 +77,7 @@ func Cmd(args []string) error {
 			fmt.Println(helpText)
 			return nil
 		case strings.HasPrefix(a, "-"):
-			return clierr.Errf(2, "unknown flag %q (try --help)", a)
+			return srvutil.Errf(2, "unknown flag %q (try --help)", a)
 		default:
 			toolFilter = a
 		}
@@ -86,7 +85,7 @@ func Cmd(args []string) error {
 
 	if clearFlag {
 		if err := Clear(); err != nil {
-			return clierr.Errf(1, "clear: %v", err)
+			return srvutil.Errf(1, "clear: %v", err)
 		}
 		fmt.Println("stats cleared")
 		return nil
@@ -110,7 +109,7 @@ func Cmd(args []string) error {
 	}
 	calls, err := LoadCalls(cutoff)
 	if err != nil {
-		return clierr.Errf(1, "load: %v", err)
+		return srvutil.Errf(1, "load: %v", err)
 	}
 	if len(calls) == 0 {
 		if jsonOut {
@@ -207,7 +206,7 @@ func renderAggregate(calls []Call, windowLabel string, topLimit int, jsonOut boo
 		// hidden token spend. 3x is the boundary where "noisy"
 		// becomes "investigate now".
 		if a.P95OutBytes > 0 && a.MaxOutBytes > a.P95OutBytes*3 {
-			line = ansi.Red + line + ansi.Reset
+			line = srvutil.Red + line + srvutil.Reset
 		}
 		fmt.Println(line)
 	}
@@ -233,7 +232,7 @@ func renderAggregate(calls []Call, windowLabel string, topLimit int, jsonOut boo
 	}
 	if hasOutlier {
 		fmt.Println()
-		fmt.Println(ansi.Dim + "red rows: MAX OUT > 3x P95 OUT -- the average call is fine but a few are pathological; check `srv mcp stats <tool>` to find them." + ansi.Reset)
+		fmt.Println(srvutil.Dim + "red rows: MAX OUT > 3x P95 OUT -- the average call is fine but a few are pathological; check `srv mcp stats <tool>` to find them." + srvutil.Reset)
 	}
 	return nil
 }
@@ -278,7 +277,7 @@ func renderAggregateByCmd(calls []Call, windowLabel string, topLimit int, jsonOu
 			a.Errors,
 		)
 		if a.P95OutBytes > 0 && a.MaxOutBytes > a.P95OutBytes*3 {
-			line = ansi.Red + line + ansi.Reset
+			line = srvutil.Red + line + srvutil.Reset
 		}
 		fmt.Println(line)
 	}

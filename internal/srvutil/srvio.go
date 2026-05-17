@@ -6,15 +6,13 @@
 // Each feature module (config / session / jobs) calls these instead
 // of duplicating the marshal / temp-file / rename dance, and stays
 // free of cross-package coupling on package main.
-package srvio
+package srvutil
 
 import (
 	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
-
-	"srv/internal/srvutil"
 )
 
 // SchemaVersion identifies the current on-disk JSON shape across all
@@ -60,7 +58,7 @@ func WriteFileAtomic(path string, data []byte, perm os.FileMode) error {
 	}
 	tmp := filepath.Join(
 		filepath.Dir(path),
-		fmt.Sprintf(".%s.%d.%s.tmp", filepath.Base(path), os.Getpid(), srvutil.RandHex4()),
+		fmt.Sprintf(".%s.%d.%s.tmp", filepath.Base(path), os.Getpid(), RandHex4()),
 	)
 	if err := os.WriteFile(tmp, data, perm); err != nil {
 		return err

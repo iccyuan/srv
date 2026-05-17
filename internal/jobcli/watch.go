@@ -6,12 +6,11 @@ import (
 	"os"
 	"os/signal"
 	"sort"
-	"srv/internal/ansi"
-	"srv/internal/clierr"
 	"srv/internal/config"
 	"srv/internal/jobs"
 	"srv/internal/remote"
 	"srv/internal/srvtty"
+	"srv/internal/srvutil"
 	"strconv"
 	"strings"
 	"syscall"
@@ -32,11 +31,11 @@ func CmdJobsWatch(args []string, cfg *config.Config, profileOverride string) err
 		switch {
 		case a == "-n" || a == "--interval":
 			if i+1 >= len(args) {
-				return clierr.Errf(2, "%s requires a duration like 2s / 500ms", a)
+				return srvutil.Errf(2, "%s requires a duration like 2s / 500ms", a)
 			}
 			d, err := time.ParseDuration(args[i+1])
 			if err != nil || d < 100*time.Millisecond {
-				return clierr.Errf(2, "bad interval %q (min 100ms)", args[i+1])
+				return srvutil.Errf(2, "bad interval %q (min 100ms)", args[i+1])
 			}
 			interval = d
 			i++
@@ -44,7 +43,7 @@ func CmdJobsWatch(args []string, cfg *config.Config, profileOverride string) err
 			v := strings.TrimPrefix(a, "--interval=")
 			d, err := time.ParseDuration(v)
 			if err != nil || d < 100*time.Millisecond {
-				return clierr.Errf(2, "bad interval %q (min 100ms)", v)
+				return srvutil.Errf(2, "bad interval %q (min 100ms)", v)
 			}
 			interval = d
 		}
@@ -76,8 +75,8 @@ func CmdJobsWatch(args []string, cfg *config.Config, profileOverride string) err
 	}
 	kr := srvtty.NewKeyReader()
 
-	fmt.Print(ansi.Hide)
-	defer fmt.Print(ansi.Show)
+	fmt.Print(srvutil.Hide)
+	defer fmt.Print(srvutil.Show)
 	prevLines := 0
 	for {
 		frame := renderJobsTable(cfg, profileOverride, true)
@@ -157,14 +156,14 @@ func renderJobsTable(cfg *config.Config, profileOverride string, ttyColor bool) 
 		"", "ID", "PID", "PROFILE", "STARTED", "CMD"))
 	for _, j := range rs {
 		mark := "?"
-		col := ansi.Yellow
+		col := srvutil.Yellow
 		if alive, ok := live[j.ID]; ok {
 			if alive {
 				mark = "+"
-				col = ansi.Green
+				col = srvutil.Green
 			} else {
 				mark = "x"
-				col = ansi.Red
+				col = srvutil.Red
 			}
 		}
 		cmd := j.Cmd
@@ -177,7 +176,7 @@ func renderJobsTable(cfg *config.Config, profileOverride string, ttyColor bool) 
 		}
 		if ttyColor {
 			b.WriteString(fmt.Sprintf("%s%-2s%s  %-10s  %-7s  %-10s  %-19s  %s\n",
-				col, mark, ansi.Reset, j.ID, strconv.Itoa(j.Pid), j.Profile, started, cmd))
+				col, mark, srvutil.Reset, j.ID, strconv.Itoa(j.Pid), j.Profile, started, cmd))
 		} else {
 			b.WriteString(fmt.Sprintf("%-2s  %-10s  %-7s  %-10s  %-19s  %s\n",
 				mark, j.ID, strconv.Itoa(j.Pid), j.Profile, started, cmd))

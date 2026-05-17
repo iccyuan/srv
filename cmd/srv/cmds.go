@@ -16,7 +16,6 @@ import (
 	"srv/internal/remote"
 	"srv/internal/runwrap"
 	"srv/internal/session"
-	"srv/internal/srvpath"
 	"srv/internal/srvtty"
 	"srv/internal/srvutil"
 	"srv/internal/sshx"
@@ -66,7 +65,7 @@ func cmdInit(cfg *config.Config) error {
 	if err := config.Save(cfg); err != nil {
 		return exitErr(1, "error: %v", err)
 	}
-	fmt.Printf("saved profile %q to %s\n", name, srvpath.Config())
+	fmt.Printf("saved profile %q to %s\n", name, srvutil.Config())
 	fmt.Println()
 	fmt.Println("next: verify connectivity with `srv check` (it'll tell you exactly")
 	fmt.Println("      what to fix if your key isn't in the server's authorized_keys).")

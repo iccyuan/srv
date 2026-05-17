@@ -5,11 +5,11 @@ import (
 	"path/filepath"
 	"strings"
 
-	"srv/internal/srvpath"
+	"srv/internal/srvutil"
 )
 
 // ListPresets enumerates user-supplied theme files in
-// srvpath.ColorPresetsDir() and returns their basenames (extension
+// srvutil.ColorPresetsDir() and returns their basenames (extension
 // stripped). Accepts .sh / .itermcolors / .toml. When several files
 // share a basename, only one entry appears -- LoadPresetBody
 // resolves the precedence at use time.
@@ -19,7 +19,7 @@ import (
 // is the only caller; previously it shared a file with the session
 // helpers, which had nothing to do with theme assets.
 func ListPresets() ([]string, error) {
-	dir := srvpath.ColorPresetsDir()
+	dir := srvutil.ColorPresetsDir()
 	entries, err := os.ReadDir(dir)
 	if err != nil {
 		if os.IsNotExist(err) {

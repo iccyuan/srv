@@ -4,9 +4,9 @@ import (
 	"errors"
 	"fmt"
 	"sort"
-	"srv/internal/clierr"
 	"srv/internal/config"
 	"srv/internal/daemon"
+	"srv/internal/srvutil"
 	"srv/internal/sshx"
 	"time"
 )
@@ -26,7 +26,7 @@ import (
 //	srv tunnel add critical 5432:db:5432 --independent
 func cmdAdd(args []string, cfg *config.Config, profileOverride string) error {
 	if len(args) < 2 {
-		return clierr.Errf(2, "usage: srv tunnel add <name> [-R] <spec> [-P <profile>] [--autostart] [--on-demand] [--independent]")
+		return srvutil.Errf(2, "usage: srv tunnel add <name> [-R] <spec> [-P <profile>] [--autostart] [--on-demand] [--independent]")
 	}
 	name := args[0]
 	rest := args[1:]
@@ -52,7 +52,7 @@ func cmdAdd(args []string, cfg *config.Config, profileOverride string) error {
 			def.Independent = true
 		case a == "-P" || a == "--profile":
 			if i+1 >= len(rest) {
-				return clierr.Errf(2, "%s requires a value", a)
+				return srvutil.Errf(2, "%s requires a value", a)
 			}
 			def.Profile = rest[i+1]
 			i++
@@ -60,24 +60,24 @@ func cmdAdd(args []string, cfg *config.Config, profileOverride string) error {
 			def.Profile = a[10:]
 		default:
 			if specSeen {
-				return clierr.Errf(2, "unexpected arg %q (already have spec %q)", a, def.Spec)
+				return srvutil.Errf(2, "unexpected arg %q (already have spec %q)", a, def.Spec)
 			}
 			if _, _, _, err := sshx.ParseTunnelSpec(a); err != nil {
-				return clierr.Errf(2, "bad spec %q: %v", a, err)
+				return srvutil.Errf(2, "bad spec %q: %v", a, err)
 			}
 			def.Spec = a
 			specSeen = true
 		}
 	}
 	if !specSeen {
-		return clierr.Errf(2, "missing port spec (e.g. 8080 or 5432:db:5432)")
+		return srvutil.Errf(2, "missing port spec (e.g. 8080 or 5432:db:5432)")
 	}
 	if def.OnDemand && def.Type == "remote" {
-		return clierr.Errf(2, "--on-demand is local-direction only (reverse tunnels need the SSH session up to register the remote listener)")
+		return srvutil.Errf(2, "--on-demand is local-direction only (reverse tunnels need the SSH session up to register the remote listener)")
 	}
 	if def.Profile != "" {
 		if _, ok := cfg.Profiles[def.Profile]; !ok {
-			return clierr.Errf(1, "profile %q not found", def.Profile)
+			return srvutil.Errf(1, "profile %q not found", def.Profile)
 		}
 	}
 
@@ -107,11 +107,11 @@ func cmdAdd(args []string, cfg *config.Config, profileOverride string) error {
 
 func cmdRemove(args []string, cfg *config.Config) error {
 	if len(args) < 1 {
-		return clierr.Errf(2, "usage: srv tunnel remove <name>")
+		return srvutil.Errf(2, "usage: srv tunnel remove <name>")
 	}
 	name := args[0]
 	if _, ok := cfg.Tunnels[name]; !ok {
-		return clierr.Errf(1, "tunnel %q not found", name)
+		return srvutil.Errf(1, "tunnel %q not found", name)
 	}
 	delete(cfg.Tunnels, name)
 	if err := config.Save(cfg); err != nil {
@@ -174,12 +174,12 @@ func cmdList(cfg *config.Config) error {
 
 func cmdShow(args []string, cfg *config.Config) error {
 	if len(args) < 1 {
-		return clierr.Errf(2, "usage: srv tunnel show <name>")
+		return srvutil.Errf(2, "usage: srv tunnel show <name>")
 	}
 	name := args[0]
 	def, ok := cfg.Tunnels[name]
 	if !ok {
-		return clierr.Errf(1, "tunnel %q not found", name)
+		return srvutil.Errf(1, "tunnel %q not found", name)
 	}
 	fmt.Printf("name:      %s\n", name)
 	fmt.Printf("type:      %s\n", def.Type)
@@ -209,20 +209,20 @@ func cmdShow(args []string, cfg *config.Config) error {
 // where the listener landed; we render it for the user.
 func cmdUp(args []string) error {
 	if len(args) < 1 {
-		return clierr.Errf(2, "usage: srv tunnel up <name>")
+		return srvutil.Errf(2, "usage: srv tunnel up <name>")
 	}
 	name := args[0]
 	cfg, err := config.Load()
 	if err != nil || cfg == nil {
-		return clierr.Errf(1, "load config: %v", err)
+		return srvutil.Errf(1, "load config: %v", err)
 	}
 	def, ok := cfg.Tunnels[name]
 	if !ok {
-		return clierr.Errf(1, "tunnel %q not defined", name)
+		return srvutil.Errf(1, "tunnel %q not defined", name)
 	}
 	info, err := hostFor(def).Up(name, def)
 	if err != nil {
-		return clierr.Errf(1, "%v", err)
+		return srvutil.Errf(1, "%v", err)
 	}
 	if info.Listen != "" && info.PID > 0 {
 		fmt.Printf("tunnel %q up (listening on %s, pid %d)\n", name, info.Listen, info.PID)
@@ -243,7 +243,7 @@ func cmdUp(args []string) error {
 // be hosted.
 func cmdDown(args []string) error {
 	if len(args) < 1 {
-		return clierr.Errf(2, "usage: srv tunnel down <name>")
+		return srvutil.Errf(2, "usage: srv tunnel down <name>")
 	}
 	name := args[0]
 	stopped := false
@@ -264,9 +264,9 @@ func cmdDown(args []string) error {
 	}
 	if !stopped {
 		if lastErr != nil {
-			return clierr.Errf(1, "tunnel down %s: %v", name, lastErr)
+			return srvutil.Errf(1, "tunnel down %s: %v", name, lastErr)
 		}
-		return clierr.Errf(1, "tunnel %q not running anywhere", name)
+		return srvutil.Errf(1, "tunnel %q not running anywhere", name)
 	}
 	fmt.Printf("tunnel %q stopped\n", name)
 	return nil

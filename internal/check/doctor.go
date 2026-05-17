@@ -6,7 +6,7 @@
 // Reused by the MCP `doctor` tool. The list of probes is
 // intentionally lightweight (~10 ms total): doctor should be safe
 // to run repeatedly from a tight feedback loop.
-package doctor
+package check
 
 import (
 	"encoding/json"
@@ -14,19 +14,18 @@ import (
 	"net"
 	"os"
 	"os/exec"
-	"srv/internal/clierr"
 	"srv/internal/config"
 	"srv/internal/daemon"
-	"srv/internal/srvpath"
+	"srv/internal/srvutil"
 )
 
-// Cmd implements `srv doctor [--json]`. Returns exit 1 when any
+// DoctorCmd implements `srv doctor [--json]`. Returns exit 1 when any
 // probe failed.
 //
 // version is the build's main.Version; passed in because the
 // version string lives in package main and we'd rather not pull a
 // build-info import in here.
-func Cmd(args []string, cfg *config.Config, profileOverride, version string) error {
+func DoctorCmd(args []string, cfg *config.Config, profileOverride, version string) error {
 	asJSON := len(args) > 0 && args[0] == "--json"
 	rows, ok := Checks(cfg, profileOverride, version)
 	for _, row := range rows {
@@ -55,7 +54,7 @@ func Cmd(args []string, cfg *config.Config, profileOverride, version string) err
 	if ok {
 		return nil
 	}
-	return clierr.Code(1)
+	return srvutil.Code(1)
 }
 
 // Checks runs the doctor probe set and returns the structured rows
@@ -71,7 +70,7 @@ func Checks(cfg *config.Config, profileOverride, version string) ([]map[string]a
 		}
 	}
 	check("version", true, version)
-	check("config", true, srvpath.Config())
+	check("config", true, srvutil.Config())
 	check("profiles", len(cfg.Profiles) > 0, fmt.Sprintf("%d configured", len(cfg.Profiles)))
 	if cfg.DefaultProfile != "" {
 		check("default profile", true, cfg.DefaultProfile)

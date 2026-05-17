@@ -21,7 +21,7 @@
 // File is JSON-Lines (one record per line), append-only. A typical
 // session writes ~50-200 lines; a long-running deployment can
 // accumulate thousands. `srv stats --clear` wipes it.
-package mcpstats
+package mcplog
 
 import (
 	"bufio"
@@ -29,7 +29,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
-	"srv/internal/srvpath"
+	"srv/internal/srvutil"
 	"strings"
 	"sync"
 	"time"
@@ -148,7 +148,7 @@ var appendMu sync.Mutex
 // pathFn returns the stats-file path. Overridable in tests so the
 // round-trip suite can write to t.TempDir without touching the
 // user's actual ~/.srv/mcp-stats.jsonl.
-var pathFn = func() string { return srvpath.MCPStats() }
+var pathFn = func() string { return srvutil.MCPStats() }
 
 // maxFileBytes is the soft cap before AppendCall rotates. Picked at
 // 10 MiB: at ~200 B/record that's roughly 50k calls -- a deeply

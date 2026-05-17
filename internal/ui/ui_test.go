@@ -1,11 +1,11 @@
 package ui
 
 import (
-	"srv/internal/ansi"
 	"srv/internal/config"
 	"srv/internal/daemon"
 	"srv/internal/jobs"
 	"srv/internal/mcplog"
+	"srv/internal/srvutil"
 	"strings"
 	"testing"
 	"time"
@@ -361,7 +361,7 @@ func TestDetailPanelScrollsWithinWindow(t *testing.T) {
 }
 
 func TestDemoHeaderAndStatusPanel(t *testing.T) {
-	st := &uiState{demoMode: true, statusMsg: ansi.Green + "ok" + ansi.Reset}
+	st := &uiState{demoMode: true, statusMsg: srvutil.Green + "ok" + srvutil.Reset}
 	withDashboardWidth(96, func() {
 		var header strings.Builder
 		panelHeader(&header, st)
@@ -543,13 +543,13 @@ func TestAltScreenPatchOnlyWritesChangedLines(t *testing.T) {
 }
 
 func TestConfirmColorReflectsAction(t *testing.T) {
-	if got := confirmColor("tunnel up db"); got != ansi.Bold+ansi.Green {
+	if got := confirmColor("tunnel up db"); got != srvutil.Bold+srvutil.Green {
 		t.Fatalf("tunnel up color=%q", got)
 	}
-	if got := confirmColor("tunnel down db"); got != ansi.Bold+ansi.Yellow {
+	if got := confirmColor("tunnel down db"); got != srvutil.Bold+srvutil.Yellow {
 		t.Fatalf("tunnel down color=%q", got)
 	}
-	if got := confirmColor("kill job"); got != ansi.Bold+ansi.Red {
+	if got := confirmColor("kill job"); got != srvutil.Bold+srvutil.Red {
 		t.Fatalf("kill color=%q", got)
 	}
 }

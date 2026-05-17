@@ -7,7 +7,7 @@ import (
 	"sort"
 	"srv/internal/config"
 	"srv/internal/daemon"
-	"srv/internal/srvpath"
+	"srv/internal/srvutil"
 	"srv/internal/sshx"
 	"strings"
 	"time"
@@ -75,7 +75,7 @@ func InvalidatePathCache(profile string) {
 }
 
 func pathCacheFile(profile string) string {
-	return filepath.Join(srvpath.Dir(), "cache", "remote-path-"+sanitizeProfile(profile)+".txt")
+	return filepath.Join(srvutil.Dir(), "cache", "remote-path-"+sanitizeProfile(profile)+".txt")
 }
 
 // sanitizeProfile replaces filesystem-hostile chars in a profile name

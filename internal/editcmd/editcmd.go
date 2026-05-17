@@ -19,9 +19,9 @@ import (
 	"path/filepath"
 	"runtime"
 	"srv/internal/check"
-	"srv/internal/clierr"
 	"srv/internal/config"
 	"srv/internal/remote"
+	"srv/internal/srvutil"
 	"srv/internal/sshx"
 	"srv/internal/transfer"
 	"strings"
@@ -41,14 +41,14 @@ import (
 func Cmd(args []string, cfg *config.Config, profileOverride string) error {
 	if len(args) == 0 {
 		fmt.Fprintln(os.Stderr, "usage: srv edit <remote_path>")
-		return clierr.Code(2)
+		return srvutil.Code(2)
 	}
 	rpath := args[0]
 
 	name, profile, err := config.Resolve(cfg, profileOverride)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)
-		return clierr.Code(1)
+		return srvutil.Code(1)
 	}
 	cwd := config.GetCwd(name, profile)
 	abs := remote.ResolvePath(rpath, cwd)
@@ -56,29 +56,29 @@ func Cmd(args []string, cfg *config.Config, profileOverride string) error {
 	c, err := sshx.Dial(profile)
 	if err != nil {
 		check.PrintDialError(err, profile)
-		return clierr.Code(255)
+		return srvutil.Code(255)
 	}
 	defer c.Close()
 
 	resolved, err := c.ExpandRemoteHome(abs)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "srv edit:", err)
-		return clierr.Code(1)
+		return srvutil.Code(1)
 	}
 
 	s, err := c.SFTP()
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "srv edit: sftp:", err)
-		return clierr.Code(1)
+		return srvutil.Code(1)
 	}
 	st, err := s.Stat(resolved)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "srv edit: stat:", err)
-		return clierr.Code(1)
+		return srvutil.Code(1)
 	}
 	if st.IsDir() {
 		fmt.Fprintln(os.Stderr, "srv edit: target is a directory:", resolved)
-		return clierr.Code(1)
+		return srvutil.Code(1)
 	}
 	remoteSize := st.Size()
 	remoteMod := st.ModTime()
@@ -86,7 +86,7 @@ func Cmd(args []string, cfg *config.Config, profileOverride string) error {
 	tmpDir, err := os.MkdirTemp("", "srv-edit-")
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "srv edit: mkdtemp:", err)
-		return clierr.Code(1)
+		return srvutil.Code(1)
 	}
 	defer os.RemoveAll(tmpDir)
 
@@ -98,19 +98,19 @@ func Cmd(args []string, cfg *config.Config, profileOverride string) error {
 
 	if err := transfer.Download(c, resolved, localPath); err != nil {
 		fmt.Fprintln(os.Stderr, "srv edit: download:", err)
-		return clierr.Code(1)
+		return srvutil.Code(1)
 	}
 
 	before, err := os.Stat(localPath)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "srv edit:", err)
-		return clierr.Code(1)
+		return srvutil.Code(1)
 	}
 
 	editor, leadArgs, err := pickEditor()
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "srv edit:", err)
-		return clierr.Code(1)
+		return srvutil.Code(1)
 	}
 
 	cmd := exec.Command(editor, append(leadArgs, localPath)...)
@@ -125,7 +125,7 @@ func Cmd(args []string, cfg *config.Config, profileOverride string) error {
 	after, err := os.Stat(localPath)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "srv edit: local file gone, not uploading.")
-		return clierr.Code(1)
+		return srvutil.Code(1)
 	}
 	if after.ModTime().Equal(before.ModTime()) && after.Size() == before.Size() {
 		fmt.Fprintln(os.Stderr, "srv edit: no changes; not uploading.")
@@ -135,19 +135,19 @@ func Cmd(args []string, cfg *config.Config, profileOverride string) error {
 	latest, err := s.Stat(resolved)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "srv edit: restat:", err)
-		return clierr.Code(1)
+		return srvutil.Code(1)
 	}
 	if latest.Size() != remoteSize || !latest.ModTime().Equal(remoteMod) {
 		fmt.Fprintln(os.Stderr, "srv edit: remote file changed while editing; refusing to overwrite.")
 		fmt.Fprintf(os.Stderr, "srv edit: initial size=%d mtime=%s, current size=%d mtime=%s\n",
 			remoteSize, remoteMod.Format("2006-01-02T15:04:05"),
 			latest.Size(), latest.ModTime().Format("2006-01-02T15:04:05"))
-		return clierr.Code(1)
+		return srvutil.Code(1)
 	}
 
 	if err := transfer.Upload(c, localPath, resolved); err != nil {
 		fmt.Fprintln(os.Stderr, "srv edit: upload:", err)
-		return clierr.Code(1)
+		return srvutil.Code(1)
 	}
 	fmt.Fprintf(os.Stderr, "srv edit: saved %s\n", resolved)
 	return nil

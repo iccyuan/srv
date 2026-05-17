@@ -5,8 +5,8 @@ import (
 	"net"
 	"os"
 	"os/signal"
-	"srv/internal/clierr"
 	"srv/internal/config"
+	"srv/internal/srvutil"
 	"srv/internal/sshx"
 	"strconv"
 	"syscall"
@@ -24,7 +24,7 @@ import (
 func Cmd(args []string, cfg *config.Config, profileOverride string) error {
 	if len(args) == 0 {
 		printUsage()
-		return clierr.Code(2)
+		return srvutil.Code(2)
 	}
 	switch args[0] {
 	case "add":
@@ -69,23 +69,23 @@ func cmdOneShot(args []string, cfg *config.Config, profileOverride string) error
 	}
 	if len(args) == 0 {
 		printUsage()
-		return clierr.Code(2)
+		return srvutil.Code(2)
 	}
 	lp, rh, rp, err := sshx.ParseTunnelSpec(args[0])
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "srv tunnel:", err)
-		return clierr.Code(2)
+		return srvutil.Code(2)
 	}
 
 	_, profile, err := config.Resolve(cfg, profileOverride)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)
-		return clierr.Code(1)
+		return srvutil.Code(1)
 	}
 	c, err := sshx.Dial(profile)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "srv tunnel: ssh dial %s: %v\n", profile.Host, err)
-		return clierr.Code(255)
+		return srvutil.Code(255)
 	}
 	defer c.Close()
 
@@ -120,7 +120,7 @@ func cmdOneShot(args []string, cfg *config.Config, profileOverride string) error
 	}
 	if runErr != nil {
 		fmt.Fprintln(os.Stderr, "srv tunnel:", runErr)
-		return clierr.Code(1)
+		return srvutil.Code(1)
 	}
 	return nil
 }

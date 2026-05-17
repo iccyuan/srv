@@ -25,14 +25,13 @@ import (
 	"os"
 	"path/filepath"
 	"srv/internal/atrest"
-	"srv/internal/srvio"
-	"srv/internal/srvpath"
+	"srv/internal/srvutil"
 	"strings"
 	"time"
 )
 
-// Path returns the on-disk history file. Honors $SRV_HOME via srvpath.
-func Path() string { return filepath.Join(srvpath.Dir(), "history.jsonl") }
+// Path returns the on-disk history file. Honors $SRV_HOME via srvutil.
+func Path() string { return filepath.Join(srvutil.Dir(), "history.jsonl") }
 
 // MaxEntries caps the JSONL file size by rotating once it exceeds
 // the limit (oldest entries dropped). 20k lines is roughly 2-4 MB,
@@ -74,7 +73,7 @@ func Append(e Entry) {
 	// Append-only mode + file lock keeps two shells from interleaving
 	// half-written JSON lines. The lock has a 1s budget; we'd rather
 	// drop the entry than block a `srv ls` call.
-	release, _ := srvio.FileLock(path)
+	release, _ := srvutil.FileLock(path)
 	if release != nil {
 		defer release()
 	}
@@ -140,7 +139,7 @@ func maybeRotate(path string) {
 		buf.Write(b)
 		buf.WriteByte('\n')
 	}
-	_ = srvio.WriteFileAtomic(path, []byte(buf.String()), 0o600)
+	_ = srvutil.WriteFileAtomic(path, []byte(buf.String()), 0o600)
 }
 
 // ReadAll loads every entry in chronological order. Used by the CLI

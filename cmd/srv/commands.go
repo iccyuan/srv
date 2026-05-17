@@ -3,12 +3,10 @@ package main
 import (
 	"fmt"
 	"srv/internal/check"
-	"srv/internal/clierr"
 	"srv/internal/completion"
 	"srv/internal/config"
 	"srv/internal/daemon"
 	"srv/internal/diff"
-	"srv/internal/doctor"
 	"srv/internal/editcmd"
 	"srv/internal/group"
 	"srv/internal/guard"
@@ -19,11 +17,12 @@ import (
 	"srv/internal/jobcli"
 	"srv/internal/launcher"
 	"srv/internal/mcp"
-	"srv/internal/mcpstats"
+	"srv/internal/mcplog"
 	"srv/internal/project"
 	"srv/internal/prune"
 	"srv/internal/recipe"
 	"srv/internal/session"
+	"srv/internal/srvutil"
 	"srv/internal/streams"
 	"srv/internal/sudo"
 	"srv/internal/syncx"
@@ -127,7 +126,7 @@ var subcommands = []subcommand{
 	{name: "pwd", handler: func(c cmdCtx) error { return cmdPwd(c.cfg, c.profileOverride) }},
 	{name: "status", handler: func(c cmdCtx) error { return cmdStatus(c.cfg, c.profileOverride) }},
 	{name: "check", handler: func(c cmdCtx) error { return check.Cmd(c.args, c.cfg, c.profileOverride) }},
-	{name: "doctor", handler: func(c cmdCtx) error { return doctor.Cmd(c.args, c.cfg, c.profileOverride, Version) }},
+	{name: "doctor", handler: func(c cmdCtx) error { return check.DoctorCmd(c.args, c.cfg, c.profileOverride, Version) }},
 	{name: "shell", handler: func(c cmdCtx) error { return cmdShell(c.cfg, c.profileOverride) }},
 	{name: "env", handler: func(c cmdCtx) error { return cmdEnv(c.args, c.cfg, c.profileOverride) }},
 
@@ -164,11 +163,11 @@ var subcommands = []subcommand{
 		}
 		switch c.args[0] {
 		case "stats":
-			return mcpstats.Cmd(c.args[1:])
+			return mcplog.Cmd(c.args[1:])
 		case "replay":
 			return mcp.ReplayCmd(c.args[1:])
 		}
-		return clierr.Errf(2, "unknown mcp subcommand %q (try: serve, stats, replay)", c.args[0])
+		return srvutil.Errf(2, "unknown mcp subcommand %q (try: serve, stats, replay)", c.args[0])
 	}},
 	{name: "guard", handler: func(c cmdCtx) error { return guard.Cmd(c.args) }},
 	{name: "color", handler: func(c cmdCtx) error { return theme.Cmd(c.args) }},

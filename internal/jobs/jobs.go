@@ -16,8 +16,7 @@ import (
 	"strings"
 	"sync"
 
-	"srv/internal/srvio"
-	"srv/internal/srvpath"
+	"srv/internal/srvutil"
 )
 
 // Record is one detached-job entry. Mirrors what spawnDetached
@@ -65,26 +64,26 @@ type File struct {
 // + empty result, never a fatal: jobs.json is convenience state, not
 // authoritative, and a crash here would block every CLI invocation.
 func Load() *File {
-	data, err := os.ReadFile(srvpath.Jobs())
+	data, err := os.ReadFile(srvutil.Jobs())
 	j := &File{}
 	if err != nil {
 		return j
 	}
 	if err := json.Unmarshal(data, j); err != nil {
-		fmt.Fprintf(os.Stderr, "warning: %s is not valid JSON: %v\n", srvpath.Jobs(), err)
+		fmt.Fprintf(os.Stderr, "warning: %s is not valid JSON: %v\n", srvutil.Jobs(), err)
 		return j
 	}
 	if j.Jobs == nil {
 		j.Jobs = []*Record{}
 	}
-	srvio.WarnIfNewerSchema(srvpath.Jobs(), j.Version)
+	srvutil.WarnIfNewerSchema(srvutil.Jobs(), j.Version)
 	return j
 }
 
 // Save persists the file, stamping the current schema version.
 func Save(j *File) error {
-	j.Version = srvio.SchemaVersion
-	return srvio.WriteJSONFile(srvpath.Jobs(), j)
+	j.Version = srvutil.SchemaVersion
+	return srvutil.WriteJSONFile(srvutil.Jobs(), j)
 }
 
 // Find resolves an id-or-prefix to its Record. Returns nil when no

@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"os"
 	"regexp"
-	"srv/internal/clierr"
+	"srv/internal/srvutil"
 	"strconv"
 	"strings"
 )
@@ -30,7 +30,7 @@ func Cmd(args []string, currentSession string) error {
 			return nil
 		case "clear":
 			if err := Clear(); err != nil {
-				return clierr.Errf(1, "error: %v", err)
+				return srvutil.Errf(1, "error: %v", err)
 			}
 			fmt.Println("cleared")
 			return nil
@@ -43,7 +43,7 @@ func Cmd(args []string, currentSession string) error {
 	opts := parseFlags(args)
 	entries, err := ReadAll()
 	if err != nil {
-		return clierr.Errf(1, "error: %v", err)
+		return srvutil.Errf(1, "error: %v", err)
 	}
 
 	// Filtering.

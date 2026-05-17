@@ -7,8 +7,6 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
-	"srv/internal/ansi"
-	"srv/internal/clierr"
 	"srv/internal/config"
 	"srv/internal/daemon"
 	"srv/internal/history"
@@ -16,8 +14,8 @@ import (
 	"srv/internal/mcplog"
 	"srv/internal/project"
 	"srv/internal/remote"
-	"srv/internal/srvpath"
 	"srv/internal/srvtty"
+	"srv/internal/srvutil"
 	"srv/internal/tunnel"
 	"strconv"
 	"strings"
@@ -269,7 +267,7 @@ func Cmd(args []string, cfg *config.Config, profileOverride string) error {
 	fd := int(os.Stdin.Fd())
 	state, err := term.MakeRaw(fd)
 	if err != nil {
-		return clierr.Errf(1, "tty raw mode: %v", err)
+		return srvutil.Errf(1, "tty raw mode: %v", err)
 	}
 	defer term.Restore(fd, state)
 
@@ -284,8 +282,8 @@ func Cmd(args []string, cfg *config.Config, profileOverride string) error {
 	// rustnet: type the command, the whole window becomes the UI;
 	// quit, the shell is exactly as you left it. Cursor stays hidden
 	// for the duration.
-	fmt.Fprint(os.Stderr, altScreenOn+ansi.Hide+clearScreen+cursorHome)
-	defer fmt.Fprint(os.Stderr, ansi.Show+altScreenOff)
+	fmt.Fprint(os.Stderr, altScreenOn+srvutil.Hide+clearScreen+cursorHome)
+	defer fmt.Fprint(os.Stderr, srvutil.Show+altScreenOff)
 
 	kr := srvtty.NewKeyReader()
 	st := &uiState{
@@ -520,7 +518,7 @@ func buildSelectableRows(tunnels []string, jobs []*jobs.Record, mcpRecent []mcpl
 // treated as "start from defaults" -- the user shouldn't have to
 // delete the file just to recover from a bad write.
 func loadUIState() persistedUIState {
-	data, err := os.ReadFile(srvpath.UIState())
+	data, err := os.ReadFile(srvutil.UIState())
 	if err != nil {
 		return persistedUIState{}
 	}
@@ -553,7 +551,7 @@ func saveUIState(st *uiState) {
 	if err != nil {
 		return
 	}
-	path := srvpath.UIState()
+	path := srvutil.UIState()
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return
 	}
@@ -857,9 +855,9 @@ func handleUIKey(b byte, st *uiState, jobs []*jobs.Record, tunnelNames []string,
 		if yes && action != nil {
 			msg, err := action()
 			if err != nil {
-				st.statusMsg = ansi.Red + title + " failed: " + err.Error() + ansi.Reset
+				st.statusMsg = srvutil.Red + title + " failed: " + err.Error() + srvutil.Reset
 			} else {
-				st.statusMsg = ansi.Green + title + ": " + msg + ansi.Reset
+				st.statusMsg = srvutil.Green + title + ": " + msg + srvutil.Reset
 			}
 			st.detailMode = false
 			// Destructive action just touched jobs/tunnels on disk;
@@ -867,7 +865,7 @@ func handleUIKey(b byte, st *uiState, jobs []*jobs.Record, tunnelNames []string,
 			// instead of waiting up to snapTTL.
 			st.snapAt = time.Time{}
 		} else {
-			st.statusMsg = ansi.Dim + title + " cancelled" + ansi.Reset
+			st.statusMsg = srvutil.Dim + title + " cancelled" + srvutil.Reset
 		}
 		st.statusSetAt = time.Now()
 		return true
@@ -1959,7 +1957,7 @@ func overlayLineSegment(base, popup string, width int) string {
 	}
 	left := (width - popupWidth) / 2
 	rightStart := left + popupWidth
-	return ansiLeft(base, left) + ansi.Reset + popup + ansi.Reset + ansiRight(base, rightStart, width)
+	return ansiLeft(base, left) + srvutil.Reset + popup + srvutil.Reset + ansiRight(base, rightStart, width)
 }
 
 func centerAnsiContent(content string, width int) string {
@@ -2056,7 +2054,7 @@ func ansiSlice(s string, start, end int) string {
 	// line, via the terminal's persistent SGR) render in default
 	// attributes.
 	if sawEsc {
-		out.WriteString(ansi.Reset)
+		out.WriteString(srvutil.Reset)
 	}
 	return out.String()
 }
@@ -2383,9 +2381,9 @@ func panelStats(sb *strings.Builder, st *uiState, targetHeight int) {
 	}
 	boxTop(sb, "stats · local")
 	if st == nil || (len(st.cpuHistory) == 0 && len(st.memHistory) == 0) {
-		hint := ansi.Dim + "collecting local samples..." + ansi.Reset
+		hint := srvutil.Dim + "collecting local samples..." + srvutil.Reset
 		if st != nil && st.statsErr != "" {
-			hint = ansi.Red + "stats unavailable: " + st.statsErr + ansi.Reset
+			hint = srvutil.Red + "stats unavailable: " + st.statsErr + srvutil.Reset
 		}
 		boxLine(sb, hint)
 		for i := 0; i < targetHeight-3; i++ {
@@ -2424,17 +2422,17 @@ func panelStats(sb *strings.Builder, st *uiState, targetHeight int) {
 
 	emitChart(sb, st.cpuHistory, cpuH, chartW, statsLabel{
 		title:     "CPU",
-		titleAnsi: ansi.Cyan + ansi.Bold,
+		titleAnsi: srvutil.Cyan + srvutil.Bold,
 		latestFmt: "%4.2f",
 		unit:      "load avg",
-		lineAnsi:  ansi.Cyan,
+		lineAnsi:  srvutil.Cyan,
 	})
 	emitChart(sb, st.memHistory, memH, chartW, statsLabel{
 		title:     "MEM",
-		titleAnsi: ansi.Magenta + ansi.Bold,
+		titleAnsi: srvutil.Magenta + srvutil.Bold,
 		latestFmt: "%4.1f%%",
 		unit:      "use%",
-		lineAnsi:  ansi.Magenta,
+		lineAnsi:  srvutil.Magenta,
 	})
 	boxBottom(sb)
 }
@@ -2455,7 +2453,7 @@ type statsLabel struct {
 func emitChart(sb *strings.Builder, values []float64, height, chartW int, lbl statsLabel) {
 	if len(values) == 0 {
 		boxLine(sb, fmt.Sprintf("%s%s%s %s(no samples)%s",
-			lbl.titleAnsi, lbl.title, ansi.Reset, ansi.Dim, ansi.Reset))
+			lbl.titleAnsi, lbl.title, srvutil.Reset, srvutil.Dim, srvutil.Reset))
 		for i := 0; i < height; i++ {
 			boxLine(sb, "")
 		}
@@ -2474,15 +2472,15 @@ func emitChart(sb *strings.Builder, values []float64, height, chartW int, lbl st
 	}
 
 	header := fmt.Sprintf("%s%s%s "+lbl.latestFmt+"  %srange "+lbl.latestFmt+".."+lbl.latestFmt+"  %s%s",
-		lbl.titleAnsi, lbl.title, ansi.Reset,
+		lbl.titleAnsi, lbl.title, srvutil.Reset,
 		latest,
-		ansi.Dim, vmin, vmax,
-		lbl.unit, ansi.Reset)
+		srvutil.Dim, vmin, vmax,
+		lbl.unit, srvutil.Reset)
 	boxLine(sb, header)
 
 	rows := brailleChart(values, height, chartW, vmin, vmax)
 	for _, r := range rows {
-		boxLine(sb, lbl.lineAnsi+r+ansi.Reset)
+		boxLine(sb, lbl.lineAnsi+r+srvutil.Reset)
 	}
 }
 
@@ -2624,7 +2622,7 @@ func detailScrollHint(st *uiState, hidden int) string {
 
 func boxedMetaLine(msg string) string {
 	return fmt.Sprintf("%s│%s %s %s│%s",
-		boxColor(false), ansi.Reset, padAnsiRight(dashMeta(msg), dashboardContentWidth), boxColor(false), ansi.Reset)
+		boxColor(false), srvutil.Reset, padAnsiRight(dashMeta(msg), dashboardContentWidth), boxColor(false), srvutil.Reset)
 }
 
 // splitDashboardLines splits panel output and drops the trailing
@@ -2647,9 +2645,9 @@ func splitDashboardLines(s string) []string {
 // spot rather than every box* call site.
 func boxColor(focused bool) string {
 	if focused {
-		return ansi.Cyan + ansi.Bold
+		return srvutil.Cyan + srvutil.Bold
 	}
-	return ansi.Dim
+	return srvutil.Dim
 }
 
 // boxTop / boxBottom / boxLine are the default-unfocused variants
@@ -2667,9 +2665,9 @@ func boxLine(sb *strings.Builder, content string) { boxLineFocused(sb, content, 
 // formatting. So the uppercasing and styling happen here instead.
 func boxTopWithDimSuffix(sb *strings.Builder, title, suffix string) {
 	border := boxColor(false)
-	label := " " + ansi.Reset + ansi.Bold + ansi.Cyan + strings.ToUpper(title) + ansi.Reset
+	label := " " + srvutil.Reset + srvutil.Bold + srvutil.Cyan + strings.ToUpper(title) + srvutil.Reset
 	if suffix != "" {
-		label += "  " + ansi.Dim + strings.ToUpper(suffix) + ansi.Reset
+		label += "  " + srvutil.Dim + strings.ToUpper(suffix) + srvutil.Reset
 	}
 	label += border + " "
 	labelVis := visualWidth(label)
@@ -2687,7 +2685,7 @@ func boxTopWithDimSuffix(sb *strings.Builder, title, suffix string) {
 		strings.Repeat("─", left),
 		label,
 		strings.Repeat("─", right),
-		border, ansi.Reset)
+		border, srvutil.Reset)
 }
 
 // boxTopWithHint draws the same panel header as boxTop but also
@@ -2701,14 +2699,14 @@ func boxTopWithHint(sb *strings.Builder, title, hint string, focused bool) {
 	if title != "" {
 		t := strings.ToUpper(title)
 		if focused {
-			label = " " + ansi.Reset + ansi.Bold + ansi.Yellow + "▸ " + t + ansi.Reset + border + " "
+			label = " " + srvutil.Reset + srvutil.Bold + srvutil.Yellow + "▸ " + t + srvutil.Reset + border + " "
 		} else {
-			label = " " + ansi.Reset + ansi.Bold + ansi.Cyan + t + ansi.Reset + border + " "
+			label = " " + srvutil.Reset + srvutil.Bold + srvutil.Cyan + t + srvutil.Reset + border + " "
 		}
 	}
 	hintLabel := ""
 	if hint != "" {
-		hintLabel = " " + ansi.Reset + ansi.Dim + hint + ansi.Reset + border + " "
+		hintLabel = " " + srvutil.Reset + srvutil.Dim + hint + srvutil.Reset + border + " "
 	}
 	labelVis := visualWidth(label)
 	hintVis := visualWidth(hintLabel)
@@ -2727,7 +2725,7 @@ func boxTopWithHint(sb *strings.Builder, title, hint string, focused bool) {
 		label,
 		strings.Repeat("─", right),
 		hintLabel,
-		border, ansi.Reset)
+		border, srvutil.Reset)
 }
 
 // boxTopFocused draws a rounded-corner panel header with the title
@@ -2740,9 +2738,9 @@ func boxTopFocused(sb *strings.Builder, title string, focused bool) {
 	if title != "" {
 		t := strings.ToUpper(title)
 		if focused {
-			label = " " + ansi.Reset + ansi.Bold + ansi.Yellow + "▸ " + t + ansi.Reset + border + " "
+			label = " " + srvutil.Reset + srvutil.Bold + srvutil.Yellow + "▸ " + t + srvutil.Reset + border + " "
 		} else {
-			label = " " + ansi.Reset + ansi.Bold + ansi.Cyan + t + ansi.Reset + border + " "
+			label = " " + srvutil.Reset + srvutil.Bold + srvutil.Cyan + t + srvutil.Reset + border + " "
 		}
 	}
 	labelVis := visualWidth(label)
@@ -2760,12 +2758,12 @@ func boxTopFocused(sb *strings.Builder, title string, focused bool) {
 		strings.Repeat("─", left),
 		label,
 		strings.Repeat("─", right),
-		border, ansi.Reset)
+		border, srvutil.Reset)
 }
 
 func boxBottomFocused(sb *strings.Builder, focused bool) {
 	border := boxColor(focused)
-	fmt.Fprintf(sb, "%s╰%s╯%s\n", border, strings.Repeat("─", dashboardWidth-2), ansi.Reset)
+	fmt.Fprintf(sb, "%s╰%s╯%s\n", border, strings.Repeat("─", dashboardWidth-2), srvutil.Reset)
 }
 
 func boxLineFocused(sb *strings.Builder, content string, focused bool) {
@@ -2779,7 +2777,7 @@ func boxLineFocused(sb *strings.Builder, content string, focused bool) {
 		content = ellipsisAnsiRight(content, dashboardContentWidth)
 	}
 	fmt.Fprintf(sb, "%s│%s %s %s│%s\n",
-		border, ansi.Reset, padAnsiRight(content, dashboardContentWidth), border, ansi.Reset)
+		border, srvutil.Reset, padAnsiRight(content, dashboardContentWidth), border, srvutil.Reset)
 }
 
 func padAnsiRight(s string, width int) string {
@@ -2818,7 +2816,7 @@ func truncatePlainDisplay(s string, width int) string {
 }
 
 func kvLine(key, value string) string {
-	return ansi.Dim + fmt.Sprintf("%-9s", strings.ToUpper(key)+":") + ansi.Reset + " " + value
+	return srvutil.Dim + fmt.Sprintf("%-9s", strings.ToUpper(key)+":") + srvutil.Reset + " " + value
 }
 
 func kvPair(leftLabel, leftValue, rightLabel, rightValue string) string {
@@ -2841,34 +2839,34 @@ func panelHeader(sb *strings.Builder, st *uiState) {
 	// demoMode (real data vs sample). The label captures whichever
 	// dominates -- demo wins because the user explicitly asked for
 	// it; snapshot is the fallback for non-TTY.
-	mode := ansi.Dim + "live terminal view" + ansi.Reset
+	mode := srvutil.Dim + "live terminal view" + srvutil.Reset
 	switch {
 	case st != nil && st.demoMode:
-		mode = ansi.Yellow + ansi.Bold + "DEMO" + ansi.Reset + ansi.Dim + " simulated data" + ansi.Reset
+		mode = srvutil.Yellow + srvutil.Bold + "DEMO" + srvutil.Reset + srvutil.Dim + " simulated data" + srvutil.Reset
 	case isSnapshotMode(st):
-		mode = ansi.Dim + "one-shot snapshot" + ansi.Reset
+		mode = srvutil.Dim + "one-shot snapshot" + srvutil.Reset
 	}
 	boxLine(sb, fitInlineParts(
 		[]string{
-			ansi.Bold + ansi.Magenta + "SRV UI" + ansi.Reset,
-			ansi.Dim + "remote control dashboard" + ansi.Reset,
+			srvutil.Bold + srvutil.Magenta + "SRV UI" + srvutil.Reset,
+			srvutil.Dim + "remote control dashboard" + srvutil.Reset,
 		},
 		mode,
 		dashboardContentWidth,
 	))
 	if isSnapshotMode(st) {
-		boxLine(sb, ansi.Dim+"snapshot mode (no tty)"+ansi.Reset)
+		boxLine(sb, srvutil.Dim+"snapshot mode (no tty)"+srvutil.Reset)
 		boxBottom(sb)
 		return
 	}
 	if !st.compact {
 		boxLine(sb, fmt.Sprintf("keys  %stab/h/l%s pane   %s↑/↓%s row   %sCtrl-U/D%s detail   %s/%s filter   %s?%s help   %sq%s quit",
-			ansi.Yellow+ansi.Bold, ansi.Reset,
-			ansi.Yellow+ansi.Bold, ansi.Reset,
-			ansi.Yellow+ansi.Bold, ansi.Reset,
-			ansi.Yellow+ansi.Bold, ansi.Reset,
-			ansi.Yellow+ansi.Bold, ansi.Reset,
-			ansi.Yellow+ansi.Bold, ansi.Reset))
+			srvutil.Yellow+srvutil.Bold, srvutil.Reset,
+			srvutil.Yellow+srvutil.Bold, srvutil.Reset,
+			srvutil.Yellow+srvutil.Bold, srvutil.Reset,
+			srvutil.Yellow+srvutil.Bold, srvutil.Reset,
+			srvutil.Yellow+srvutil.Bold, srvutil.Reset,
+			srvutil.Yellow+srvutil.Bold, srvutil.Reset))
 	}
 	boxBottom(sb)
 }
@@ -2882,7 +2880,7 @@ func panelProfiles(sb *strings.Builder, cfg *config.Config, st *uiState) {
 	names := profileNamesSorted(cfg)
 	if len(names) == 0 {
 		boxTop(sb, "profiles")
-		boxLine(sb, ansi.Dim+"no profiles configured"+ansi.Reset)
+		boxLine(sb, srvutil.Dim+"no profiles configured"+srvutil.Reset)
 		boxBottom(sb)
 		return
 	}
@@ -2902,8 +2900,8 @@ func panelProfiles(sb *strings.Builder, cfg *config.Config, st *uiState) {
 
 	boxTop(sb, fmt.Sprintf("profiles %d", len(names)))
 	boxLine(sb, fmt.Sprintf("%sactive%s %d    %sidle%s %d",
-		ansi.Dim, ansi.Reset, activeCount,
-		ansi.Dim, ansi.Reset, len(names)-activeCount))
+		srvutil.Dim, srvutil.Reset, activeCount,
+		srvutil.Dim, srvutil.Reset, len(names)-activeCount))
 
 	maxName := 0
 	for _, n := range names {
@@ -2946,11 +2944,11 @@ func panelProfiles(sb *strings.Builder, cfg *config.Config, st *uiState) {
 			n := names[idx]
 			var dot, label string
 			if active[n] {
-				dot = ansi.Green + ansi.Bold + "● " + ansi.Reset
-				label = ansi.Yellow + ansi.Bold + n + ansi.Reset
+				dot = srvutil.Green + srvutil.Bold + "● " + srvutil.Reset
+				label = srvutil.Yellow + srvutil.Bold + n + srvutil.Reset
 			} else {
-				dot = ansi.Dim + "○ " + ansi.Reset
-				label = ansi.Dim + n + ansi.Reset
+				dot = srvutil.Dim + "○ " + srvutil.Reset
+				label = srvutil.Dim + n + srvutil.Reset
 			}
 			cell := dot + padAnsiRight(label, cellW-marker)
 			line.WriteString(cell)
@@ -2958,7 +2956,7 @@ func panelProfiles(sb *strings.Builder, cfg *config.Config, st *uiState) {
 		boxLine(sb, strings.TrimRight(line.String(), " "))
 	}
 	if visible < len(names) {
-		boxLine(sb, ansi.Dim+fmt.Sprintf("... %d more (use `srv ls` to view all)", len(names)-visible)+ansi.Reset)
+		boxLine(sb, srvutil.Dim+fmt.Sprintf("... %d more (use `srv ls` to view all)", len(names)-visible)+srvutil.Reset)
 	}
 	boxBottom(sb)
 }
@@ -2983,7 +2981,7 @@ func profileNamesSorted(cfg *config.Config) []string {
 // it overflows `width`. Used by the single-line panels so a long path
 // or profile-list shrinks instead of wrapping.
 func fitInlineParts(parts []string, tail string, width int) string {
-	sep := ansi.Dim + " · " + ansi.Reset
+	sep := srvutil.Dim + " · " + srvutil.Reset
 	body := strings.Join(parts, sep)
 	tailW := visualWidth(tail)
 	bodyW := visualWidth(body)
@@ -3055,7 +3053,7 @@ func ellipsisAnsiRight(s string, w int) string {
 		i += size
 	}
 	out.WriteString("...")
-	out.WriteString(ansi.Reset)
+	out.WriteString(srvutil.Reset)
 	return out.String()
 }
 
@@ -3079,17 +3077,17 @@ func panelDaemon(sb *strings.Builder, st *uiState) {
 		resp = fetchDaemonStatusForUI()
 	}
 	if resp == nil {
-		boxLine(sb, dashStatus("stopped", ansi.Dim))
+		boxLine(sb, dashStatus("stopped", srvutil.Dim))
 		boxBottom(sb)
 		return
 	}
 	parts := []string{
-		dashStatus("running", ansi.Green),
-		ansi.Dim + "up " + ansi.Reset + fmtDuration(time.Duration(resp.Uptime)*time.Second),
-		ansi.Dim + "pooled " + ansi.Reset + strconv.Itoa(len(resp.Profiles)),
+		dashStatus("running", srvutil.Green),
+		srvutil.Dim + "up " + srvutil.Reset + fmtDuration(time.Duration(resp.Uptime)*time.Second),
+		srvutil.Dim + "pooled " + srvutil.Reset + strconv.Itoa(len(resp.Profiles)),
 	}
 	if len(resp.Profiles) > 0 {
-		parts = append(parts, ansi.Cyan+strings.Join(resp.Profiles, ", ")+ansi.Reset)
+		parts = append(parts, srvutil.Cyan+strings.Join(resp.Profiles, ", ")+srvutil.Reset)
 	}
 	boxLine(sb, fitInlineParts(parts, "", dashboardContentWidth))
 	boxBottom(sb)
@@ -3139,7 +3137,7 @@ func panelOverview(sb *strings.Builder, cfg *config.Config, jobs []*jobs.Record,
 }
 
 func overviewItem(label, value string) string {
-	return ansi.Dim + strings.ToUpper(label) + ":" + ansi.Reset + " " + value
+	return srvutil.Dim + strings.ToUpper(label) + ":" + srvutil.Reset + " " + value
 }
 
 func compactOverviewLine(parts ...string) string {
@@ -3169,7 +3167,7 @@ func panelGroups(sb *strings.Builder, cfg *config.Config, st *uiState) {
 		// panelTunnels above. The hint points at the command that
 		// would populate this view.
 		boxTop(sb, "groups 0")
-		boxLine(sb, ansi.Dim+"no profile groups  (try: srv group set <name> <profile...>)"+ansi.Reset)
+		boxLine(sb, srvutil.Dim+"no profile groups  (try: srv group set <name> <profile...>)"+srvutil.Reset)
 		boxBottom(sb)
 		return
 	}
@@ -3191,16 +3189,16 @@ func panelGroups(sb *strings.Builder, cfg *config.Config, st *uiState) {
 		title += fmt.Sprintf("  showing %d/%d", limit, len(names))
 	}
 	boxTop(sb, title)
-	boxLine(sb, ansi.Dim+"NAME          SIZE  MEMBERS"+ansi.Reset)
-	boxLine(sb, ansi.Dim+strings.Repeat("-", dashboardContentWidth)+ansi.Reset)
+	boxLine(sb, srvutil.Dim+"NAME          SIZE  MEMBERS"+srvutil.Reset)
+	boxLine(sb, srvutil.Dim+strings.Repeat("-", dashboardContentWidth)+srvutil.Reset)
 	for i := 0; i < limit; i++ {
 		n := names[i]
 		members := cfg.Groups[n]
 		boxLine(sb, fmt.Sprintf("%-12s  %s%2d%s  %s",
-			dashName(n), ansi.Magenta+ansi.Bold, len(members), ansi.Reset, ansi.Cyan+fitPlain(strings.Join(members, ", "), 56)+ansi.Reset))
+			dashName(n), srvutil.Magenta+srvutil.Bold, len(members), srvutil.Reset, srvutil.Cyan+fitPlain(strings.Join(members, ", "), 56)+srvutil.Reset))
 	}
 	if limit < len(names) {
-		boxLine(sb, ansi.Dim+fmt.Sprintf("... %d more (resize terminal or use `srv group list`)", len(names)-limit)+ansi.Reset)
+		boxLine(sb, srvutil.Dim+fmt.Sprintf("... %d more (resize terminal or use `srv group list`)", len(names)-limit)+srvutil.Reset)
 	}
 	boxBottom(sb)
 }
@@ -3216,7 +3214,7 @@ func panelTunnels(sb *strings.Builder, cfg *config.Config, names []string, st *u
 		// also gives the user a discoverability hint (`srv tunnel
 		// add ...`) right where they'd look for tunnels.
 		boxTopWithHint(sb, "tunnels 0", "space toggle  x remove", focused)
-		boxLineFocused(sb, ansi.Dim+"no saved tunnels  (try: srv tunnel add <name> <port>)"+ansi.Reset, focused)
+		boxLineFocused(sb, srvutil.Dim+"no saved tunnels  (try: srv tunnel add <name> <port>)"+srvutil.Reset, focused)
 		boxBottomFocused(sb, focused)
 		return
 	}
@@ -3259,47 +3257,47 @@ func panelTunnels(sb *strings.Builder, cfg *config.Config, names []string, st *u
 		}
 	}
 	boxTopWithHint(sb, title, "space toggle  x remove", focused)
-	boxLineFocused(sb, ansi.Dim+"  "+padAnsiRight("NAME", nameW)+"  "+padAnsiRight("TYPE", typeW)+"  SPEC / STATE"+ansi.Reset, focused)
-	boxLineFocused(sb, ansi.Dim+strings.Repeat("-", dashboardContentWidth)+ansi.Reset, focused)
+	boxLineFocused(sb, srvutil.Dim+"  "+padAnsiRight("NAME", nameW)+"  "+padAnsiRight("TYPE", typeW)+"  SPEC / STATE"+srvutil.Reset, focused)
+	boxLineFocused(sb, srvutil.Dim+strings.Repeat("-", dashboardContentWidth)+srvutil.Reset, focused)
 	for i := start; i < end; i++ {
 		n := names[i]
 		def := cfg.Tunnels[n]
-		status := dashStatus("stopped", ansi.Dim)
+		status := dashStatus("stopped", srvutil.Dim)
 		extra := ""
 		errMsg := ""
 		if a, ok := active[n]; ok {
-			status = dashStatus("running", ansi.Green)
+			status = dashStatus("running", srvutil.Green)
 			extra = " listen=" + a.Listen
 		} else if msg, ok := errs[n]; ok {
-			status = dashStatus("failed", ansi.Red)
+			status = dashStatus("failed", srvutil.Red)
 			errMsg = msg
 		}
 		flag := ""
 		if def.Autostart {
-			flag += " " + dashStatus("autostart", ansi.Cyan)
+			flag += " " + dashStatus("autostart", srvutil.Cyan)
 		}
 		if def.OnDemand {
 			// On-demand tunnels share the same flag-cell strip as
 			// autostart. Magenta so both flags can coexist on one
 			// row without color collisions.
-			flag += " " + dashStatus("on-demand", ansi.Magenta)
+			flag += " " + dashStatus("on-demand", srvutil.Magenta)
 		}
 		row := "  " +
 			padAnsiRight(dashName(fitPlain(n, nameW)), nameW) + "  " +
-			padAnsiRight(ansi.Magenta+fitPlain(def.Type, typeW)+ansi.Reset, typeW) + "  " +
+			padAnsiRight(srvutil.Magenta+fitPlain(def.Type, typeW)+srvutil.Reset, typeW) + "  " +
 			dashPath(fitPlain(def.Spec, specW)) + "  " +
-			status + ansi.Dim + extra + ansi.Reset + flag
+			status + srvutil.Dim + extra + srvutil.Reset + flag
 		// Selection only swaps the leading "  " gutter for a yellow
 		// `> ` cursor. We intentionally do NOT wrap the rest of the
-		// row in `ansi.Reverse` -- the columns carry their own colour
+		// row in `srvutil.Reverse` -- the columns carry their own colour
 		// coding (magenta type, cyan spec, green/red state) and
 		// inverting them turns the row into an unreadable rainbow.
 		if st != nil && st.isSelected("tunnel", i) {
-			row = ansi.Yellow + ansi.Bold + "> " + ansi.Reset + row[2:]
+			row = srvutil.Yellow + srvutil.Bold + "> " + srvutil.Reset + row[2:]
 		}
 		boxLineFocused(sb, row, focused)
 		if errMsg != "" {
-			boxLineFocused(sb, "    "+ansi.Red+fitPlain(errMsg, max(8, dashboardContentWidth-4))+ansi.Reset, focused)
+			boxLineFocused(sb, "    "+srvutil.Red+fitPlain(errMsg, max(8, dashboardContentWidth-4))+srvutil.Reset, focused)
 		}
 	}
 	boxBottomFocused(sb, focused)
@@ -3335,7 +3333,7 @@ func panelJobs(sb *strings.Builder, jobs []*jobs.Record, st *uiState) {
 		// stable regardless of detached-job state. The hint mirrors
 		// what `srv jobs` shows when nothing is running.
 		boxTopWithHint(sb, "jobs 0", "k kill", focused)
-		boxLineFocused(sb, ansi.Dim+"nothing running  (try: srv -d <cmd> to detach one)"+ansi.Reset, focused)
+		boxLineFocused(sb, srvutil.Dim+"nothing running  (try: srv -d <cmd> to detach one)"+srvutil.Reset, focused)
 		boxBottomFocused(sb, focused)
 		return
 	}
@@ -3366,16 +3364,16 @@ func panelJobs(sb *strings.Builder, jobs []*jobs.Record, st *uiState) {
 	}
 	boxTopWithHint(sb, title, "k kill", focused)
 	if len(jobs) == 0 {
-		msg := ansi.Dim + "nothing running; `srv jobs` lists completed entries" + ansi.Reset
+		msg := srvutil.Dim + "nothing running; `srv jobs` lists completed entries" + srvutil.Reset
 		if st != nil && st.filterQuery != "" {
-			msg = ansi.Dim + "no jobs match filter -- press Esc to clear" + ansi.Reset
+			msg = srvutil.Dim + "no jobs match filter -- press Esc to clear" + srvutil.Reset
 		}
 		boxLineFocused(sb, msg, focused)
 		boxBottomFocused(sb, focused)
 		return
 	}
-	boxLineFocused(sb, ansi.Dim+"  ID            PROFILE       PID       AGE"+ansi.Reset, focused)
-	boxLineFocused(sb, ansi.Dim+strings.Repeat("-", dashboardContentWidth)+ansi.Reset, focused)
+	boxLineFocused(sb, srvutil.Dim+"  ID            PROFILE       PID       AGE"+srvutil.Reset, focused)
+	boxLineFocused(sb, srvutil.Dim+strings.Repeat("-", dashboardContentWidth)+srvutil.Reset, focused)
 	for i := start; i < end; i++ {
 		j := jobs[i]
 		started := j.Started
@@ -3384,11 +3382,11 @@ func panelJobs(sb *strings.Builder, jobs []*jobs.Record, st *uiState) {
 		}
 		row := "  " +
 			padAnsiRight(dashName(truncID(j.ID)), 12) + "  " +
-			padAnsiRight(ansi.Cyan+fitPlain(j.Profile, 12)+ansi.Reset, 12) + "  " +
+			padAnsiRight(srvutil.Cyan+fitPlain(j.Profile, 12)+srvutil.Reset, 12) + "  " +
 			padAnsiRight(strconv.Itoa(j.Pid), 8) + "  " +
 			padAnsiRight(dashMeta(started), 8)
 		if st != nil && st.isSelected("job", i) {
-			row = ansi.Yellow + ansi.Bold + "> " + ansi.Reset + ansi.Reverse + row[2:] + ansi.Reset
+			row = srvutil.Yellow + srvutil.Bold + "> " + srvutil.Reset + srvutil.Reverse + row[2:] + srvutil.Reset
 		}
 		boxLineFocused(sb, row, focused)
 	}
@@ -3418,7 +3416,7 @@ func panelDetail(sb *strings.Builder, cfg *config.Config, jobs []*jobs.Record, t
 	// above never sees row.kind == "mcp"; case removed.
 	_ = mcp
 	boxTop(sb, "detail")
-	boxLine(sb, ansi.Dim+"(no row selected -- move cursor with ↑/↓)"+ansi.Reset)
+	boxLine(sb, srvutil.Dim+"(no row selected -- move cursor with ↑/↓)"+srvutil.Reset)
 	boxBottom(sb)
 }
 
@@ -3438,7 +3436,7 @@ func panelDetail(sb *strings.Builder, cfg *config.Config, jobs []*jobs.Record, t
 func panelJobDetail(sb *strings.Builder, title string, j *jobs.Record, st *uiState) {
 	boxTop(sb, title)
 	boxLine(sb, kvLine("id", dashName(j.ID)))
-	boxLine(sb, kvLine("profile", ansi.Cyan+j.Profile+ansi.Reset))
+	boxLine(sb, kvLine("profile", srvutil.Cyan+j.Profile+srvutil.Reset))
 	boxLine(sb, kvLine("pid", strconv.Itoa(j.Pid)))
 	started := j.Started
 	if t, ok := parseISOLike(j.Started); ok {
@@ -3463,10 +3461,10 @@ func panelJobDetail(sb *strings.Builder, title string, j *jobs.Record, st *uiSta
 		boxLine(sb, kvLine("finished", finished))
 	}
 	if j.Notified {
-		boxLine(sb, kvLine("notified", ansi.Green+"yes"+ansi.Reset+ansi.Dim+"  (local toast / webhook fired)"+ansi.Reset))
+		boxLine(sb, kvLine("notified", srvutil.Green+"yes"+srvutil.Reset+srvutil.Dim+"  (local toast / webhook fired)"+srvutil.Reset))
 	}
 	boxLine(sb, "")
-	boxLine(sb, ansi.Dim+"COMMAND:"+ansi.Reset)
+	boxLine(sb, srvutil.Dim+"COMMAND:"+srvutil.Reset)
 	for _, line := range wrapText(j.Cmd, dashboardContentWidth-2) {
 		boxLine(sb, "  "+line)
 	}
@@ -3475,18 +3473,18 @@ func panelJobDetail(sb *strings.Builder, title string, j *jobs.Record, st *uiSta
 	// JOBS-bottom anchor doesn't drift around as the user navigates.
 	if st != nil && st.jobLog != nil && st.jobLog.jobID == j.ID {
 		boxLine(sb, "")
-		hdr := ansi.Dim + "LOG  " + ansi.Reset + ansi.Dim + "(last " + strconv.Itoa(len(st.jobLog.lines)) + " lines)" + ansi.Reset
+		hdr := srvutil.Dim + "LOG  " + srvutil.Reset + srvutil.Dim + "(last " + strconv.Itoa(len(st.jobLog.lines)) + " lines)" + srvutil.Reset
 		if st.jobLog.fetching {
-			hdr = ansi.Dim + "LOG  fetching..." + ansi.Reset
+			hdr = srvutil.Dim + "LOG  fetching..." + srvutil.Reset
 		} else if !st.jobLog.fetchedAt.IsZero() {
 			hdr += dashMeta("  " + fmtDuration(time.Since(st.jobLog.fetchedAt)) + " ago")
 		}
 		boxLine(sb, hdr)
 		switch {
 		case st.jobLog.err != "":
-			boxLine(sb, "  "+ansi.Red+st.jobLog.err+ansi.Reset)
+			boxLine(sb, "  "+srvutil.Red+st.jobLog.err+srvutil.Reset)
 		case st.jobLog.fetching:
-			boxLine(sb, "  "+ansi.Dim+"loading remote log..."+ansi.Reset)
+			boxLine(sb, "  "+srvutil.Dim+"loading remote log..."+srvutil.Reset)
 		default:
 			// Render the *last* lines that fit so the freshest output
 			// is what the user sees. The DETAIL panel is height-bounded
@@ -3499,7 +3497,7 @@ func panelJobDetail(sb *strings.Builder, title string, j *jobs.Record, st *uiSta
 		}
 	}
 	boxLine(sb, "")
-	boxLine(sb, ansi.Dim+"press "+ansi.Yellow+ansi.Bold+"k"+ansi.Reset+ansi.Dim+" to kill   "+ansi.Yellow+ansi.Bold+"L"+ansi.Reset+ansi.Dim+" log preview"+ansi.Reset)
+	boxLine(sb, srvutil.Dim+"press "+srvutil.Yellow+srvutil.Bold+"k"+srvutil.Reset+srvutil.Dim+" to kill   "+srvutil.Yellow+srvutil.Bold+"L"+srvutil.Reset+srvutil.Dim+" log preview"+srvutil.Reset)
 	boxBottom(sb)
 }
 
@@ -3511,18 +3509,18 @@ func panelTunnelDetail(sb *strings.Builder, title, name string, cfg *config.Conf
 	def := cfg.Tunnels[name]
 	if def == nil {
 		boxTop(sb, title)
-		boxLine(sb, ansi.Red+"tunnel "+name+" not found in config"+ansi.Reset)
+		boxLine(sb, srvutil.Red+"tunnel "+name+" not found in config"+srvutil.Reset)
 		boxBottom(sb)
 		return
 	}
 	boxTop(sb, title)
 	boxLine(sb, kvLine("name", dashName(name)))
-	boxLine(sb, kvLine("type", ansi.Magenta+def.Type+ansi.Reset))
+	boxLine(sb, kvLine("type", srvutil.Magenta+def.Type+srvutil.Reset))
 	boxLine(sb, kvLine("spec", dashPath(def.Spec)))
-	boxLine(sb, kvLine("profile", ansi.Cyan+tunnelProfileLabel(def)+ansi.Reset))
+	boxLine(sb, kvLine("profile", srvutil.Cyan+tunnelProfileLabel(def)+srvutil.Reset))
 	boxLine(sb, kvLine("autostart", boolLabel(def.Autostart)))
 	if def.OnDemand {
-		boxLine(sb, kvLine("on-demand", ansi.Cyan+"yes"+ansi.Reset+ansi.Dim+"  (SSH dial deferred until first connect)"+ansi.Reset))
+		boxLine(sb, kvLine("on-demand", srvutil.Cyan+"yes"+srvutil.Reset+srvutil.Dim+"  (SSH dial deferred until first connect)"+srvutil.Reset))
 	}
 	// Pull from snapshot, same as the list view.
 	var active map[string]daemon.TunnelInfo
@@ -3534,20 +3532,20 @@ func panelTunnelDetail(sb *strings.Builder, title, name string, cfg *config.Conf
 		active, errs = tunnel.LoadStatuses()
 	}
 	if a, ok := active[name]; ok {
-		boxLine(sb, kvLine("state", dashStatus("running", ansi.Green)))
+		boxLine(sb, kvLine("state", dashStatus("running", srvutil.Green)))
 		boxLine(sb, kvLine("listen", dashPath(a.Listen)))
 	} else if msg, ok := errs[name]; ok {
-		boxLine(sb, kvLine("state", dashStatus("failed", ansi.Red)))
+		boxLine(sb, kvLine("state", dashStatus("failed", srvutil.Red)))
 		boxLine(sb, "")
-		boxLine(sb, ansi.Red+ansi.Bold+"ERROR:"+ansi.Reset)
+		boxLine(sb, srvutil.Red+srvutil.Bold+"ERROR:"+srvutil.Reset)
 		for _, line := range wrapText(msg, dashboardContentWidth-2) {
-			boxLine(sb, "  "+ansi.Red+line+ansi.Reset)
+			boxLine(sb, "  "+srvutil.Red+line+srvutil.Reset)
 		}
 	} else {
-		boxLine(sb, kvLine("state", dashStatus("stopped", ansi.Dim)))
+		boxLine(sb, kvLine("state", dashStatus("stopped", srvutil.Dim)))
 	}
 	boxLine(sb, "")
-	boxLine(sb, ansi.Dim+"press "+ansi.Yellow+ansi.Bold+"Space"+ansi.Reset+ansi.Dim+" up/down, "+ansi.Yellow+ansi.Bold+"x"+ansi.Reset+ansi.Dim+" remove"+ansi.Reset)
+	boxLine(sb, srvutil.Dim+"press "+srvutil.Yellow+srvutil.Bold+"Space"+srvutil.Reset+srvutil.Dim+" up/down, "+srvutil.Yellow+srvutil.Bold+"x"+srvutil.Reset+srvutil.Dim+" remove"+srvutil.Reset)
 	boxBottom(sb)
 }
 
@@ -3612,25 +3610,25 @@ func renderHelpPopup(sb *strings.Builder, st *uiState) {
 	if width > dashboardWidth {
 		width = dashboardWidth
 	}
-	color := ansi.Bold + ansi.Cyan
+	color := srvutil.Bold + srvutil.Cyan
 	top := "┌" + strings.Repeat("─", width-2) + "┐"
 	bot := "└" + strings.Repeat("─", width-2) + "┘"
-	fmt.Fprintf(sb, "%s%s%s\n", color, top, ansi.Reset)
-	titleCell := centerAnsiContent(color+title+ansi.Reset, width-2)
-	fmt.Fprintf(sb, "%s│%s%s%s│%s\n", color, ansi.Reset, titleCell, color, ansi.Reset)
-	fmt.Fprintf(sb, "%s│%s%s%s│%s\n", color, ansi.Reset, strings.Repeat(" ", width-2), color, ansi.Reset)
+	fmt.Fprintf(sb, "%s%s%s\n", color, top, srvutil.Reset)
+	titleCell := centerAnsiContent(color+title+srvutil.Reset, width-2)
+	fmt.Fprintf(sb, "%s│%s%s%s│%s\n", color, srvutil.Reset, titleCell, color, srvutil.Reset)
+	fmt.Fprintf(sb, "%s│%s%s%s│%s\n", color, srvutil.Reset, strings.Repeat(" ", width-2), color, srvutil.Reset)
 	for _, r := range rows {
 		// Help rows already carry colour; left-pad to 2 spaces so the
 		// box wall doesn't kiss the first glyph.
 		padded := "  " + r
 		cell := padded + strings.Repeat(" ", max(0, width-2-visualWidth(padded)))
-		fmt.Fprintf(sb, "%s│%s%s%s│%s\n", color, ansi.Reset, cell, color, ansi.Reset)
+		fmt.Fprintf(sb, "%s│%s%s%s│%s\n", color, srvutil.Reset, cell, color, srvutil.Reset)
 	}
-	fmt.Fprintf(sb, "%s│%s%s%s│%s\n", color, ansi.Reset, strings.Repeat(" ", width-2), color, ansi.Reset)
-	hint := ansi.Dim + "press any key to close" + ansi.Reset
+	fmt.Fprintf(sb, "%s│%s%s%s│%s\n", color, srvutil.Reset, strings.Repeat(" ", width-2), color, srvutil.Reset)
+	hint := srvutil.Dim + "press any key to close" + srvutil.Reset
 	cell := centerAnsiContent(hint, width-2)
-	fmt.Fprintf(sb, "%s│%s%s%s│%s\n", color, ansi.Reset, cell, color, ansi.Reset)
-	fmt.Fprintf(sb, "%s%s%s\n", color, bot, ansi.Reset)
+	fmt.Fprintf(sb, "%s│%s%s%s│%s\n", color, srvutil.Reset, cell, color, srvutil.Reset)
+	fmt.Fprintf(sb, "%s%s%s\n", color, bot, srvutil.Reset)
 }
 
 // renderHistoryPopup draws a panel showing the last N CLI commands
@@ -3648,30 +3646,30 @@ func renderHistoryPopup(sb *strings.Builder, st *uiState) {
 	if width > dashboardWidth {
 		width = dashboardWidth
 	}
-	color := ansi.Bold + ansi.Cyan
+	color := srvutil.Bold + srvutil.Cyan
 	top := "┌" + strings.Repeat("─", width-2) + "┐"
 	bot := "└" + strings.Repeat("─", width-2) + "┘"
-	fmt.Fprintf(sb, "%s%s%s\n", color, top, ansi.Reset)
+	fmt.Fprintf(sb, "%s%s%s\n", color, top, srvutil.Reset)
 	title := "command history (recent first)"
-	titleCell := centerAnsiContent(color+title+ansi.Reset, width-2)
-	fmt.Fprintf(sb, "%s│%s%s%s│%s\n", color, ansi.Reset, titleCell, color, ansi.Reset)
-	fmt.Fprintf(sb, "%s│%s%s%s│%s\n", color, ansi.Reset, strings.Repeat(" ", width-2), color, ansi.Reset)
+	titleCell := centerAnsiContent(color+title+srvutil.Reset, width-2)
+	fmt.Fprintf(sb, "%s│%s%s%s│%s\n", color, srvutil.Reset, titleCell, color, srvutil.Reset)
+	fmt.Fprintf(sb, "%s│%s%s%s│%s\n", color, srvutil.Reset, strings.Repeat(" ", width-2), color, srvutil.Reset)
 
 	entries, err := history.ReadAll()
 	rows := []string{}
 	if err != nil {
-		rows = []string{ansi.Red + "history read error: " + err.Error() + ansi.Reset}
+		rows = []string{srvutil.Red + "history read error: " + err.Error() + srvutil.Reset}
 	} else if len(entries) == 0 {
-		rows = []string{ansi.Dim + "(no history yet -- run a remote command via srv)" + ansi.Reset}
+		rows = []string{srvutil.Dim + "(no history yet -- run a remote command via srv)" + srvutil.Reset}
 	} else {
 		// Newest first.
 		for i := len(entries) - 1; i >= 0; i-- {
 			e := entries[i]
 			mark := " "
-			markColor := ansi.Green
+			markColor := srvutil.Green
 			if e.Exit != 0 {
 				mark = "!"
-				markColor = ansi.Red
+				markColor = srvutil.Red
 			}
 			when := e.Time
 			if len(when) > 19 {
@@ -3686,9 +3684,9 @@ func renderHistoryPopup(sb *strings.Builder, st *uiState) {
 				cmd = cmd[:maxCmd-3] + "..."
 			}
 			rows = append(rows, fmt.Sprintf("%s%s%s %s  %s%s%s  %s",
-				markColor, mark, ansi.Reset,
+				markColor, mark, srvutil.Reset,
 				when,
-				ansi.Dim, e.Profile, ansi.Reset,
+				srvutil.Dim, e.Profile, srvutil.Reset,
 				cmd))
 		}
 	}
@@ -3714,24 +3712,24 @@ func renderHistoryPopup(sb *strings.Builder, st *uiState) {
 	for _, r := range window {
 		padded := "  " + r
 		cell := padded + strings.Repeat(" ", max(0, width-2-visualWidth(padded)))
-		fmt.Fprintf(sb, "%s│%s%s%s│%s\n", color, ansi.Reset, cell, color, ansi.Reset)
+		fmt.Fprintf(sb, "%s│%s%s%s│%s\n", color, srvutil.Reset, cell, color, srvutil.Reset)
 	}
 	// Pad with blank rows so the popup keeps a stable height.
 	for i := len(window); i < visibleRows; i++ {
-		fmt.Fprintf(sb, "%s│%s%s%s│%s\n", color, ansi.Reset, strings.Repeat(" ", width-2), color, ansi.Reset)
+		fmt.Fprintf(sb, "%s│%s%s%s│%s\n", color, srvutil.Reset, strings.Repeat(" ", width-2), color, srvutil.Reset)
 	}
-	fmt.Fprintf(sb, "%s│%s%s%s│%s\n", color, ansi.Reset, strings.Repeat(" ", width-2), color, ansi.Reset)
-	hint := ansi.Dim + "↑/↓ or j/k scroll  ·  any other key closes  ·  q quits" + ansi.Reset
+	fmt.Fprintf(sb, "%s│%s%s%s│%s\n", color, srvutil.Reset, strings.Repeat(" ", width-2), color, srvutil.Reset)
+	hint := srvutil.Dim + "↑/↓ or j/k scroll  ·  any other key closes  ·  q quits" + srvutil.Reset
 	cell := centerAnsiContent(hint, width-2)
-	fmt.Fprintf(sb, "%s│%s%s%s│%s\n", color, ansi.Reset, cell, color, ansi.Reset)
-	fmt.Fprintf(sb, "%s%s%s\n", color, bot, ansi.Reset)
+	fmt.Fprintf(sb, "%s│%s%s%s│%s\n", color, srvutil.Reset, cell, color, srvutil.Reset)
+	fmt.Fprintf(sb, "%s%s%s\n", color, bot, srvutil.Reset)
 }
 
 // helpRows returns the cheatsheet lines, ordered with the rows most
 // relevant to the current focus first.
 func helpRows(st *uiState) []string {
 	yk := func(k, desc string) string {
-		return ansi.Yellow + ansi.Bold + k + ansi.Reset + "  " + desc
+		return srvutil.Yellow + srvutil.Bold + k + srvutil.Reset + "  " + desc
 	}
 	global := []string{
 		yk("tab/h/l", "switch focused pane"),
@@ -3751,22 +3749,22 @@ func helpRows(st *uiState) []string {
 	switch focus {
 	case "tunnel":
 		perPane = []string{
-			ansi.Dim + "tunnel pane:" + ansi.Reset,
+			srvutil.Dim + "tunnel pane:" + srvutil.Reset,
 			yk("space", "toggle tunnel up / down"),
 			yk("x", "remove tunnel definition"),
 		}
 	case "job":
 		perPane = []string{
-			ansi.Dim + "job pane:" + ansi.Reset,
+			srvutil.Dim + "job pane:" + srvutil.Reset,
 			yk("k", "send SIGTERM to selected job"),
 			yk("L", "preview last log lines in DETAIL"),
 		}
 	default:
 		perPane = []string{
-			ansi.Dim + "no pane focused -- press tab" + ansi.Reset,
+			srvutil.Dim + "no pane focused -- press tab" + srvutil.Reset,
 		}
 	}
-	rows := append([]string{ansi.Dim + "global:" + ansi.Reset}, global...)
+	rows := append([]string{srvutil.Dim + "global:" + srvutil.Reset}, global...)
 	rows = append(rows, "")
 	rows = append(rows, perPane...)
 	return rows
@@ -3798,52 +3796,52 @@ func renderConfirmPopup(sb *strings.Builder, c *uiConfirm) {
 	bot := "└" + strings.Repeat("─", width-2) + "┘"
 	color := confirmColor(c.title)
 	title := fitPlain(c.title, max(8, width-4))
-	fmt.Fprintf(sb, "%s%s%s\n", color, top, ansi.Reset)
-	titleCell := centerAnsiContent(color+title+ansi.Reset, width-2)
+	fmt.Fprintf(sb, "%s%s%s\n", color, top, srvutil.Reset)
+	titleCell := centerAnsiContent(color+title+srvutil.Reset, width-2)
 	fmt.Fprintf(sb, "%s│%s%s%s│%s\n",
-		color, ansi.Reset,
+		color, srvutil.Reset,
 		titleCell,
-		color, ansi.Reset)
+		color, srvutil.Reset)
 	fmt.Fprintf(sb, "%s│%s%s%s│%s\n",
-		color, ansi.Reset,
+		color, srvutil.Reset,
 		strings.Repeat(" ", width-2),
-		color, ansi.Reset)
+		color, srvutil.Reset)
 	for _, line := range c.body {
 		line = fitPlain(line, max(8, width-4))
 		lineCell := centerAnsiContent(line, width-2)
 		fmt.Fprintf(sb, "%s│%s%s%s│%s\n",
-			color, ansi.Reset,
+			color, srvutil.Reset,
 			lineCell,
-			color, ansi.Reset)
+			color, srvutil.Reset)
 	}
 	fmt.Fprintf(sb, "%s│%s%s%s│%s\n",
-		color, ansi.Reset,
+		color, srvutil.Reset,
 		strings.Repeat(" ", width-2),
-		color, ansi.Reset)
-	choice := ansi.Yellow + ansi.Bold + "[Y]" + ansi.Reset + " confirm    " +
-		ansi.Yellow + ansi.Bold + "[N/Esc]" + ansi.Reset + " cancel"
+		color, srvutil.Reset)
+	choice := srvutil.Yellow + srvutil.Bold + "[Y]" + srvutil.Reset + " confirm    " +
+		srvutil.Yellow + srvutil.Bold + "[N/Esc]" + srvutil.Reset + " cancel"
 	choiceWidth := visualWidth("[Y] confirm    [N/Esc] cancel")
 	if choiceWidth > width-3 {
-		choice = ansi.Yellow + ansi.Bold + "[Y]" + ansi.Reset + " ok  " +
-			ansi.Yellow + ansi.Bold + "[N]" + ansi.Reset + " cancel"
+		choice = srvutil.Yellow + srvutil.Bold + "[Y]" + srvutil.Reset + " ok  " +
+			srvutil.Yellow + srvutil.Bold + "[N]" + srvutil.Reset + " cancel"
 		choiceWidth = visualWidth("[Y] ok  [N] cancel")
 	}
 	choiceCell := centerAnsiContent(choice, width-2)
 	fmt.Fprintf(sb, "%s│%s%s%s│%s\n",
-		color, ansi.Reset,
+		color, srvutil.Reset,
 		choiceCell,
-		color, ansi.Reset)
-	fmt.Fprintf(sb, "%s%s%s\n", color, bot, ansi.Reset)
+		color, srvutil.Reset)
+	fmt.Fprintf(sb, "%s%s%s\n", color, bot, srvutil.Reset)
 }
 
 func confirmColor(title string) string {
 	switch {
 	case strings.HasPrefix(title, "tunnel up "):
-		return ansi.Bold + ansi.Green
+		return srvutil.Bold + srvutil.Green
 	case strings.HasPrefix(title, "tunnel down "):
-		return ansi.Bold + ansi.Yellow
+		return srvutil.Bold + srvutil.Yellow
 	default:
-		return ansi.Bold + ansi.Red
+		return srvutil.Bold + srvutil.Red
 	}
 }
 
@@ -3918,11 +3916,11 @@ func min(a, b int) int {
 func renderJobDetail(j *jobs.Record, st *uiState) string {
 	var sb strings.Builder
 	fmt.Fprintf(&sb, "%sJOB DETAIL%s  %s%s%s\n",
-		ansi.Bold+ansi.Magenta, ansi.Reset, ansi.Dim, j.ID, ansi.Reset)
-	fmt.Fprintf(&sb, "%s%s%s\n\n", ansi.Dim, dashboardRule, ansi.Reset)
+		srvutil.Bold+srvutil.Magenta, srvutil.Reset, srvutil.Dim, j.ID, srvutil.Reset)
+	fmt.Fprintf(&sb, "%s%s%s\n\n", srvutil.Dim, dashboardRule, srvutil.Reset)
 
 	dashField(&sb, "id", dashName(j.ID))
-	dashField(&sb, "profile", ansi.Cyan+j.Profile+ansi.Reset)
+	dashField(&sb, "profile", srvutil.Cyan+j.Profile+srvutil.Reset)
 	dashField(&sb, "pid", strconv.Itoa(j.Pid))
 	started := j.Started
 	if t, ok := parseISOLike(j.Started); ok {
@@ -3936,7 +3934,7 @@ func renderJobDetail(j *jobs.Record, st *uiState) string {
 		dashField(&sb, "log", dashPath(j.Log))
 	}
 	fmt.Fprintln(&sb)
-	fmt.Fprintf(&sb, "  %sCOMMAND:%s\n", ansi.Dim, ansi.Reset)
+	fmt.Fprintf(&sb, "  %sCOMMAND:%s\n", srvutil.Dim, srvutil.Reset)
 	// Wrap the command across multiple lines so a long pipeline
 	// stays visible without horizontal scrolling.
 	for _, line := range wrapText(j.Cmd, 76) {
@@ -3944,15 +3942,15 @@ func renderJobDetail(j *jobs.Record, st *uiState) string {
 	}
 	fmt.Fprintln(&sb)
 
-	fmt.Fprintf(&sb, "%s%s%s\n", ansi.Dim, dashboardRule, ansi.Reset)
+	fmt.Fprintf(&sb, "%s%s%s\n", srvutil.Dim, dashboardRule, srvutil.Reset)
 	if st != nil && st.confirm != nil {
 		renderConfirmPopup(&sb, st.confirm)
 		return sb.String()
 	}
 	fmt.Fprintf(&sb, "Keys: %sq%s back   %sk%s kill   %ssrv logs %s -f%s tails remotely\n",
-		ansi.Yellow+ansi.Bold, ansi.Reset,
-		ansi.Yellow+ansi.Bold, ansi.Reset,
-		ansi.Dim, j.ID, ansi.Reset)
+		srvutil.Yellow+srvutil.Bold, srvutil.Reset,
+		srvutil.Yellow+srvutil.Bold, srvutil.Reset,
+		srvutil.Dim, j.ID, srvutil.Reset)
 	if st != nil && st.statusMsg != "" {
 		fmt.Fprintf(&sb, "%s\n", st.statusMsg)
 	}
@@ -3968,40 +3966,40 @@ func renderTunnelDetail(name string, cfg *config.Config, st *uiState) string {
 	}
 	var sb strings.Builder
 	fmt.Fprintf(&sb, "%sTUNNEL DETAIL%s  %s%s%s\n",
-		ansi.Bold+ansi.Magenta, ansi.Reset, ansi.Dim, name, ansi.Reset)
-	fmt.Fprintf(&sb, "%s%s%s\n\n", ansi.Dim, dashboardRule, ansi.Reset)
+		srvutil.Bold+srvutil.Magenta, srvutil.Reset, srvutil.Dim, name, srvutil.Reset)
+	fmt.Fprintf(&sb, "%s%s%s\n\n", srvutil.Dim, dashboardRule, srvutil.Reset)
 	dashField(&sb, "name", dashName(name))
-	dashField(&sb, "type", ansi.Magenta+def.Type+ansi.Reset)
+	dashField(&sb, "type", srvutil.Magenta+def.Type+srvutil.Reset)
 	dashField(&sb, "spec", dashPath(def.Spec))
-	dashField(&sb, "profile", ansi.Cyan+tunnelProfileLabel(def)+ansi.Reset)
+	dashField(&sb, "profile", srvutil.Cyan+tunnelProfileLabel(def)+srvutil.Reset)
 	dashField(&sb, "autostart", boolLabel(def.Autostart))
 	active, errs := tunnel.LoadStatuses()
 	if a, ok := active[name]; ok {
-		dashField(&sb, "state", dashStatus("running", ansi.Green))
+		dashField(&sb, "state", dashStatus("running", srvutil.Green))
 		dashField(&sb, "listen", dashPath(a.Listen))
 	} else if msg, ok := errs[name]; ok {
-		dashField(&sb, "state", dashStatus("failed", ansi.Red))
+		dashField(&sb, "state", dashStatus("failed", srvutil.Red))
 		// Errors can be wordy ("dial profile X: ssh: handshake
 		// failed: connect to ... timeout"). Show on its own block
 		// rather than squeezing into one field row.
 		fmt.Fprintln(&sb)
-		fmt.Fprintf(&sb, "  %sERROR:%s\n", ansi.Red+ansi.Bold, ansi.Reset)
+		fmt.Fprintf(&sb, "  %sERROR:%s\n", srvutil.Red+srvutil.Bold, srvutil.Reset)
 		for _, line := range wrapText(msg, 72) {
-			fmt.Fprintf(&sb, "    %s%s%s\n", ansi.Red, line, ansi.Reset)
+			fmt.Fprintf(&sb, "    %s%s%s\n", srvutil.Red, line, srvutil.Reset)
 		}
 	} else {
-		dashField(&sb, "state", dashStatus("stopped", ansi.Dim))
+		dashField(&sb, "state", dashStatus("stopped", srvutil.Dim))
 	}
 	fmt.Fprintln(&sb)
-	fmt.Fprintf(&sb, "%s%s%s\n", ansi.Dim, dashboardRule, ansi.Reset)
+	fmt.Fprintf(&sb, "%s%s%s\n", srvutil.Dim, dashboardRule, srvutil.Reset)
 	if st != nil && st.confirm != nil {
 		renderConfirmPopup(&sb, st.confirm)
 		return sb.String()
 	}
 	fmt.Fprintf(&sb, "Keys: %sq%s back   %sSpace%s toggle up/down   %sx%s remove\n",
-		ansi.Yellow+ansi.Bold, ansi.Reset,
-		ansi.Yellow+ansi.Bold, ansi.Reset,
-		ansi.Yellow+ansi.Bold, ansi.Reset)
+		srvutil.Yellow+srvutil.Bold, srvutil.Reset,
+		srvutil.Yellow+srvutil.Bold, srvutil.Reset,
+		srvutil.Yellow+srvutil.Bold, srvutil.Reset)
 	if st != nil && st.statusMsg != "" {
 		fmt.Fprintf(&sb, "%s\n", st.statusMsg)
 	}
@@ -4010,9 +4008,9 @@ func renderTunnelDetail(name string, cfg *config.Config, st *uiState) string {
 
 func boolLabel(b bool) string {
 	if b {
-		return ansi.Green + ansi.Bold + "yes" + ansi.Reset
+		return srvutil.Green + srvutil.Bold + "yes" + srvutil.Reset
 	}
-	return ansi.Dim + "no" + ansi.Reset
+	return srvutil.Dim + "no" + srvutil.Reset
 }
 
 // wrapText breaks `s` into lines of at most `width` bytes, splitting
@@ -4115,29 +4113,29 @@ const dashboardSubRule = "------------------------------------------------------
 
 func dashHeader(sb *strings.Builder, st *uiState) {
 	boxTop(sb, "srv")
-	boxLine(sb, ansi.Bold+ansi.Magenta+"SRV UI"+ansi.Reset+"  "+ansi.Dim+"current-shell control dashboard"+ansi.Reset)
+	boxLine(sb, srvutil.Bold+srvutil.Magenta+"SRV UI"+srvutil.Reset+"  "+srvutil.Dim+"current-shell control dashboard"+srvutil.Reset)
 	if st == nil {
 		// Non-TTY snapshot mode: no interactive keys to advertise.
-		boxLine(sb, ansi.Dim+"snapshot mode (no tty)"+ansi.Reset)
+		boxLine(sb, srvutil.Dim+"snapshot mode (no tty)"+srvutil.Reset)
 		boxBottom(sb)
 		return
 	}
 	fmt.Fprintf(sb,
 		"Keys: %sq%s quit  %sr%s redraw  %s↑/↓%s select  %sk%s kill\n\n",
-		ansi.Yellow+ansi.Bold, ansi.Reset,
-		ansi.Yellow+ansi.Bold, ansi.Reset,
-		ansi.Yellow+ansi.Bold, ansi.Reset,
-		ansi.Yellow+ansi.Bold, ansi.Reset,
+		srvutil.Yellow+srvutil.Bold, srvutil.Reset,
+		srvutil.Yellow+srvutil.Bold, srvutil.Reset,
+		srvutil.Yellow+srvutil.Bold, srvutil.Reset,
+		srvutil.Yellow+srvutil.Bold, srvutil.Reset,
 	)
 }
 
 func dashSection(sb *strings.Builder, title string) {
-	fmt.Fprintf(sb, "%s== %s ==%s\n", ansi.Bold+ansi.Cyan, strings.ToUpper(title), ansi.Reset)
+	fmt.Fprintf(sb, "%s== %s ==%s\n", srvutil.Bold+srvutil.Cyan, strings.ToUpper(title), srvutil.Reset)
 }
 
 func dashSectionCount(sb *strings.Builder, title string, count int) {
 	fmt.Fprintf(sb, "%s== %s %s(%d)%s ==%s\n",
-		ansi.Bold+ansi.Cyan, strings.ToUpper(title), ansi.Dim, count, ansi.Reset+ansi.Bold+ansi.Cyan, ansi.Reset)
+		srvutil.Bold+srvutil.Cyan, strings.ToUpper(title), srvutil.Dim, count, srvutil.Reset+srvutil.Bold+srvutil.Cyan, srvutil.Reset)
 }
 
 func dashField(sb *strings.Builder, key, value string) {
@@ -4145,22 +4143,22 @@ func dashField(sb *strings.Builder, key, value string) {
 }
 
 func dashStatus(label, color string) string {
-	return color + ansi.Bold + "[" + strings.ToUpper(label) + "]" + ansi.Reset
+	return color + srvutil.Bold + "[" + strings.ToUpper(label) + "]" + srvutil.Reset
 }
 
 func dashName(s string) string {
-	return ansi.Yellow + ansi.Bold + s + ansi.Reset
+	return srvutil.Yellow + srvutil.Bold + s + srvutil.Reset
 }
 
 func dashMeta(s string) string {
 	if s == "" {
 		return ""
 	}
-	return ansi.Dim + s + ansi.Reset
+	return srvutil.Dim + s + srvutil.Reset
 }
 
 func dashPath(s string) string {
-	return ansi.Green + s + ansi.Reset
+	return srvutil.Green + s + srvutil.Reset
 }
 
 func dashTableHeader(sb *strings.Builder, cols ...string) {
@@ -4169,17 +4167,17 @@ func dashTableHeader(sb *strings.Builder, cols ...string) {
 		if i > 0 {
 			fmt.Fprint(sb, "  ")
 		}
-		fmt.Fprintf(sb, "%s%s%s", ansi.Dim, col, ansi.Reset)
+		fmt.Fprintf(sb, "%s%s%s", srvutil.Dim, col, srvutil.Reset)
 	}
 	fmt.Fprintln(sb)
-	fmt.Fprintf(sb, "  %s%s%s\n", ansi.Dim, dashboardSubRule, ansi.Reset)
+	fmt.Fprintf(sb, "  %s%s%s\n", srvutil.Dim, dashboardSubRule, srvutil.Reset)
 }
 
 func dashActive(sb *strings.Builder, cfg *config.Config) {
 	dashSection(sb, "Active")
 	name, prof, err := config.Resolve(cfg, "")
 	if err != nil {
-		dashField(sb, "state", dashStatus("no profile", ansi.Dim))
+		dashField(sb, "state", dashStatus("no profile", srvutil.Dim))
 		fmt.Fprintln(sb)
 		return
 	}
@@ -4191,7 +4189,7 @@ func dashActive(sb *strings.Builder, cfg *config.Config) {
 		target += ":" + strconv.Itoa(prof.GetPort())
 	}
 	dashField(sb, "profile", dashName(name))
-	dashField(sb, "target", ansi.Cyan+target+ansi.Reset)
+	dashField(sb, "target", srvutil.Cyan+target+srvutil.Reset)
 	cwd := config.GetCwd(name, prof)
 	dashField(sb, "cwd", dashPath(cwd))
 	if pf := project.Resolve(); pf != nil {
@@ -4204,22 +4202,22 @@ func dashDaemon(sb *strings.Builder) {
 	dashSection(sb, "Daemon")
 	conn := daemon.DialSock(300 * time.Millisecond)
 	if conn == nil {
-		dashField(sb, "state", dashStatus("stopped", ansi.Dim))
+		dashField(sb, "state", dashStatus("stopped", srvutil.Dim))
 		fmt.Fprintln(sb)
 		return
 	}
 	defer conn.Close()
 	resp, err := daemon.Call(conn, daemon.Request{Op: "status"}, time.Second)
 	if err != nil || resp == nil || !resp.OK {
-		dashField(sb, "state", dashStatus("unreachable", ansi.Red))
+		dashField(sb, "state", dashStatus("unreachable", srvutil.Red))
 		fmt.Fprintln(sb)
 		return
 	}
-	dashField(sb, "state", dashStatus("running", ansi.Green))
+	dashField(sb, "state", dashStatus("running", srvutil.Green))
 	dashField(sb, "uptime", fmtDuration(time.Duration(resp.Uptime)*time.Second))
 	dashField(sb, "pooled", strconv.Itoa(len(resp.Profiles)))
 	if len(resp.Profiles) > 0 {
-		dashField(sb, "profiles", ansi.Cyan+strings.Join(resp.Profiles, ", ")+ansi.Reset)
+		dashField(sb, "profiles", srvutil.Cyan+strings.Join(resp.Profiles, ", ")+srvutil.Reset)
 	}
 	fmt.Fprintln(sb)
 }
@@ -4238,7 +4236,7 @@ func dashGroups(sb *strings.Builder, cfg *config.Config) {
 	for _, n := range names {
 		members := cfg.Groups[n]
 		fmt.Fprintf(sb, "  %-12s  %s%2d%s  %s\n",
-			dashName(n), ansi.Magenta+ansi.Bold, len(members), ansi.Reset, ansi.Cyan+strings.Join(members, ", ")+ansi.Reset)
+			dashName(n), srvutil.Magenta+srvutil.Bold, len(members), srvutil.Reset, srvutil.Cyan+strings.Join(members, ", ")+srvutil.Reset)
 	}
 	fmt.Fprintln(sb)
 }
@@ -4260,38 +4258,38 @@ func dashTunnels(sb *strings.Builder, cfg *config.Config, names []string, st *ui
 	dashTableHeader(sb, "  NAME          TYPE     SPEC / STATE")
 	for i, n := range names {
 		def := cfg.Tunnels[n]
-		status := dashStatus("stopped", ansi.Dim)
+		status := dashStatus("stopped", srvutil.Dim)
 		extra := ""
 		var errMsg string
 		if a, ok := active[n]; ok {
-			status = dashStatus("running", ansi.Green)
+			status = dashStatus("running", srvutil.Green)
 			extra = "  listen=" + a.Listen
 		} else if msg, ok := errs[n]; ok {
-			status = dashStatus("failed", ansi.Red)
+			status = dashStatus("failed", srvutil.Red)
 			errMsg = msg
 		}
 		flag := ""
 		if def.Autostart {
-			flag += " " + dashStatus("autostart", ansi.Cyan)
+			flag += " " + dashStatus("autostart", srvutil.Cyan)
 		}
 		if def.OnDemand {
 			// On-demand tunnels share the same flag-cell strip as
 			// autostart. Magenta so both flags can coexist on one
 			// row without color collisions.
-			flag += " " + dashStatus("on-demand", ansi.Magenta)
+			flag += " " + dashStatus("on-demand", srvutil.Magenta)
 		}
 		if extra != "" {
-			extra = ansi.Dim + extra + ansi.Reset
+			extra = srvutil.Dim + extra + srvutil.Reset
 		}
 		marker := "   "
 		selected := st != nil && st.isSelected("tunnel", i)
 		if selected {
-			marker = ansi.Bold + ansi.Yellow + " > " + ansi.Reset
+			marker = srvutil.Bold + srvutil.Yellow + " > " + srvutil.Reset
 		}
 		row := fmt.Sprintf("%-12s  %-7s  %s  %s%s%s",
-			dashName(n), ansi.Magenta+def.Type+ansi.Reset, dashPath(def.Spec), status, extra, flag)
+			dashName(n), srvutil.Magenta+def.Type+srvutil.Reset, dashPath(def.Spec), status, extra, flag)
 		if selected {
-			fmt.Fprintf(sb, "%s%s%s%s\n", marker, ansi.Reverse, row, ansi.Reset)
+			fmt.Fprintf(sb, "%s%s%s%s\n", marker, srvutil.Reverse, row, srvutil.Reset)
 		} else {
 			fmt.Fprintf(sb, "%s%s\n", marker, row)
 		}
@@ -4299,7 +4297,7 @@ func dashTunnels(sb *strings.Builder, cfg *config.Config, names []string, st *ui
 			// Indent under the row so it groups visually; truncate
 			// to keep the table tight.
 			line := truncOneLine(errMsg, 70)
-			fmt.Fprintf(sb, "      %s%s%s\n", ansi.Red, line, ansi.Reset)
+			fmt.Fprintf(sb, "      %s%s%s\n", srvutil.Red, line, srvutil.Reset)
 		}
 	}
 	fmt.Fprintln(sb)
@@ -4323,14 +4321,14 @@ func dashJobs(sb *strings.Builder, jobs []*jobs.Record, st *uiState) {
 	}
 	if hidden > 0 {
 		fmt.Fprintf(sb, "%s== JOBS %s(%d, %d completed hidden -- see %ssrv jobs%s%s)%s ==%s\n",
-			ansi.Bold+ansi.Cyan, ansi.Dim, len(jobs), hidden,
-			ansi.Yellow+ansi.Bold, ansi.Reset+ansi.Dim, "",
-			ansi.Reset+ansi.Bold+ansi.Cyan, ansi.Reset)
+			srvutil.Bold+srvutil.Cyan, srvutil.Dim, len(jobs), hidden,
+			srvutil.Yellow+srvutil.Bold, srvutil.Reset+srvutil.Dim, "",
+			srvutil.Reset+srvutil.Bold+srvutil.Cyan, srvutil.Reset)
 	} else {
 		dashSectionCount(sb, "Jobs", len(jobs))
 	}
 	if len(jobs) == 0 {
-		fmt.Fprintf(sb, "  %s(nothing running)%s\n\n", ansi.Dim, ansi.Reset)
+		fmt.Fprintf(sb, "  %s(nothing running)%s\n\n", srvutil.Dim, srvutil.Reset)
 		return
 	}
 	dashTableHeader(sb, "  ID            PROFILE     PID       AGE       COMMAND")
@@ -4346,14 +4344,14 @@ func dashJobs(sb *strings.Builder, jobs []*jobs.Record, st *uiState) {
 		marker := "   "
 		selected := st != nil && st.isSelected("job", i)
 		if selected {
-			marker = ansi.Bold + ansi.Yellow + " > " + ansi.Reset
+			marker = srvutil.Bold + srvutil.Yellow + " > " + srvutil.Reset
 		}
 		row := fmt.Sprintf("%-12s  %-10s  %-8d  %-8s  %s",
-			dashName(truncID(j.ID)), ansi.Cyan+j.Profile+ansi.Reset, j.Pid, dashMeta(started), cmd)
+			dashName(truncID(j.ID)), srvutil.Cyan+j.Profile+srvutil.Reset, j.Pid, dashMeta(started), cmd)
 		if selected {
 			// Reverse-video the row content so the selection is
 			// readable on terminals that drop the cursor marker.
-			fmt.Fprintf(sb, "%s%s%s%s\n", marker, ansi.Reverse, row, ansi.Reset)
+			fmt.Fprintf(sb, "%s%s%s%s\n", marker, srvutil.Reverse, row, srvutil.Reset)
 		} else {
 			fmt.Fprintf(sb, "%s%s\n", marker, row)
 		}
@@ -4386,47 +4384,47 @@ func dashMCP(sb *strings.Builder) {
 		// Log exists but no recent activity / no live pid. Show that
 		// MCP is idle plus the most recent activity for context.
 		if !st.LastActive.IsZero() {
-			dashField(sb, "state", dashStatus("idle", ansi.Dim))
+			dashField(sb, "state", dashStatus("idle", srvutil.Dim))
 			dashField(sb, "last", fmtDuration(time.Since(st.LastActive))+" ago")
 		} else {
-			dashField(sb, "state", dashStatus("idle", ansi.Dim))
+			dashField(sb, "state", dashStatus("idle", srvutil.Dim))
 		}
 	} else {
 		pids := make([]string, 0, len(st.ActivePIDs))
 		for _, p := range st.ActivePIDs {
 			pids = append(pids, strconv.Itoa(p))
 		}
-		dashField(sb, "state", dashStatus("running", ansi.Green))
+		dashField(sb, "state", dashStatus("running", srvutil.Green))
 		dashField(sb, "pids", strings.Join(pids, ", "))
 	}
 	if len(st.RecentTools) > 0 {
 		fmt.Fprintln(sb)
 		dashTableHeader(sb, "TOOL                  DUR      STATE    AGE")
 		for _, tc := range st.RecentTools {
-			status := dashStatus("ok", ansi.Green)
+			status := dashStatus("ok", srvutil.Green)
 			if !tc.OK {
-				status = dashStatus("err", ansi.Red)
+				status = dashStatus("err", srvutil.Red)
 			}
 			age := dashMeta(fmtDuration(time.Since(tc.When)) + " ago")
-			fmt.Fprintf(sb, "  %-20s  %-7s  %-7s  %s\n", ansi.Yellow+tc.Name+ansi.Reset, ansi.Magenta+tc.Dur+ansi.Reset, status, age)
+			fmt.Fprintf(sb, "  %-20s  %-7s  %-7s  %s\n", srvutil.Yellow+tc.Name+srvutil.Reset, srvutil.Magenta+tc.Dur+srvutil.Reset, status, age)
 		}
 	}
 	fmt.Fprintln(sb)
 }
 
 func dashFooter(sb *strings.Builder, st *uiState) {
-	fmt.Fprintf(sb, "%s%s%s\n", ansi.Dim, dashboardRule, ansi.Reset)
+	fmt.Fprintf(sb, "%s%s%s\n", srvutil.Dim, dashboardRule, srvutil.Reset)
 	if st == nil {
-		fmt.Fprintf(sb, "%ssnapshot complete%s\n", ansi.Dim, ansi.Reset)
+		fmt.Fprintf(sb, "%ssnapshot complete%s\n", srvutil.Dim, srvutil.Reset)
 		return
 	}
 	// Confirm popup renders elsewhere (centered box appended to the
 	// dashboard); the footer only needs the regular key hints.
 	fmt.Fprintf(sb, "Keys: %sq%s quit  %sr%s redraw  %s↑/↓%s move  %sk%s kill\n",
-		ansi.Yellow+ansi.Bold, ansi.Reset,
-		ansi.Yellow+ansi.Bold, ansi.Reset,
-		ansi.Yellow+ansi.Bold, ansi.Reset,
-		ansi.Yellow+ansi.Bold, ansi.Reset,
+		srvutil.Yellow+srvutil.Bold, srvutil.Reset,
+		srvutil.Yellow+srvutil.Bold, srvutil.Reset,
+		srvutil.Yellow+srvutil.Bold, srvutil.Reset,
+		srvutil.Yellow+srvutil.Bold, srvutil.Reset,
 	)
 	if st.statusMsg != "" {
 		fmt.Fprintf(sb, "%s\n", st.statusMsg)

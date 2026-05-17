@@ -14,12 +14,12 @@ import (
 	"fmt"
 	"os"
 	"sort"
-	"srv/internal/clierr"
 	"srv/internal/config"
 	"srv/internal/jobnotify"
 	"srv/internal/jobs"
 	"srv/internal/remote"
 	"srv/internal/runwrap"
+	"srv/internal/srvutil"
 	"strings"
 	"time"
 )
@@ -38,11 +38,11 @@ type RunOpts struct {
 // alias if the dispatcher exposes one).
 func CmdDetach(args []string, cfg *config.Config, profileOverride string, ro RunOpts) error {
 	if len(args) == 0 {
-		return clierr.Errf(1, "error: srv -d needs a command.")
+		return srvutil.Errf(1, "error: srv -d needs a command.")
 	}
 	name, profile, err := config.Resolve(cfg, profileOverride)
 	if err != nil {
-		return clierr.Errf(1, "%v", err)
+		return srvutil.Errf(1, "%v", err)
 	}
 	userCmd := strings.Join(args, " ")
 	// Apply wrappers (resource limits / restart-on-fail) before nohup
@@ -56,7 +56,7 @@ func CmdDetach(args []string, cfg *config.Config, profileOverride string, ro Run
 	})
 	rec, err := remote.SpawnDetached(name, profile, wrapped)
 	if err != nil {
-		return clierr.Errf(1, "error: %v", err)
+		return srvutil.Errf(1, "error: %v", err)
 	}
 	// Echo the user's original command in the job record so `srv jobs`
 	// shows what they actually asked for, not the post-wrap shell soup.
@@ -114,20 +114,20 @@ func cmdJobsNotify(args []string, cfg *config.Config) error {
 		}
 		cfg.JobNotify.Local = true
 		if err := config.Save(cfg); err != nil {
-			return clierr.Errf(1, "error: %v", err)
+			return srvutil.Errf(1, "error: %v", err)
 		}
 		printNotifyState(cfg)
 		return nil
 	case "off":
 		cfg.JobNotify = nil
 		if err := config.Save(cfg); err != nil {
-			return clierr.Errf(1, "error: %v", err)
+			return srvutil.Errf(1, "error: %v", err)
 		}
 		fmt.Println("job notifications: disabled")
 		return nil
 	case "webhook":
 		if len(args) < 2 {
-			return clierr.Errf(2, "usage: srv jobs notify webhook <URL|->")
+			return srvutil.Errf(2, "usage: srv jobs notify webhook <URL|->")
 		}
 		url := args[1]
 		if cfg.JobNotify == nil {
@@ -144,7 +144,7 @@ func cmdJobsNotify(args []string, cfg *config.Config) error {
 			cfg.JobNotify = nil
 		}
 		if err := config.Save(cfg); err != nil {
-			return clierr.Errf(1, "error: %v", err)
+			return srvutil.Errf(1, "error: %v", err)
 		}
 		printNotifyState(cfg)
 		return nil
@@ -178,7 +178,7 @@ func cmdJobsNotify(args []string, cfg *config.Config) error {
 		}
 		return nil
 	}
-	return clierr.Errf(2, "usage: srv jobs notify [on|off|webhook URL|test]")
+	return srvutil.Errf(2, "usage: srv jobs notify [on|off|webhook URL|test]")
 }
 
 func printNotifyState(cfg *config.Config) {
@@ -207,7 +207,7 @@ func CmdJobs(args []string, cfg *config.Config, profileOverride string) error {
 		return cmdJobsNotify(args[1:], cfg)
 	}
 	if len(args) > 0 && args[0] == "prune" {
-		return clierr.Errf(2, "`srv jobs prune` was replaced by `srv prune jobs` (see `srv prune`)")
+		return srvutil.Errf(2, "`srv jobs prune` was replaced by `srv prune jobs` (see `srv prune`)")
 	}
 	for i, a := range args {
 		if a == "--watch" || a == "-w" {
@@ -248,7 +248,7 @@ func CmdJobs(args []string, cfg *config.Config, profileOverride string) error {
 // job's remote log file. `-f` switches from `cat` to `tail -f`.
 func CmdLogs(args []string, cfg *config.Config, profileOverride string) error {
 	if len(args) == 0 || args[0] == "-f" || args[0] == "--follow" {
-		return clierr.Errf(1, `usage: srv logs <id> [-f]                    output of a detached job (~/.srv-jobs/<id>.log)
+		return srvutil.Errf(1, `usage: srv logs <id> [-f]                    output of a detached job (~/.srv-jobs/<id>.log)
 see also:
   srv tail [-n N] [--grep RE] <path>            any remote file (auto-reconnect)
   srv journal -u UNIT [-f]                      systemd journal for a service`)
@@ -263,17 +263,17 @@ see also:
 	jf := jobs.Load()
 	j := jobs.Find(jf, jid)
 	if j == nil {
-		return clierr.Errf(1, "error: no such job %q", jid)
+		return srvutil.Errf(1, "error: no such job %q", jid)
 	}
 	prof, ok := cfg.Profiles[j.Profile]
 	if !ok {
-		return clierr.Errf(1, "error: profile %q (from job) not found.", j.Profile)
+		return srvutil.Errf(1, "error: profile %q (from job) not found.", j.Profile)
 	}
 	cmd := "cat " + j.Log
 	if follow {
 		cmd = "tail -f " + j.Log
 	}
-	return clierr.Code(remote.RunStream(prof, "", cmd, follow))
+	return srvutil.Code(remote.RunStream(prof, "", cmd, follow))
 }
 
 // CmdKill implements `srv kill <id> [--signal=NAME | -9]`. Always
@@ -281,7 +281,7 @@ see also:
 // (the remote pid was already gone -- nothing to track anymore).
 func CmdKill(args []string, cfg *config.Config, profileOverride string) error {
 	if len(args) == 0 {
-		return clierr.Errf(1, "usage: srv kill <id>")
+		return srvutil.Errf(1, "usage: srv kill <id>")
 	}
 	jid := args[0]
 	sig := "TERM"
@@ -295,11 +295,11 @@ func CmdKill(args []string, cfg *config.Config, profileOverride string) error {
 	jf := jobs.Load()
 	j := jobs.Find(jf, jid)
 	if j == nil {
-		return clierr.Errf(1, "error: no such job %q", jid)
+		return srvutil.Errf(1, "error: no such job %q", jid)
 	}
 	prof, ok := cfg.Profiles[j.Profile]
 	if !ok {
-		return clierr.Errf(1, "error: profile %q (from job) not found.", j.Profile)
+		return srvutil.Errf(1, "error: profile %q (from job) not found.", j.Profile)
 	}
 	cmd := fmt.Sprintf("kill -%s %d 2>/dev/null && echo killed || echo 'no such pid (already exited?)'", sig, j.Pid)
 	rc := remote.RunStream(prof, "", cmd, false)
@@ -315,5 +315,5 @@ func CmdKill(args []string, cfg *config.Config, profileOverride string) error {
 	}
 	jf.Jobs = out
 	_ = jobs.Save(jf)
-	return clierr.Code(rc)
+	return srvutil.Code(rc)
 }

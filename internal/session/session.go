@@ -21,8 +21,7 @@ import (
 	"strings"
 	"time"
 
-	"srv/internal/srvio"
-	"srv/internal/srvpath"
+	"srv/internal/srvutil"
 )
 
 // Record mirrors one entry in sessions.json.
@@ -58,7 +57,7 @@ type file struct {
 }
 
 func loadFile() *file {
-	data, err := os.ReadFile(srvpath.Sessions())
+	data, err := os.ReadFile(srvutil.Sessions())
 	s := &file{Sessions: map[string]*Record{}}
 	if err != nil {
 		return s
@@ -67,19 +66,19 @@ func loadFile() *file {
 		// Malformed sessions.json: surface a warning but return an
 		// empty record rather than panicking -- losing the per-shell
 		// state shouldn't block the CLI.
-		fmt.Fprintf(os.Stderr, "srv: %s is not valid JSON: %v\n", srvpath.Sessions(), err)
+		fmt.Fprintf(os.Stderr, "srv: %s is not valid JSON: %v\n", srvutil.Sessions(), err)
 		return &file{Sessions: map[string]*Record{}}
 	}
 	if s.Sessions == nil {
 		s.Sessions = map[string]*Record{}
 	}
-	srvio.WarnIfNewerSchema(srvpath.Sessions(), s.Version)
+	srvutil.WarnIfNewerSchema(srvutil.Sessions(), s.Version)
 	return s
 }
 
 func writeFile(s *file) error {
-	s.Version = srvio.SchemaVersion
-	return srvio.WriteJSONFile(srvpath.Sessions(), s)
+	s.Version = srvutil.SchemaVersion
+	return srvutil.WriteJSONFile(srvutil.Sessions(), s)
 }
 
 // intermediateExes (Windows): exes that are transparent launcher
@@ -129,7 +128,7 @@ func ID() string {
 // important than perfect concurrency.
 func Touch() (string, *Record) {
 	sid := ID()
-	release, _ := srvio.FileLock(srvpath.Sessions())
+	release, _ := srvutil.FileLock(srvutil.Sessions())
 	if release != nil {
 		defer release()
 	}
@@ -157,7 +156,7 @@ func Touch() (string, *Record) {
 // Same locking story as Touch -- the read-modify-write needs a
 // mutex to avoid losing concurrent updates from sibling shells.
 func SaveWith(sid string, rec *Record) error {
-	release, _ := srvio.FileLock(srvpath.Sessions())
+	release, _ := srvutil.FileLock(srvutil.Sessions())
 	if release != nil {
 		defer release()
 	}

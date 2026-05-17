@@ -21,14 +21,14 @@ import (
 	"path/filepath"
 	"srv/internal/config"
 	"srv/internal/platform"
-	"srv/internal/srvpath"
+	"srv/internal/srvutil"
 )
 
 // tunnelsDir is where status + pid files live. Created on demand
 // with 0700 perms because the file content reveals which hosts /
 // ports we're forwarding to.
 func tunnelsDir() string {
-	return filepath.Join(srvpath.Dir(), "tunnels")
+	return filepath.Join(srvutil.Dir(), "tunnels")
 }
 
 // StatusPath returns the JSON status file path for a tunnel name.

@@ -8,8 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"srv/internal/atrest"
-	"srv/internal/srvio"
-	"srv/internal/srvpath"
+	"srv/internal/srvutil"
 	"strings"
 	"time"
 )
@@ -37,8 +36,8 @@ type replayEntry struct {
 	ProgressBytes int            `json:"progress_bytes,omitempty"`
 }
 
-// replayPath is the JSONL file. Honors $SRV_HOME via srvpath.
-func replayPath() string { return filepath.Join(srvpath.Dir(), "mcp-replay.jsonl") }
+// replayPath is the JSONL file. Honors $SRV_HOME via srvutil.
+func replayPath() string { return filepath.Join(srvutil.Dir(), "mcp-replay.jsonl") }
 
 // replayMaxBytes caps how big the file is allowed to grow before we
 // rotate the oldest half off. ~5 MB is roughly 5k average-sized
@@ -106,7 +105,7 @@ func trimReplay(path string) error {
 	if nl < 0 {
 		nl = half
 	}
-	return srvio.WriteFileAtomic(path, data[nl:], 0o600)
+	return srvutil.WriteFileAtomic(path, data[nl:], 0o600)
 }
 
 // ReadReplay reads every entry from disk in order. Used by the

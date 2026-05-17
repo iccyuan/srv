@@ -15,10 +15,10 @@ import (
 	"encoding/base64"
 	"fmt"
 	"os"
-	"srv/internal/clierr"
 	"srv/internal/config"
 	"srv/internal/daemon"
 	"srv/internal/srvtty"
+	"srv/internal/srvutil"
 	"srv/internal/sshx"
 	"strings"
 	"time"
@@ -40,18 +40,18 @@ func Cmd(args []string, cfg *config.Config, profileOverride string) error {
 			useCache = false
 		case a == "--cache-ttl":
 			if i+1 >= len(args) {
-				return clierr.Errf(2, "--cache-ttl requires a value (e.g. 10m)")
+				return srvutil.Errf(2, "--cache-ttl requires a value (e.g. 10m)")
 			}
 			d, err := time.ParseDuration(args[i+1])
 			if err != nil {
-				return clierr.Errf(2, "bad --cache-ttl %q: %v", args[i+1], err)
+				return srvutil.Errf(2, "bad --cache-ttl %q: %v", args[i+1], err)
 			}
 			cacheTTL = d
 			i++
 		case a == "--clear-cache":
 			profName, _, err := config.Resolve(cfg, profileOverride)
 			if err != nil {
-				return clierr.Errf(1, "%v", err)
+				return srvutil.Errf(1, "%v", err)
 			}
 			cacheClear(profName)
 			fmt.Println("sudo cache cleared for profile", profName)
@@ -64,13 +64,13 @@ func Cmd(args []string, cfg *config.Config, profileOverride string) error {
 		}
 	}
 	if len(cmdArgs) == 0 {
-		return clierr.Errf(2, "usage: srv sudo [--no-cache] [--cache-ttl <dur>] <command>")
+		return srvutil.Errf(2, "usage: srv sudo [--no-cache] [--cache-ttl <dur>] <command>")
 	}
 	cmd := strings.Join(cmdArgs, " ")
 
 	profName, profile, err := config.Resolve(cfg, profileOverride)
 	if err != nil {
-		return clierr.Errf(1, "%v", err)
+		return srvutil.Errf(1, "%v", err)
 	}
 
 	password, fromCache := "", false
@@ -83,7 +83,7 @@ func Cmd(args []string, cfg *config.Config, profileOverride string) error {
 	if password == "" {
 		pw, err := promptPassword(profile.User)
 		if err != nil {
-			return clierr.Errf(1, "read password: %v", err)
+			return srvutil.Errf(1, "read password: %v", err)
 		}
 		password = pw
 	}
@@ -91,7 +91,7 @@ func Cmd(args []string, cfg *config.Config, profileOverride string) error {
 	cwd := config.GetCwd(profName, profile)
 	rc, err := runRemote(profile, cwd, cmd, password)
 	if err != nil {
-		return clierr.Errf(1, "%v", err)
+		return srvutil.Errf(1, "%v", err)
 	}
 
 	// Treat exit code 1 + "incorrect password" as auth failure and
@@ -109,7 +109,7 @@ func Cmd(args []string, cfg *config.Config, profileOverride string) error {
 		// alive without forcing re-prompts at the cliff edge.
 		cacheSet(profName, password, cacheTTL)
 	}
-	return clierr.Code(rc)
+	return srvutil.Code(rc)
 }
 
 // promptPassword reads a password from the local terminal with echo
