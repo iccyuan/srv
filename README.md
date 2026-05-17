@@ -401,7 +401,15 @@ guard **默认开启**。内置拦截集(命中后该次 MCP 调用需带 `confi
 
 - **DB 客户端引号内 payload**:`mysql -e "DROP DATABASE x"`、`psql -c "..."`、`cqlsh -e`、`mongosh --eval "db.dropDatabase()"`/`db.x.drop()` 也会拦(匹配锚在未加引号的客户端二进制上;`echo "mysql -e ..."` 整体被引号包住时仍不误杀)。
 
-纯前置类 `chattr -i` **不在**默认集,需要的话用 `srv guard rules add` 自行加。**残留局限**:仅 DB 客户端的 `-e/--eval/-c` 直传形式被覆盖,把 SQL 藏进文件 `mysql < f.sql` 或 heredoc 这类间接形式看不到(命中可带 `confirm=true` 绕过)。`srv guard off` 关闭当前 shell 的 guard。
+纯前置类 `chattr -i` **不在**默认集,需要的话用 `srv guard rules add` 自行加。**残留局限**:仅 DB 客户端的 `-e/--eval/-c` 直传形式被覆盖,把 SQL 藏进文件 `mysql < f.sql` 或 heredoc 这类间接形式看不到(命中可带 `confirm=true` 绕过)。
+
+**关闭 guard 的两种粒度**(生效优先级:`SRV_GUARD` 环境变量 > 当前 shell 的 `srv guard on/off` > 全局 config > 内置默认开):
+
+- `srv guard off` —— 只关**当前 shell**。注意:MCP server 是 Claude Code 拉起的子进程,session id(Unix 下按父进程 pid 取)和你的交互 shell 不一样,所以这条**关不掉 MCP server 的 guard**。
+- `srv guard off --global` —— 写进 `config.json`(机器级),**MCP server 也会读到**且每次调用实时重读,无需重启。这是要对 AI/MCP 路径关闭 guard 时应该用的命令。`srv guard on --global` 恢复。
+- `srv guard status` —— 显示当前生效状态及它来自哪一层(env / session / global / default)。
+
+`SRV_GUARD=on|off` 环境变量优先级最高,适合写进 `claude mcp add` 注册里。
 
 | 命令 | 作用 |
 |---|---|

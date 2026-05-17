@@ -4,7 +4,6 @@ import (
 	"fmt"
 	"regexp"
 	"srv/internal/config"
-	"srv/internal/session"
 	"strconv"
 	"strings"
 	"sync"
@@ -21,7 +20,7 @@ import (
 // a regex matched against the full command string; `name` is the
 // human-readable label surfaced to the model in the block reason.
 //
-// Because the session guard now defaults to ON (see session.GuardOn),
+// Because the guard now defaults to ON (see config.GuardActive),
 // this list is kept narrow: irreversible destruction of data / a
 // filesystem / a raw disk, PLUS the host power-control verbs
 // (shutdown / reboot / halt / poweroff) -- an unintended reboot or
@@ -332,10 +331,17 @@ func isInsideQuotes(s string, pos int) bool {
 // `run`, `detach`, `run_group`, and any other tool
 // that ferries a raw shell command to the remote.
 func guardCheckRisky(tool, cmd string, confirm bool) *toolResult {
-	if !session.GuardOn() || confirm {
+	if confirm {
 		return nil
 	}
 	cfg := loadGuardConfig()
+	// cfg.GuardActive() (not session.GuardOn()) so `srv guard off
+	// --global` disables the gate for THIS process -- the MCP server's
+	// ppid-derived session never matches the user's shell, so the
+	// per-session form alone could never turn it off here.
+	if !cfg.GuardActive() {
+		return nil
+	}
 	rules, allow := activePatterns(cfg)
 	pat := riskyMatchWithRules(cmd, rules, allow)
 	if pat == "" {

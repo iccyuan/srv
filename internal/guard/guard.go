@@ -1,6 +1,9 @@
 // Package guard implements `srv guard [on|off|status]` -- the
-// per-session high-risk-op confirmation toggle. ON by default; the
-// gate fires unless the user runs `srv guard off`. When on, the
+// high-risk-op confirmation toggle. ON by default; the gate fires
+// unless turned off. `srv guard off` is per-shell; `srv guard off
+// --global` writes config.json and is the form that also disables it
+// for the MCP server (whose session id never matches the user's
+// shell). When on, the
 // built-in set requires an explicit confirm flag from the MCP
 // client for: irreversible destruction (rm -rf, mkfs, dd of=, drop
 // database, truncate table, :> /path, > /dev/disk) plus host
@@ -33,7 +36,15 @@ import (
 // Cmd implements `srv guard [on|off|status|list|add|rm|allow|defaults|test]`.
 // Default action is `status`. Output is intentionally one-line so it
 // pipes cleanly. list/add/rm/allow/defaults manage the persisted
-// deny/allow rule set; on/off/status toggle the per-session gate.
+// deny/allow rule set.
+//
+// `srv guard on|off` toggles the PER-SHELL gate (session record). Add
+// `--global` (alias `-g`) to instead write the machine-wide switch in
+// config.json -- that is the form the MCP server sees, since its
+// ppid-derived session never matches the user's interactive shell.
+// `srv guard status` prints the effective state plus which precedence
+// layer decided it (SRV_GUARD env > session > global config >
+// default-on).
 func Cmd(args []string) error {
 	envHint := func() string {
 		if v := os.Getenv("SRV_GUARD"); v != "" {
@@ -62,29 +73,66 @@ func Cmd(args []string) error {
 		}
 		fmt.Printf("BLOCK matches rule %q\n", hit)
 		return srvutil.Code(1)
-	case "on", "enable":
-		sid, err := session.SetGuard(true)
+	case "on", "enable", "off", "disable":
+		on := action == "on" || action == "enable"
+		// --global / -g writes config.json instead of the per-shell
+		// session record. That is the ONLY CLI form that reaches the
+		// MCP server: its ppid-derived session id never matches the
+		// user's interactive shell, so a per-session `srv guard off`
+		// can't turn the gate off for the model. config.json is global
+		// and the MCP server re-reads it every call, so this takes
+		// effect live, no restart.
+		if hasGlobalFlag(args[1:]) {
+			cfg, err := config.Load()
+			if err != nil {
+				return srvutil.Errf(1, "config load: %v", err)
+			}
+			if cfg == nil {
+				cfg = config.New()
+			}
+			if cfg.Guard == nil {
+				cfg.Guard = &config.GuardConfig{}
+			}
+			off := !on
+			cfg.Guard.GlobalOff = &off
+			if err := config.Save(cfg); err != nil {
+				return srvutil.Errf(1, "%v", err)
+			}
+			fmt.Printf("guard: %s (global, written to config.json -- applies to the MCP server too)%s\n",
+				onOff(on), envHint())
+			return nil
+		}
+		sid, err := session.SetGuard(on)
 		if err != nil {
-			fmt.Fprintln(os.Stderr, "guard on:", err)
+			fmt.Fprintf(os.Stderr, "guard %s: %v\n", onOff(on), err)
 			return srvutil.Code(1)
 		}
-		fmt.Printf("guard: on  (session=%s)%s\n", sid, envHint())
-		return nil
-	case "off", "disable":
-		sid, err := session.SetGuard(false)
-		if err != nil {
-			fmt.Fprintln(os.Stderr, "guard off:", err)
-			return srvutil.Code(1)
-		}
-		fmt.Printf("guard: off (session=%s)%s\n", sid, envHint())
+		fmt.Printf("guard: %s (session=%s; this shell only -- use --global for the MCP server)%s\n",
+			onOff(on), sid, envHint())
 		return nil
 	case "status", "":
 		sid := session.ID()
-		state := "off"
-		if session.GuardOn() {
-			state = "on"
+		cfg, _ := config.Load()
+		effective := "off"
+		if cfg.GuardActive() {
+			effective = "on"
 		}
-		fmt.Printf("guard: %s (session=%s)%s\n", state, sid, envHint())
+		// Show which layer decided it so the user isn't surprised that
+		// a per-session `off` didn't move the MCP server.
+		src := "default(on)"
+		switch session.GuardPref() {
+		case session.GuardEnabled, session.GuardDisabled:
+			if os.Getenv("SRV_GUARD") != "" {
+				src = "SRV_GUARD env"
+			} else {
+				src = "session"
+			}
+		default:
+			if cfg != nil && cfg.Guard != nil && cfg.Guard.GlobalOff != nil {
+				src = "global config"
+			}
+		}
+		fmt.Printf("guard: %s  [from %s]  (session=%s)%s\n", effective, src, sid, envHint())
 		return nil
 	}
 	fmt.Fprintln(os.Stderr, "usage: srv guard [on|off|status|list|add|rm|allow|defaults|test \"<cmd>\"]")
@@ -288,6 +336,21 @@ func rulesAllowRm(cfg *config.Config, pattern string) error {
 func gcDisableDefaults(cfg *config.Config) bool {
 	return cfg.Guard != nil && cfg.Guard.DisableDefaults
 }
+
+// hasGlobalFlag reports whether args carry the --global / -g switch,
+// which targets config.json (machine-wide, seen by the MCP server)
+// instead of the per-shell session record.
+func hasGlobalFlag(args []string) bool {
+	for _, a := range args {
+		switch strings.ToLower(a) {
+		case "--global", "-g", "global":
+			return true
+		}
+	}
+	return false
+}
+
+func onOff(on bool) string { return boolDisplay(on) }
 
 func boolDisplay(on bool) string {
 	if on {

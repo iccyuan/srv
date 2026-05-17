@@ -149,7 +149,7 @@ Integrations:
                                          remote systemd journal (one-shot or live-follow)
   srv top [-n SECS]                      stream "top -b" from the remote (auto-reconnect on drop)
   srv mcp                                run as a stdio MCP server
-  srv guard [on|off|status]              MCP confirmation guard for high-risk ops (default ON; 'off' to disable)
+  srv guard [on|off|status] [--global]   MCP high-risk guard (default ON; 'off' = this shell, 'off --global' = incl. MCP server)
   srv guard test "<cmd>"                 dry-run: report which rule would block <cmd>
   srv guard [list|add|rm|allow|defaults] manage the deny-pattern set + allow-list
   srv mcp replay [list|show <i>|clear|path]
@@ -322,7 +322,7 @@ Supervisor / 资源限制(对 srv run 和 srv -d 都生效):
                                          远端 systemd 日志(一次性或持续跟踪)
   srv top [-n SECS]                      流式拉取远端 "top -b",断线自动重连
   srv mcp                                以 stdio MCP server 跑
-  srv guard [on|off|status]              MCP 高危操作确认开关(默认开启,拦不可逆破坏+关机重启类;'off' 关闭当前 shell)
+  srv guard [on|off|status] [--global]   MCP 高危确认(默认开;'off' 仅当前 shell,'off --global' 含 MCP server)
   srv guard test "<cmd>"                 dry-run: 给出哪条规则会拦截 <cmd>
   srv guard [list|add|rm|allow|defaults] 管理拦截正则集合 + 允许列表
   srv mcp replay [list|show <i>|clear|path]

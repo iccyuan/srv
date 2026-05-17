@@ -307,8 +307,16 @@ type Recipe struct {
 // DisableDefaults=true skips the built-in patterns entirely so users
 // can replace the policy from scratch; left false, user rules append.
 type GuardConfig struct {
-	DisableDefaults bool        `json:"disable_defaults,omitempty"`
-	Rules           []GuardRule `json:"rules,omitempty"`
+	DisableDefaults bool `json:"disable_defaults,omitempty"`
+	// GlobalOff is the machine-wide guard switch, consulted only when
+	// there's no SRV_GUARD env and no per-session `srv guard on|off`
+	// decision. nil = unset (built-in default: guard ON). *true = OFF
+	// everywhere -- crucially incl. the MCP server, whose ppid-derived
+	// session id never matches the user's interactive shell, so a
+	// plain `srv guard off` can't reach it. *false = explicitly ON.
+	// Set via `srv guard off --global` / `srv guard on --global`.
+	GlobalOff *bool       `json:"global_off,omitempty"`
+	Rules     []GuardRule `json:"rules,omitempty"`
 	// Allow lists regex patterns that *unblock* commands matching the
 	// rule set. Useful for "allow `rm -rf ./tmp/...` from this profile
 	// only" without disabling the whole pattern.
@@ -321,6 +329,34 @@ type GuardConfig struct {
 type GuardRule struct {
 	Name    string `json:"name"`
 	Pattern string `json:"pattern"`
+}
+
+// GuardActive resolves the EFFECTIVE high-risk-op guard state with
+// full precedence:
+//
+//  1. SRV_GUARD env            ("on"/"off")        -- definitive
+//  2. per-session srv guard    (Record.Guard)      -- this shell
+//  3. global config GlobalOff  (srv guard --global)-- machine-wide
+//  4. built-in default                              -- ON
+//
+// This is the single source of truth. session.GuardOn() is only the
+// env+session slice (layers 1,2,4) -- it can't see config because
+// config imports session and the reverse would cycle. Every guard
+// consumer that has a *config.Config (the MCP server does, on every
+// call) must go through here so `srv guard off --global` actually
+// reaches the MCP subprocess, whose ppid-derived session never
+// matches the user's interactive shell.
+func (c *Config) GuardActive() bool {
+	switch session.GuardPref() {
+	case session.GuardEnabled:
+		return true
+	case session.GuardDisabled:
+		return false
+	}
+	if c != nil && c.Guard != nil && c.Guard.GlobalOff != nil {
+		return !*c.Guard.GlobalOff
+	}
+	return true
 }
 
 // JobNotifyConfig captures the user's notification preferences for

@@ -26,14 +26,15 @@ import (
 
 // Record mirrors one entry in sessions.json.
 //
-// Guard makes the MCP server refuse high-risk operations (destructive
-// `run`/`detach` patterns, `sync` with delete) unless the caller
-// passes confirm=true. Default ON: the gate fires unless the user
-// explicitly ran `srv guard off`. The built-in pattern set is
-// deliberately narrow (irreversible data/disk destruction + host
-// power-control -- see defaultRiskyPatterns in internal/mcp) so
-// default-on stays unobtrusive. Toggled per-shell via `srv guard on|off`, or globally
-// via the SRV_GUARD env var (which trumps the session record).
+// Guard is the PER-SHELL slice of the high-risk-op gate (nil/on/off
+// for this session id only). It is NOT the whole story: the effective
+// state is resolved by config.GuardActive with precedence SRV_GUARD
+// env > this per-session value > global config (`srv guard --global`)
+// > built-in default ON. A bare `srv guard off` only sets this field,
+// which the MCP server (different ppid-derived session) never sees --
+// that's what `--global` and SRV_GUARD are for. The built-in pattern
+// set is deliberately narrow (irreversible data/disk destruction +
+// host power-control -- see defaultRiskyPatterns in internal/mcp).
 //
 // ColorPreset names a shell snippet under ~/.srv/init/<name>.sh that
 // `srv <cmd>` (CLI non-TTY) inlines before the user's command. Empty
@@ -176,32 +177,56 @@ func SaveWith(sid string, rec *Record) error {
 	return writeFile(s)
 }
 
-// GuardOn reports whether the high-risk-op confirmation guard is
-// active for the calling session.
-//
-// Precedence (high to low):
-//  1. SRV_GUARD env: "1"/"true"/"on"/"yes" -> on; "0"/"false"/"off"/"no" -> off.
-//     Use this in MCP server registrations so the guard travels with
-//     the subprocess regardless of which shell session id it inherits.
-//  2. Record.Guard, set via `srv guard on|off` (nil = never set).
-//  3. Default: ON. The gate is active unless the user explicitly ran
-//     `srv guard off` for this session (Record.Guard == *false).
-func GuardOn() bool {
+// GuardState is the env + per-session guard decision BEFORE the
+// global-config / built-in-default layer is applied. That layer lives
+// in config.GuardActive (config imports session, so session can't
+// import config to do it here without a cycle). GuardUnset means
+// "this layer has no opinion -- defer to config.GuardActive".
+type GuardState int
+
+const (
+	GuardUnset GuardState = iota
+	GuardEnabled
+	GuardDisabled
+)
+
+// GuardPref reports the SRV_GUARD env + per-session `srv guard on|off`
+// decision, with NO default applied. Precedence: env > Record.Guard >
+// unset. config.GuardActive consumes this and supplies layers 3-4
+// (global config, then the built-in ON default).
+func GuardPref() GuardState {
 	if v := os.Getenv("SRV_GUARD"); v != "" {
 		switch strings.ToLower(strings.TrimSpace(v)) {
 		case "1", "true", "on", "yes":
-			return true
+			return GuardEnabled
 		case "0", "false", "off", "no":
-			return false
+			return GuardDisabled
 		}
 	}
 	sid := ID()
 	s := loadFile()
-	rec, ok := s.Sessions[sid]
-	if ok && rec.Guard != nil {
-		return *rec.Guard
+	if rec, ok := s.Sessions[sid]; ok && rec.Guard != nil {
+		if *rec.Guard {
+			return GuardEnabled
+		}
+		return GuardDisabled
 	}
-	// No record, or a record that never touched guard: default ON.
+	return GuardUnset
+}
+
+// GuardOn is the env+session view with the built-in ON default
+// applied but WITHOUT the global-config layer. Prefer
+// config.GuardActive() anywhere a *config.Config is in hand -- only
+// that honors `srv guard off --global`, which is the form that
+// reaches the MCP server. Kept for callers/tests that genuinely want
+// just the per-session view.
+func GuardOn() bool {
+	switch GuardPref() {
+	case GuardEnabled:
+		return true
+	case GuardDisabled:
+		return false
+	}
 	return true
 }
 

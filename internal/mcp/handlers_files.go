@@ -9,7 +9,6 @@ import (
 	"srv/internal/diff"
 	"srv/internal/progress"
 	"srv/internal/remote"
-	"srv/internal/session"
 	"srv/internal/syncx"
 	"srv/internal/transfer"
 	"strings"
@@ -175,7 +174,7 @@ func handleSync(args map[string]any, cfg *config.Config, profileOverride string)
 	if v, ok := args["yes"].(bool); ok {
 		o.Yes = v
 	}
-	if o.Delete && !o.DryRun && session.GuardOn() {
+	if o.Delete && !o.DryRun && loadGuardConfig().GuardActive() {
 		confirm, _ := args["confirm"].(bool)
 		if !confirm {
 			return guardBlocked("sync",

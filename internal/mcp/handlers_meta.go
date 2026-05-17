@@ -98,7 +98,7 @@ func handleStatus(args map[string]any, cfg *config.Config, profileOverride strin
 		"session":       sid,
 		"multiplex":     multiplex,
 		"compression":   prof.GetCompression(),
-		"guard":         session.GuardOn(),
+		"guard":         loadGuardConfig().GuardActive(),
 	})
 }
 
