@@ -751,7 +751,7 @@ Remote `~/.srv-jobs/<id>.log` holds detached-job logs (auto-created).
 | `SRV_CWD` | Fallback cwd when no session cwd is set (2.6.2). In MCP registrations, set `"env": {"SRV_CWD": "/mnt/project/foo"}` so each new MCP session lands directly in the project directory instead of `~`. Priority: session pin > `$SRV_CWD` > `profile.default_cwd`. |
 | `SRV_LANG` | UI language (`en` / `zh` / `auto`); overrides system-locale detection. Lower priority than `lang` in config. Default: `auto`. |
 | `SRV_HINTS` | `0` / `false` / `off` disables typo hints. Higher priority than config or `--no-hints` flag. |
-| `SRV_GUARD` | `1` / `true` / `on` / `yes` force-enables the MCP high-risk confirmation gate (overrides any per-session `srv guard` setting). |
+| `SRV_GUARD` | Force-overrides the MCP high-risk guard: `1`/`true`/`on`/`yes` forces it on, `0`/`false`/`off`/`no` forces it off. Highest precedence (beats per-session and global settings). When unset, the guard is on by default. |
 | `SRV_ALLOW_AI_CLI` | `1` / `true` / `on` / `yes` lifts the AI-agent CLI block. By default, when an AI coding-agent shell is detected (`CLAUDECODE` / `CLAUDE_CODE_ENTRYPOINT` / Codex `CODEX_*` markers), srv **hard-refuses** every remote-touching subcommand (run/push/pull/sync/edit/diff/tail/watch/journal/top/sudo/shell/logs/kill/tunnel/recipe/ui and the implicit `srv <cmd>` remote run) and points at the MCP server instead (the MCP path is unaffected and keeps its token / destructive-command gates). Set this for a human working in an agent terminal who really wants the raw CLI. |
 
 ---

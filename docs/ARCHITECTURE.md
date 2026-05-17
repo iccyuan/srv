@@ -147,6 +147,52 @@ Token discipline matters because MCP clients keep tool schemas and tool results 
 - `sync` success returns counts instead of full path lists.
 - Tool descriptions are intentionally short.
 
+## Guard
+
+The high-risk-op confirmation gate is ON by default. Rationale behind
+the non-obvious parts:
+
+**Narrow pattern set.** Only irreversible destruction (`rm -rf`,
+`dd of=`, `mkfs`, `DROP`/`TRUNCATE`, raw-disk redirects, the NoSQL
+equivalents, macOS `diskutil`/`newfs_*`) plus host power-control.
+Recoverable-but-disruptive ops and pure precursors (`chattr -i`) are
+deliberately excluded: with default-on, a false positive only costs a
+re-issue with `confirm=true`, but constant friction on routine ops
+would push users to disable the gate entirely. False negatives are
+not recoverable, so the bias is "few rules, all unambiguous".
+
+**Quoted-payload matching.** `codePositions` classifies each byte as
+code vs string-literal so `echo "rm -rf /"` does not trip — quoted
+content is treated as inert. That same rule would let
+`mysql -e "DROP DATABASE x"` through. The DB-client rules work around
+it by anchoring the regex on the *unquoted client binary* (`mysql`,
+`psql`, `mongosh`, ...), which sits at a code position, then reaching
+forward into the quoted arg. The match start is what the gate checks,
+so the verb-in-quotes is caught, while an echo-wrapped form (where the
+client name itself is quoted) is still suppressed — no broad
+false-positive increase. `[^|;&\n]` on the client→flag and flag→verb
+gaps keeps the verb in the same simple command, so a later
+`&& echo "...drop database..."` cannot trip it. Bounded quantifiers
+keep RE2 linear.
+
+**Three-layer state, and why `--global` exists.** Effective state
+resolves as: `SRV_GUARD` env > per-session record > global config
+(`GuardConfig.GlobalOff`) > built-in ON. The per-session record is
+keyed by a ppid-derived session id (see Session). The MCP server is a
+child process of the AI client, not of the user's interactive shell,
+so its session id never matches. A per-shell `srv guard off` therefore
+cannot reach the model's path — that is the entire reason
+`srv guard off --global` exists. It writes `config.json`, which the
+MCP server re-reads on every call (live, no restart).
+
+**Package layering.** `config` imports `session`, so the env+session
+slice lives in `session.GuardPref()` (tri-state: enabled/disabled/
+unset, no default applied) and the global+default layers live in
+`config.GuardActive()`. `session` cannot import `config` (cycle), so
+`GuardActive` is the single source of truth and every guard consumer
+holding a `*config.Config` must call it rather than
+`session.GuardOn()` (which only sees the env+session slice).
+
 ## Installer
 
 `srv install` starts a localhost HTTP server with embedded `install.html`. It helps with:

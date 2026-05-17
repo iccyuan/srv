@@ -392,33 +392,36 @@ srv -G web "systemctl restart nginx"
 
 ### MCP 与安全 guard
 
-guard **默认开启**。内置拦截集(命中后该次 MCP 调用需带 `confirm=true` 才放行):
+guard 是给 AI / MCP 调用加的一道确认闸,**默认开着**。它只拦"做了就回不来"的高危操作;命中时这次调用会被拒绝,要明确确认(`confirm=true`)才放行。普通命令不受影响。
 
-- **不可逆破坏**:`rm -rf`、`dd of=`/`if=/dev/{zero,random,urandom}`、`mkfs`、`:> /path`、`> /dev/{sd,nvme,r?disk,hd}`(`/dev/rdisk0` 等 macOS 裸盘也算;`>/dev/null`、`2>/dev/null`、`/dev/zero` 不受影响)。
-- **数据库**:SQL `DROP DATABASE/TABLE/SCHEMA/KEYSPACE`、`TRUNCATE TABLE`;MongoDB `dropDatabase()`/`db.<coll>.drop()`;Redis `FLUSHALL`/`FLUSHDB`;PostgreSQL `dropdb`。
-- **macOS 磁盘**:`newfs_*`、`diskutil erase*/partitionDisk/zeroDisk/secureErase/apfs delete*`(`diskutil list/info/mount` 不拦)。
-- **主机电源**:`shutdown`、`reboot`、`halt`、`poweroff`。
+会拦的操作:
 
-- **DB 客户端引号内 payload**:`mysql -e "DROP DATABASE x"`、`psql -c "..."`、`cqlsh -e`、`mongosh --eval "db.dropDatabase()"`/`db.x.drop()` 也会拦(匹配锚在未加引号的客户端二进制上;`echo "mysql -e ..."` 整体被引号包住时仍不误杀)。
+- **删数据 / 毁盘**:`rm -rf`、`dd of=`、`mkfs`、往裸盘设备写(`> /dev/sda` 之类;`> /dev/null` 这种不算)、macOS 的 `diskutil` 抹盘和 `newfs_*`。
+- **清空数据库**:SQL 的 `DROP` / `TRUNCATE`、MongoDB `dropDatabase()` / 集合 `.drop()`、Redis `FLUSHALL` / `FLUSHDB`、`dropdb`;写在 `mysql -e "..."`、`mongosh --eval "..."` 这类引号参数里的同样会拦。
+- **关机重启**:`shutdown`、`reboot`、`halt`、`poweroff`。
 
-纯前置类 `chattr -i` **不在**默认集,需要的话用 `srv guard rules add` 自行加。**残留局限**:仅 DB 客户端的 `-e/--eval/-c` 直传形式被覆盖,把 SQL 藏进文件 `mysql < f.sql` 或 heredoc 这类间接形式看不到(命中可带 `confirm=true` 绕过)。
+像 `chattr -i` 这种本身不删东西、只是"解锁"的操作不在默认范围;需要的话用 `srv guard rules add` 自己加规则。
 
-**关闭 guard 的两种粒度**(生效优先级:`SRV_GUARD` 环境变量 > 当前 shell 的 `srv guard on/off` > 全局 config > 内置默认开):
+**想关掉 guard,按范围选一个:**
 
-- `srv guard off` —— 只关**当前 shell**。注意:MCP server 是 Claude Code 拉起的子进程,session id(Unix 下按父进程 pid 取)和你的交互 shell 不一样,所以这条**关不掉 MCP server 的 guard**。
-- `srv guard off --global` —— 写进 `config.json`(机器级),**MCP server 也会读到**且每次调用实时重读,无需重启。这是要对 AI/MCP 路径关闭 guard 时应该用的命令。`srv guard on --global` 恢复。
-- `srv guard status` —— 显示当前生效状态及它来自哪一层(env / session / global / default)。
+| 关的范围 | 命令 |
+|---|---|
+| 只关你当前这个终端 | `srv guard off` |
+| 连 Claude / AI 调用一起关 | `srv guard off --global` |
+| 临时强制(优先级最高,适合写进 MCP 注册) | 环境变量 `SRV_GUARD=off` |
 
-`SRV_GUARD=on|off` 环境变量优先级最高,适合写进 `claude mcp add` 注册里。
+关 AI 为什么要用 `--global`:Claude 调 srv 是一个独立的后台进程,跟你手敲命令的终端不是同一个会话,`srv guard off` 只管你的终端、管不到它;`--global` 是机器级开关,所有入口都生效,AI 下次调用立刻读到、不用重启。`srv guard on --global` 恢复。
+
+`srv guard status` 看现在是开是关、以及是哪一层设定的。(实现原理见 `docs/ARCHITECTURE.md` 的 Guard 一节。)
 
 | 命令 | 作用 |
 |---|---|
 | `srv mcp` | 以 stdio MCP server 模式运行，供 Claude Code / Codex 调用。 |
 | `srv mcp serve` | 显式启动 MCP server，等价于 `srv mcp`。 |
 | `srv mcp stats` | 查看 MCP 相关统计信息。 |
-| `srv guard status` | 查看 MCP 高风险操作确认 guard 状态。 |
-| `srv guard on` | 打开当前会话的 MCP 高风险确认 guard。 |
-| `srv guard off` | 关闭当前会话的 MCP 高风险确认 guard。 |
+| `srv guard status` | 查看 guard 现在生效状态,以及由哪一层决定(环境变量 / 当前 shell / 全局 / 默认)。 |
+| `srv guard on` / `off` | 开 / 关**当前 shell** 的 guard(管不到 Claude/MCP)。 |
+| `srv guard on --global` / `off --global` | 开 / 关**机器级** guard,Claude/MCP 调用也生效(写入 `config.json`)。 |
 | `srv guard test "<cmd>"` | dry-run:对照当前规则集判断 `<cmd>` 会不会被 guard 拦截。 |
 | `srv guard rules list` | 看当前规则 + allow 列表。`defaults: on/off` 行控制是否启用内置规则。 |
 | `srv guard rules add <name> <regex>` | 新增/替换一条 deny 规则。 |
