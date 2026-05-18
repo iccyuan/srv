@@ -16,6 +16,7 @@ import (
 	"os/exec"
 	"srv/internal/config"
 	"srv/internal/daemon"
+	"srv/internal/mcplog"
 	"srv/internal/srvutil"
 )
 
@@ -86,6 +87,18 @@ func Checks(cfg *config.Config, profileOverride, version string) ([]map[string]a
 		check("daemon", true, "running")
 	} else {
 		check("daemon", true, "not running; will auto-spawn for hot paths")
+	}
+	// MCP elicitation negotiation. Read from mcp.log because the
+	// handshake happens in the separate `srv mcp` process; doctor can't
+	// see that process's memory. Informational (ok=true regardless):
+	// "off" isn't a fault, it just means the guard hard-denies instead
+	// of prompting a human. "unknown" = no MCP session has handshaked.
+	if known, on, _, _ := mcplog.LastElicitation(); !known {
+		check("mcp elicitation", true, "no MCP handshake logged yet (connect once via Claude Code)")
+	} else if on {
+		check("mcp elicitation", true, "on (client supports it; guard hits prompt Allow/Deny)")
+	} else {
+		check("mcp elicitation", true, "off (client didn't advertise it; guard hard-denies)")
 	}
 	// SSH agent + agent-forwarding profile count: surface so users
 	// debugging "why doesn't my forwarded key reach the remote"

@@ -347,7 +347,24 @@ func guardCheckRisky(tool, cmd string, confirm bool) *toolResult {
 	if pat == "" {
 		return nil
 	}
-	r := guardBlocked(tool, fmt.Sprintf("command contains a high-risk pattern %q", pat))
+	reason := fmt.Sprintf("command contains a high-risk pattern %q", pat)
+	// Put a human in the loop before hard-denying: if the client can be
+	// asked (advertised the elicitation capability), surface an
+	// Allow/Deny prompt and honour the human's answer. asked=false means
+	// the client couldn't be reached -- fall back to the original
+	// hard-deny so a risky command is never let through just because the
+	// round-trip was unavailable.
+	allowByHuman, asked := elicitConfirm(fmt.Sprintf(
+		"srv guard: %s wants to run a high-risk command.\n\n  %s\n\nReason: %s\n\nAllow it to run?",
+		tool, cmd, reason))
+	if asked {
+		if allowByHuman {
+			return nil
+		}
+		r := guardDenied(tool, reason)
+		return &r
+	}
+	r := guardBlocked(tool, reason)
 	return &r
 }
 

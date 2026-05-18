@@ -165,6 +165,29 @@ func guardBlocked(tool, reason string) toolResult {
 	}
 }
 
+// guardDenied is the result when the human was asked (via MCP
+// elicitation) and said no. Distinct from guardBlocked: that one means
+// "couldn't ask / not confirmed, here's how to bypass"; this one means
+// a person explicitly declined, so the model must NOT retry or hunt
+// for a bypass. Keeps guard_blocked=true + tool so anything branching
+// on the guard envelope still sees a blocked op.
+func guardDenied(tool, reason string) toolResult {
+	text := fmt.Sprintf(
+		"guard: %s denied by the user at the confirmation prompt. %s\nThe human explicitly declined -- do not retry, do not pass confirm=true, do not look for a workaround. If you believe this was a mistake, ask the user to re-issue the request.",
+		tool, reason,
+	)
+	return toolResult{
+		IsError: true,
+		Content: []toolContent{{Type: "text", Text: text}},
+		StructuredContent: map[string]any{
+			"guard_blocked": true,
+			"denied_by":     "user",
+			"tool":          tool,
+			"reason":        reason,
+		},
+	}
+}
+
 // jsonResult returns a tool result whose Content is a *compact* JSON
 // rendering of `info`, with no separate StructuredContent. Both fields
 // reach the MCP client; duplicating the same JSON in pretty-printed

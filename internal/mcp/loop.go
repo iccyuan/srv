@@ -48,6 +48,10 @@ func Run(cfg *config.Config, versionStr string) error {
 	progress.SetQuiet(true)
 	mcplog.Logf("start v=%s", versionStr)
 	rd := bufio.NewReader(os.Stdin)
+	// Publish the reader so the guard's elicitation round-trip can pump
+	// it inline (it must read replies on the SAME buffered reader the
+	// loop uses, or buffered bytes are lost). See elicit.go.
+	stdinReader = rd
 	for {
 		line, err := rd.ReadString('\n')
 		if err != nil {
@@ -73,6 +77,21 @@ func Run(cfg *config.Config, versionStr string) error {
 		}
 		switch req.Method {
 		case "initialize":
+			// Elicitation is a *client* capability: the server doesn't
+			// advertise it, it checks whether the peer can be asked
+			// before sending an elicitation/create. Recorded here so the
+			// guard knows whether a human can be put in the loop or it
+			// must fall back to hard-deny. We do NOT bump
+			// protocolVersion -- capability negotiation is the gate, and
+			// changing the version string risks other client behaviour.
+			var ip struct {
+				Capabilities struct {
+					Elicitation *json.RawMessage `json:"elicitation"`
+				} `json:"capabilities"`
+			}
+			_ = json.Unmarshal(req.Params, &ip)
+			clientElicitation = ip.Capabilities.Elicitation != nil
+			mcplog.Logf("initialize elicitation=%v", clientElicitation)
 			send(response(req.ID, map[string]any{
 				"protocolVersion": protocolVersion,
 				"capabilities":    map[string]any{"tools": map[string]any{"listChanged": false}},

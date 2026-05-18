@@ -56,38 +56,17 @@ type ToolCall struct {
 // the caller renders a one-line "stopped".
 func Read() Status {
 	st := Status{LogPath: Path()}
-	info, err := os.Stat(st.LogPath)
-	if err != nil {
+	// Stat first so "file exists but unreadable" still renders
+	// LogExists=true (a dead session, not "never started"). tailText
+	// re-stats -- a microsecond, well inside doctor's ~10 ms budget.
+	if _, err := os.Stat(st.LogPath); err != nil {
 		return st
 	}
 	st.LogExists = true
 
-	f, err := os.Open(st.LogPath)
-	if err != nil {
+	text, ok := tailText()
+	if !ok {
 		return st
-	}
-	defer f.Close()
-
-	// Read just the tail. Anything beyond 64 KiB is older than we
-	// care about for a "current state" view.
-	var startAt int64
-	if info.Size() > tailBytes {
-		startAt = info.Size() - tailBytes
-	}
-	if _, err := f.Seek(startAt, 0); err != nil {
-		return st
-	}
-	buf := make([]byte, info.Size()-startAt)
-	if _, err := f.Read(buf); err != nil {
-		return st
-	}
-	text := string(buf)
-	// If we jumped into the middle of a line (likely on the first
-	// tail), drop the partial leading line.
-	if startAt > 0 {
-		if i := strings.IndexByte(text, '\n'); i >= 0 {
-			text = text[i+1:]
-		}
 	}
 
 	type pidState struct {
@@ -149,6 +128,84 @@ func Read() Status {
 	}
 	sort.Ints(st.ActivePIDs)
 	return st
+}
+
+// tailText reads at most the last tailBytes of mcp.log and returns it
+// as a string, dropping a partial leading line when the window starts
+// mid-file (so callers never parse a half record). Returns ("", false)
+// when the log is missing or unreadable. Shared by Read (dashboard)
+// and LastElicitation (doctor) so the bounded-tail logic lives once.
+func tailText() (string, bool) {
+	path := Path()
+	info, err := os.Stat(path)
+	if err != nil {
+		return "", false
+	}
+	f, err := os.Open(path)
+	if err != nil {
+		return "", false
+	}
+	defer f.Close()
+
+	// Anything beyond tailBytes is older than any "current state" view
+	// cares about.
+	var startAt int64
+	if info.Size() > tailBytes {
+		startAt = info.Size() - tailBytes
+	}
+	if _, err := f.Seek(startAt, 0); err != nil {
+		return "", false
+	}
+	buf := make([]byte, info.Size()-startAt)
+	if _, err := f.Read(buf); err != nil {
+		return "", false
+	}
+	text := string(buf)
+	if startAt > 0 {
+		if i := strings.IndexByte(text, '\n'); i >= 0 {
+			text = text[i+1:]
+		}
+	}
+	return text, true
+}
+
+// LastElicitation reports the most recent client/server elicitation
+// negotiation recorded in mcp.log. Each `srv mcp` process logs one
+// `initialize elicitation=<bool>` line at handshake (loop.go); the
+// last such line in the tail window is the current answer.
+//
+// Returns:
+//
+//	known -> an initialize line was found (an MCP session has run)
+//	on    -> the negotiated value (client advertised the capability)
+//	when  -> timestamp of that handshake
+//	pid   -> which `srv mcp` process negotiated it
+//
+// known=false means no MCP session has handshaked recently -- the
+// caller should say "unknown", not "off".
+func LastElicitation() (known, on bool, when time.Time, pid int) {
+	text, ok := tailText()
+	if !ok {
+		return false, false, time.Time{}, 0
+	}
+	const prefix = "initialize elicitation="
+	for _, line := range strings.Split(text, "\n") {
+		line = strings.TrimRight(line, "\r")
+		if line == "" {
+			continue
+		}
+		ts, p, payload, ok := ParseLine(line)
+		if !ok || !strings.HasPrefix(payload, prefix) {
+			continue
+		}
+		// Read forward, keep overwriting -> last match wins (most
+		// recent handshake, possibly a different pid than earlier ones).
+		known = true
+		on = strings.TrimSpace(payload[len(prefix):]) == "true"
+		when = ts
+		pid = p
+	}
+	return known, on, when, pid
 }
 
 // ParseLine splits one log line into its three pieces. Format:

@@ -256,6 +256,27 @@ re-issue with `confirm=true`, but constant friction on routine ops
 would push users to disable the gate entirely. False negatives are
 not recoverable, so the bias is "few rules, all unambiguous".
 
+**Human-in-the-loop (MCP elicitation).** On a rule hit, if the client
+advertised the `elicitation` capability in `initialize`, the guard no
+longer hard-denies outright: it sends the client an
+`elicitation/create` Allow/Deny prompt and honours the human's answer
+— the decision goes back to a person instead of the model bypassing
+itself with `confirm=true`. When the client did not advertise the
+capability (or the pipe is gone) it falls back to the original
+hard-deny (the documented degrade path); a risky command is never let
+through just because nobody could be asked. Transport gotcha: the
+request loop is strictly serial and runs each tool handler in the read
+goroutine, so "send a request, await the reply" would deadlock
+(nothing reads stdin while the handler blocks). So `elicitConfirm`
+reuses the loop's **same `bufio.Reader`** and pumps it inline until
+the matching reply lands, handling the few frames a serial client can
+interleave (ping / notifications) — preserving the "one thing at a
+time, bare globals race-free" invariant. The result envelope
+distinguishes `guardDenied` (a person explicitly said no: do not
+retry, do not hunt for a bypass) from `guardBlocked` (couldn't ask /
+not confirmed: here's the bypass), while both keep
+`guard_blocked=true`.
+
 **Quoted-payload matching.** `codePositions` classifies each byte as
 code vs string-literal so `echo "rm -rf /"` does not trip — quoted
 content is treated as inert. That same rule would let

@@ -179,6 +179,8 @@ profile 解析优先级:
 
 **规则集刻意收窄。** 只拦不可逆破坏(`rm -rf`、`dd of=`、`mkfs`、`DROP`/`TRUNCATE`、写裸盘、对应的 NoSQL、macOS `diskutil`/`newfs_*`)外加主机电源控制。可恢复但有破坏性的操作和纯前置动作(`chattr -i`)刻意排除:默认开下,误报只是带 `confirm=true` 重试一次,但日常操作上的持续摩擦会逼用户彻底关掉闸。漏报不可逆,所以偏向"规则少而全部无歧义"。
 
+**真人确认(MCP elicitation)。** 命中风险规则时,如果客户端在 `initialize` 声明了 `elicitation` capability,guard 不再直接硬拒,而是向客户端发 `elicitation/create` 弹 Allow/Deny,按真人答案放行或拦截 —— 决定权回到人手里,而不是模型自己带 `confirm=true` 绕过。客户端没声明该能力 / 管道已断时退回原来的硬拒(文档化的降级路径),绝不因为问不到人就放行。传输上有个坑:请求 loop 严格串行、tool handler 跑在读 goroutine 里,"发请求再等回包"会死锁(handler 阻塞时没人读 stdin)。所以 `elicitConfirm` 复用 loop 那个**同一个 `bufio.Reader`** 内联抽帧,直到匹配回包到达,顺带处理串行客户端可能插进来的少数帧(ping / 通知)—— 保持"一次只做一件事、裸 global 无竞争"的不变量。结果信封上 `guardDenied`(人明确拒绝:别重试、别找绕过)和 `guardBlocked`(问不到 / 未确认:这是绕过方式)语义不同,但都保留 `guard_blocked=true`。
+
 **引号 payload 匹配。** `codePositions` 把每个字节分类为代码位 vs 字符串字面量,所以 `echo "rm -rf /"` 不触发 —— 引号内容视为惰性。同一规则会放过 `mysql -e "DROP DATABASE x"`。DB 客户端规则的做法是:把正则锚在**未加引号的客户端二进制**(`mysql`/`psql`/`mongosh` 等)上,它在代码位,再向前伸进引号参数。闸检查的是匹配起点,所以引号里的 verb 被抓到,而整体被 echo 包住的形式(客户端名自己在引号里)仍被抑制 —— 不放大误报。客户端→flag、flag→verb 两段都用 `[^|;&\n]`,verb 必须和客户端在同一条简单命令里,后面的 `&& echo "...drop database..."` 不会触发。有界量词保持 RE2 线性。
 
 **三层状态,以及 `--global` 为什么存在。** 生效状态解析为:`SRV_GUARD` env > 每 session 记录 > 全局 config(`GuardConfig.GlobalOff`)> 内置默认开。每 session 记录按 ppid 推导的 session id 取。MCP server 是 AI 客户端的子进程,不是你交互 shell 的子进程,所以它的 session id 永远对不上。因此每 shell 的 `srv guard off` 到不了模型那条路径 —— 这正是 `srv guard off --global` 存在的全部理由。它写 `config.json`,而 MCP server 每次调用都重读(实时,无需重启)。
