@@ -1,6 +1,6 @@
 # Changelog
 
-## [Unreleased]
+## [Go 2.6.8] - 2026-05-18
 
 ### Added
 - **顶层 `srv prune <target>` 命令**:统一清理 srv 累积的本地缓存/历史,target 可 Tab 补全 —— `jobs` / `sessions` / `mcp-log` / `mcp-stats` / `all`。补全 DSL、help、target 列表三处共用同一份 `prune.Targets`。
