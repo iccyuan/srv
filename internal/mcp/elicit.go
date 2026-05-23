@@ -56,6 +56,12 @@ var elicitSeq int
 // live MCP peer. Mirrors the guardConfigForTests seam.
 var elicitFnForTests func(prompt string) (allow bool, asked bool)
 
+// elicitPasswordFnForTests is the sibling seam for elicitPassword.
+// Same shape as elicitFnForTests but returns the seeded password
+// string along with the asked flag (asked=false means client can't
+// be prompted or the answer was non-accept / empty).
+var elicitPasswordFnForTests func(prompt string) (password string, asked bool)
+
 // elicitConfirm asks the human, via the MCP client, to allow or deny
 // an operation. Returns (allow, asked):
 //
@@ -153,6 +159,127 @@ func elicitConfirm(prompt string) (allow bool, asked bool) {
 		default:
 			// Notification (no id) -- e.g. notifications/cancelled.
 			// Nothing to reply; keep pumping.
+		}
+	}
+}
+
+// elicitPassword asks the human, via the MCP client, for a sudo
+// password. Sends an `elicitation/create` whose schema declares a
+// single required string field. The schema deliberately does NOT
+// set `format: "password"`: Claude Code's MCP client (verified
+// 2026-05-24) validates `requestedSchema` against a strict subset
+// where the only legal `format` values are email/uri/date/date-time,
+// and rejects the whole request with -32602 if anything else is
+// supplied. A plain string field is what Claude Code will actually
+// render; the description text flags it as sensitive. Clients that
+// would have masked a `format:"password"` field will render this
+// the same as any other string -- the trade-off was made for
+// breadth-of-client-support over masking on the subset that supports
+// it. Returns (password, asked):
+//
+//	asked=false -> client can't be prompted (no capability, transport
+//	               gone, JSON-RPC error, action != accept, OR the
+//	               password came back empty). Caller MUST treat as
+//	               "no password provided" and fall back; we never
+//	               invent a value.
+//	asked=true  -> human typed something; `password` is the plaintext.
+//	               The handler is responsible for seeding it into the
+//	               daemon cache and then dropping the local copy.
+//
+// SECURITY NOTE: this function deliberately does NOT log the
+// password, the password's length, or any partial / hash of it.
+// mcplog records only the action verb -- everything else gets
+// dropped. The plaintext leaves this function ONLY as the return
+// value, which the single caller (handleSudo) forwards straight to
+// sudo.CacheSet and otherwise discards.
+func elicitPassword(prompt string) (password string, asked bool) {
+	if elicitPasswordFnForTests != nil {
+		return elicitPasswordFnForTests(prompt)
+	}
+	if !clientElicitation || stdinReader == nil {
+		return "", false
+	}
+
+	elicitSeq++
+	id := fmt.Sprintf("srv-elicit-%d", elicitSeq)
+
+	send(map[string]any{
+		"jsonrpc": "2.0",
+		"id":      id,
+		"method":  "elicitation/create",
+		"params": map[string]any{
+			"message": prompt,
+			"requestedSchema": map[string]any{
+				"type":     "object",
+				"required": []string{"password"},
+				"properties": map[string]any{
+					"password": map[string]any{
+						"type":        "string",
+						"title":       "sudo password",
+						"description": "Sensitive: this is your remote sudo password. The Claude Code client renders elicitation inputs as plain text -- the characters you type will be visible. The value is sent to srv and seeded into the daemon's in-memory cache; it never enters a tool result and the model never sees it.",
+					},
+				},
+			},
+		},
+	})
+	mcplog.Logf("elicit-pw id=%s sent", id)
+
+	want := []byte(`"` + id + `"`)
+	for {
+		line, err := stdinReader.ReadString('\n')
+		if err != nil {
+			mcplog.Logf("elicit-pw id=%s read err=%s", id, classifyReadErr(err))
+			return "", false
+		}
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		var f struct {
+			ID     json.RawMessage `json:"id"`
+			Method string          `json:"method"`
+			Result json.RawMessage `json:"result"`
+			Error  *jsonRPCError   `json:"error"`
+		}
+		if json.Unmarshal([]byte(line), &f) != nil {
+			continue
+		}
+
+		// Response carrying our id is the answer.
+		if f.Method == "" && bytes.Equal(bytes.TrimSpace(f.ID), want) {
+			if f.Error != nil {
+				mcplog.Logf("elicit-pw id=%s error=%d %s", id, f.Error.Code, f.Error.Message)
+				return "", false
+			}
+			var res struct {
+				Action  string `json:"action"`
+				Content struct {
+					Password string `json:"password"`
+				} `json:"content"`
+			}
+			_ = json.Unmarshal(f.Result, &res)
+			a := strings.ToLower(strings.TrimSpace(res.Action))
+			// Log ONLY the action verb. The password (and even its
+			// length / boolean presence) stays out of the log.
+			mcplog.Logf("elicit-pw id=%s action=%s", id, a)
+			if a != "accept" || res.Content.Password == "" {
+				return "", false
+			}
+			return res.Content.Password, true
+		}
+
+		// Interleaved frames a serial client can legitimately send:
+		switch {
+		case f.Method == "ping":
+			send(response(rawID(f.ID), map[string]any{}, nil))
+		case f.Method != "" && len(f.ID) > 0 && string(bytes.TrimSpace(f.ID)) != "null":
+			mcplog.Logf("elicit-pw id=%s unexpected request method=%s", id, f.Method)
+			send(response(rawID(f.ID), nil, &jsonRPCError{
+				Code:    -32603,
+				Message: "srv: busy awaiting elicitation response",
+			}))
+		default:
+			// Notification (no id) -- nothing to reply to.
 		}
 	}
 }

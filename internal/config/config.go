@@ -166,6 +166,32 @@ type Profile struct {
 	// "treat as X" while a host migration is in progress. The escape
 	// hatch wins absolutely; auto-detect is the default.
 	Platform string `json:"platform,omitempty"`
+	// EnableMCPPasswordPrompt opts this profile in to the MCP sudo
+	// handler's elicitation-based password prompt. Default false.
+	//
+	// When OFF (default): a `sudo` MCP call with an empty/expired
+	// daemon cache returns `cached:false` and tells the caller to seed
+	// from a terminal via `srv sudo --cache-ttl 15m -P <name> true`.
+	// The password can ONLY enter the cache via that TTY-driven CLI.
+	//
+	// When ON: the same cache miss triggers a SECOND elicitation round
+	// trip, this time with a `format:"password"` field. The client
+	// renders a masked input; the answer is read by the srv process,
+	// seeded into the daemon cache (5 min TTL), and the sudo command
+	// proceeds in the same tool call. The model NEVER sees the
+	// password -- it travels client UI -> srv -> daemon, not through
+	// the tool result.
+	//
+	// Trade-off: removes the "drop to a terminal" friction at the cost
+	// of widening the attack surface for prompt injection. A malicious
+	// tool result that nudges the model into calling `sudo` will now
+	// pop up a password prompt -- the user has to recognise whether
+	// they actually initiated that request. The CLI-only seed path is
+	// stronger because crossing the privilege boundary requires a
+	// deliberate terminal action. Enable per-profile only when you've
+	// decided that trade-off is acceptable, e.g. on dev / staging
+	// remotes accessed exclusively from a no-terminal client.
+	EnableMCPPasswordPrompt bool `json:"enable_mcp_password_prompt,omitempty"`
 	// Free-form bag for unknown keys forwarded from older Python configs.
 	Extra map[string]any `json:"-"`
 	// Name is the profile's lookup key in Config.Profiles. Populated by

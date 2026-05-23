@@ -124,3 +124,107 @@ func TestHandleSudo_NoConfirmArgBypassesGate(t *testing.T) {
 		t.Errorf("confirm-bypass attempt should still hit the elicit-unavailable path, got %q", resultText(r))
 	}
 }
+
+// sudoTestCfgOptIn returns the same minimal profile as sudoTestCfg
+// but with EnableMCPPasswordPrompt = true. Used by the opt-in path
+// tests to assert that the password-elicit branch is taken only when
+// the profile explicitly opts in.
+func sudoTestCfgOptIn() *config.Config {
+	return &config.Config{
+		DefaultProfile: "p",
+		Profiles: map[string]*config.Profile{
+			"p": {Name: "p", Host: "127.0.0.1", User: "nobody", Port: 22, EnableMCPPasswordPrompt: true},
+		},
+	}
+}
+
+// TestHandleSudo_OptInOff_CacheMissStillReturnsHint: when the toggle
+// is off (the default and what sudoTestCfg uses), a cache miss must
+// behave exactly like the pre-opt-in implementation -- structured
+// cached:false plus a hint to seed from a terminal. The hint text
+// also gains a sentence advertising the opt-in path, so we assert
+// both bits are present.
+func TestHandleSudo_OptInOff_CacheMissStillReturnsHint(t *testing.T) {
+	t.Setenv("SRV_HOME", t.TempDir())
+	elicitFnForTests = func(string) (bool, bool) { return true, true }
+	// Sanity check: even if a password-elicit seam were installed,
+	// the opt-in-off path must not consult it. Set the seam to a
+	// fataling fn so any unexpected call surfaces immediately.
+	elicitPasswordFnForTests = func(string) (string, bool) {
+		t.Fatal("opt-in OFF must not invoke elicitPassword")
+		return "", false
+	}
+	t.Cleanup(func() {
+		elicitFnForTests = nil
+		elicitPasswordFnForTests = nil
+	})
+
+	r := handleSudo(map[string]any{"command": "whoami"}, sudoTestCfg(), "")
+	if !r.IsError {
+		t.Fatal("opt-in OFF + cache miss must error")
+	}
+	body := resultText(r)
+	if !strings.Contains(body, "no cached password") {
+		t.Errorf("body missing 'no cached password': %q", body)
+	}
+	if !strings.Contains(body, "enable_mcp_password_prompt") {
+		t.Errorf("body should advertise the opt-in alternative, got %q", body)
+	}
+}
+
+// TestHandleSudo_OptInOn_DeclineReturnsHint: the human Allow-ed the
+// command, opt-in is on, but they cancel / decline the subsequent
+// password prompt (or the client returns empty). The handler must
+// fall back to the same cached:false hint -- no half-state where we
+// dial without a password. The hint here should NOT include the
+// "set enable_mcp_password_prompt: true" line (already true).
+func TestHandleSudo_OptInOn_DeclineReturnsHint(t *testing.T) {
+	t.Setenv("SRV_HOME", t.TempDir())
+	elicitFnForTests = func(string) (bool, bool) { return true, true }
+	elicitPasswordFnForTests = func(string) (string, bool) { return "", false }
+	t.Cleanup(func() {
+		elicitFnForTests = nil
+		elicitPasswordFnForTests = nil
+	})
+
+	r := handleSudo(map[string]any{"command": "whoami"}, sudoTestCfgOptIn(), "")
+	if !r.IsError {
+		t.Fatal("opt-in ON + password decline must error")
+	}
+	body := resultText(r)
+	if !strings.Contains(body, "no cached password") {
+		t.Errorf("body missing 'no cached password': %q", body)
+	}
+	if strings.Contains(body, "enable_mcp_password_prompt") {
+		t.Errorf("opt-in already on; should not advertise the toggle, got %q", body)
+	}
+}
+
+// TestHandleSudo_OptInOn_AcceptProceedsPastCacheCheck: the human
+// supplies a password via the elicit-password seam. The handler must
+// move past the cache-miss branch and into the dial+run code. We
+// can't reach a real SSH endpoint from a test, so the success
+// signal is "no longer the cached:false hint" -- the error must be
+// a downstream dial failure, not the cache-miss diagnostic.
+func TestHandleSudo_OptInOn_AcceptProceedsPastCacheCheck(t *testing.T) {
+	t.Setenv("SRV_HOME", t.TempDir())
+	elicitFnForTests = func(string) (bool, bool) { return true, true }
+	elicitPasswordFnForTests = func(string) (string, bool) { return "secret", true }
+	t.Cleanup(func() {
+		elicitFnForTests = nil
+		elicitPasswordFnForTests = nil
+	})
+
+	r := handleSudo(map[string]any{"command": "whoami"}, sudoTestCfgOptIn(), "")
+	if !r.IsError {
+		// We don't actually expect success -- the test profile points
+		// at 127.0.0.1:22 with bogus creds, so the dial will fail. A
+		// non-error here would mean we somehow short-circuited; treat
+		// as a regression worth flagging.
+		t.Fatal("expected dial-stage error against unreachable test endpoint")
+	}
+	body := resultText(r)
+	if strings.Contains(body, "no cached password") {
+		t.Errorf("opt-in accept path took the cache-miss branch despite a seeded password: %q", body)
+	}
+}

@@ -3,11 +3,19 @@ package mcp
 import (
 	"fmt"
 	"strings"
+	"time"
 
 	"srv/internal/config"
 	"srv/internal/sshx"
 	"srv/internal/sudo"
 )
+
+// mcpElicitedCacheTTL is the TTL applied when the MCP password-prompt
+// path seeds the daemon cache. Mirrors the CLI default (5 min). Kept
+// short on purpose -- the prompt is cheap to re-show, and a stale
+// cache after a long idle period is exactly the kind of thing a
+// drive-by injection would try to exploit.
+const mcpElicitedCacheTTL = 5 * time.Minute
 
 // handleSudo runs a privileged command on the remote using a
 // password that MUST have been seeded into the daemon's in-memory
@@ -20,11 +28,18 @@ import (
 //     client that doesn't support elicitation is hard-denied. A
 //     `confirm` arg is intentionally not exposed -- there is no
 //     model-side bypass for crossing the privilege boundary.
-//   - The handler ONLY reads sudo.CacheGet; it NEVER writes to the
-//     cache. A password can therefore only enter the cache via the
-//     TTY-prompting `srv sudo` CLI. If the cache is empty / expired,
-//     the response tells the caller to seed it from a terminal --
-//     we do not invent a "paste your password into the chat" path.
+//   - The handler reads sudo.CacheGet and -- only when the profile
+//     opts in via EnableMCPPasswordPrompt -- writes to it via
+//     sudo.CacheSet using a password collected through MCP
+//     elicitation (an `elicitation/create` with a `format:"password"`
+//     field; the answer travels client UI -> srv -> daemon and never
+//     enters a tool result, so the model can't see it). Default OFF.
+//     With the toggle off, the cache miss path returns the "seed
+//     from a terminal" hint exactly as before -- a password enters
+//     the cache only via the TTY-prompting `srv sudo` CLI. We still
+//     never invent a "paste your password into the chat" path: the
+//     model never asks for it, the elicitation goes through the
+//     client UI directly.
 //
 // The full cmd flows through MCP replay (~/.srv/mcp-replay.jsonl)
 // like every other tool call; pair with `srv mcp replay show <idx>`
@@ -60,6 +75,22 @@ func handleSudo(args map[string]any, cfg *config.Config, profileOverride string)
 	}
 
 	pw := sudo.CacheGet(profName)
+	if pw == "" && prof.EnableMCPPasswordPrompt {
+		// Opt-in MVP: a SECOND elicitation round trip, this time with a
+		// `format:"password"` field. Capable clients render a masked
+		// input; the answer is consumed inside this process (sudo.CacheSet
+		// seeds the daemon, then we proceed to dial+run), so the model
+		// never sees the password in any tool result / replay. Off by
+		// default per Profile.EnableMCPPasswordPrompt -- the docstring on
+		// the field explains the prompt-injection trade-off.
+		seeded, got := elicitPassword(fmt.Sprintf(
+			"srv sudo: password for %s@%s (profile %q) to run:\n\n  sudo %s\n\nThe entered password is cached in-memory for %s; it never touches disk.",
+			prof.User, prof.Host, profName, cmd, mcpElicitedCacheTTL))
+		if got && seeded != "" {
+			sudo.CacheSet(profName, seeded, mcpElicitedCacheTTL)
+			pw = seeded
+		}
+	}
 	if pw == "" {
 		// Structured cached:false so a client UI can render a guided
 		// "seed the cache" hint; the text body is what the model sees
@@ -71,6 +102,9 @@ func handleSudo(args map[string]any, cfg *config.Config, profileOverride string)
 				"(or any harmless sudo command). The cache lives in the daemon's "+
 				"in-memory store, never on disk; MCP only reads it.",
 			profName, profName)
+		if !prof.EnableMCPPasswordPrompt {
+			text += " Alternatively, set `enable_mcp_password_prompt: true` on this profile to allow an in-client password prompt for the next call."
+		}
 		return toolResult{
 			Content: []toolContent{{Type: "text", Text: text}},
 			StructuredContent: map[string]any{

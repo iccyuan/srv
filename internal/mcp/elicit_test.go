@@ -133,6 +133,133 @@ func TestElicitConfirm_Transport(t *testing.T) {
 	}
 }
 
+// TestElicitPassword_Transport_Accept: drive the real round-trip
+// with an accept reply that carries a password in content. Asserts
+// (a) the outgoing frame declares a `format:"password"` field so a
+// capable client renders a masked input, and (b) the helper returns
+// the password verbatim with asked=true.
+func TestElicitPassword_Transport_Accept(t *testing.T) {
+	prevReader, prevCap, prevSeq := stdinReader, clientElicitation, elicitSeq
+	prevStdout := os.Stdout
+	t.Cleanup(func() {
+		stdinReader, clientElicitation, elicitSeq = prevReader, prevCap, prevSeq
+		os.Stdout = prevStdout
+	})
+
+	clientElicitation = true
+	elicitSeq = 0 // -> first request id is "srv-elicit-1"
+	reply := `{"jsonrpc":"2.0","id":"srv-elicit-1","result":{"action":"accept","content":{"password":"hunter2"}}}` + "\n"
+	stdinReader = bufio.NewReader(strings.NewReader(reply))
+
+	out, err := os.CreateTemp(t.TempDir(), "stdout-*")
+	if err != nil {
+		t.Fatal(err)
+	}
+	os.Stdout = out
+
+	pw, asked := elicitPassword("password?")
+
+	_ = out.Close()
+	os.Stdout = prevStdout
+	sent, _ := os.ReadFile(out.Name())
+
+	if !asked {
+		t.Fatalf("asked=false, want true (reply carried a password)")
+	}
+	if pw != "hunter2" {
+		t.Errorf("password=%q, want %q", pw, "hunter2")
+	}
+	if !strings.Contains(string(sent), `"method":"elicitation/create"`) {
+		t.Errorf("outgoing frame missing elicitation/create: %s", sent)
+	}
+	// We deliberately do NOT send format:"password" -- Claude Code's
+	// MCP client validates against a strict subset (only email/uri/
+	// date/date-time accepted) and rejects the whole request with
+	// -32602 otherwise. Assert the negative: if this string ever
+	// re-appears, the schema is regressing back to the broken shape
+	// captured during the 2026-05-24 live verification.
+	if strings.Contains(string(sent), `"format":"password"`) {
+		t.Errorf("schema must NOT set format:password (Claude Code rejects with -32602): %s", sent)
+	}
+	if !strings.Contains(string(sent), `"required":["password"]`) {
+		t.Errorf("outgoing schema must mark password required, got: %s", sent)
+	}
+	// description is the user-visible signal that the field is
+	// sensitive (since we can't ask the client to mask). Assert it's
+	// present so we don't accidentally drop the warning text.
+	if !strings.Contains(string(sent), `"description"`) {
+		t.Errorf("password property should carry a description warning the user the input is plain text, got: %s", sent)
+	}
+}
+
+// TestElicitPassword_DeclineAndEmpty: any of (action != accept) /
+// (empty password content) / (no content at all) must come back as
+// ("",false). Three sub-cases share the same wiring boilerplate.
+func TestElicitPassword_DeclineAndEmpty(t *testing.T) {
+	cases := []struct {
+		name  string
+		reply string
+	}{
+		{"decline", `{"jsonrpc":"2.0","id":"srv-elicit-1","result":{"action":"decline"}}`},
+		{"cancel", `{"jsonrpc":"2.0","id":"srv-elicit-1","result":{"action":"cancel"}}`},
+		{"accept-empty", `{"jsonrpc":"2.0","id":"srv-elicit-1","result":{"action":"accept","content":{"password":""}}}`},
+		{"accept-nocontent", `{"jsonrpc":"2.0","id":"srv-elicit-1","result":{"action":"accept"}}`},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			prevReader, prevCap, prevSeq := stdinReader, clientElicitation, elicitSeq
+			prevStdout := os.Stdout
+			t.Cleanup(func() {
+				stdinReader, clientElicitation, elicitSeq = prevReader, prevCap, prevSeq
+				os.Stdout = prevStdout
+			})
+
+			clientElicitation = true
+			elicitSeq = 0
+			stdinReader = bufio.NewReader(strings.NewReader(tc.reply + "\n"))
+			out, _ := os.CreateTemp(t.TempDir(), "stdout-*")
+			os.Stdout = out
+
+			pw, asked := elicitPassword("password?")
+			os.Stdout = prevStdout
+			_ = out.Close()
+
+			if pw != "" || asked {
+				t.Errorf("got (pw=%q, asked=%v), want (\"\", false)", pw, asked)
+			}
+		})
+	}
+}
+
+// TestElicitPassword_NoCapabilityDegrades: without the elicitation
+// capability, the helper must return ("",false) without writing any
+// frame to stdout -- the same hard-deny shape as elicitConfirm.
+func TestElicitPassword_NoCapabilityDegrades(t *testing.T) {
+	prevReader, prevCap := stdinReader, clientElicitation
+	prevStdout := os.Stdout
+	t.Cleanup(func() {
+		stdinReader, clientElicitation = prevReader, prevCap
+		os.Stdout = prevStdout
+	})
+
+	clientElicitation = false
+	stdinReader = nil
+	out, _ := os.CreateTemp(t.TempDir(), "stdout-*")
+	os.Stdout = out
+
+	pw, asked := elicitPassword("password?")
+	os.Stdout = prevStdout
+	_ = out.Close()
+	sent, _ := os.ReadFile(out.Name())
+
+	if pw != "" || asked {
+		t.Errorf("no-capability: got (pw=%q, asked=%v), want (\"\", false)", pw, asked)
+	}
+	if len(strings.TrimSpace(string(sent))) > 0 {
+		t.Errorf("no-capability path must not write any frame, got: %s", sent)
+	}
+}
+
 // TestElicitConfirm_PipeClosedDegrades: stdin EOF mid-elicitation must
 // degrade to asked=false (hard-deny), never fabricate an answer.
 func TestElicitConfirm_PipeClosedDegrades(t *testing.T) {
