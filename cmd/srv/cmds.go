@@ -391,6 +391,18 @@ func applyProfileSet(p *config.Profile, key, value string) {
 		p.PoolSize = n
 	case "proxy":
 		p.Proxy = value
+	case "inherits":
+		// Empty / null / none clears. Otherwise stored verbatim;
+		// Load() validates the named parent at resolution time
+		// (missing parent silently skips the merge -- dial-time
+		// errors surface the real issue clearer than a Load-time
+		// validation explosion would).
+		switch v {
+		case "", "null", "none":
+			p.Inherits = ""
+		default:
+			p.Inherits = value
+		}
 	case "platform":
 		// Accepts linux / darwin / other / "" (clear). Anything else
 		// stored as-is so it'll surface as "unknown" at use time

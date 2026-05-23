@@ -611,6 +611,7 @@ srv hooks set pre-sync 'cd $SRV_LOCAL && go vet ./...'
 | `env` | `{}` | 远端命令前置环境变量。 |
 | `jump` | `[]` | ProxyJump 链。最常见的写法是直接引用**另一个 profile 名**:`srv config set B jump A` 就让 B 通过 A 中转,A 自己的 host/user/port/identity_file 全部被自动复用;A 自带的 jump 链也会被递归展开。也支持字面 hop `[user@]host[:port]`,或在尾巴加 `+<keyfile>` 指定 per-hop 私钥作 escape hatch。详见下方[中转(ProxyJump)配置示例](#中转proxyjump配置示例)。 |
 | `platform` | (auto) | 远端 OS 类型,可选值 `linux` / `darwin` / `other` / 空(自动检测)。空时首次调用会跑一次 `uname -s` 并把结果缓存到 `~/.srv/cache/platform-<profile>.txt`(TTL 24h)。`srv journal` 在检测到 `darwin` 时自动派发到 macOS 统一日志(等价于 `--prefer log`,无需手动指定)。显式设置会跳过自动检测;改了 profile.host 想立刻重测,删掉对应 cache 文件即可。 |
+| `inherits` | 空 | 另一个 profile 的名字,从它继承字段。规则:**child 非零值赢**,slice / map / *bool 都按字段类型一致语义(标量 `child != 零值` 赢、`*bool` `child != nil` 赢、slice `child != nil` 赢可设 `[]` 清空、`env` 例外是 key-by-key 合并 child 赢冲突)。递归(A → B → C),环引用断开。`Name` / `Inherits` / `JumpResolved` 本身不继承。**注意**:解析发生在 `Load()`,会把合并结果写进内存里的 profile。后续 `srv config set`/`srv config edit` 触发 Save 会把继承来的字段平铺写回 JSON,child 就脱钩了。要长期维持符号链接,直接编辑 `~/.srv/config.json`,别走 set/edit。 |
 | `ssh_options` | `[]` | 原始 SSH `-o` 选项，最后追加。 |
 
 ### 中转(ProxyJump)配置示例

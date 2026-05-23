@@ -132,6 +132,29 @@ type Profile struct {
 	// errors -- they don't fall back to direct connect, because that
 	// would defeat a corporate egress policy that blocks the bypass.
 	Proxy string `json:"proxy,omitempty"`
+	// Inherits names another profile to inherit field defaults from.
+	// Resolution is recursive (A inherits B inherits C); cycles are
+	// detected and broken (the cycle's edge stays as-is, no infinite
+	// recursion). Merge rule is "child wins when child has a non-zero
+	// value":
+	//
+	//   - Strings / ints: child wins iff its value is non-empty / non-zero.
+	//   - *bool (Multiplex, Compression, etc): child wins iff non-nil.
+	//   - Slices ([]string, []JumpHop, ssh_options, ...): child wins iff
+	//     non-nil. Set explicitly to `[]` to clear an inherited list.
+	//   - map[string]string (Env): merged key-by-key, child wins on key
+	//     collisions. This is the only field where parent and child
+	//     contribute additively (the common pattern is "parent declares
+	//     base env, child adds/overrides a few").
+	//
+	// IMPORTANT footgun: inheritance is resolved at Load() into the
+	// in-memory Profile. If you Save() a child profile after that, the
+	// merged values get written back into the JSON and the child stops
+	// tracking parent's future changes. `srv config edit` and
+	// `srv config set` both go through Save. Prefer editing config.json
+	// directly when you want a child to stay symbolically linked to
+	// its parent.
+	Inherits string `json:"inherits,omitempty"`
 	// Platform is an optional override for the remote operating system
 	// kind. Accepted values: "linux", "darwin", "other" (BSD/illumos/
 	// etc), or "" (unset, auto-detect). When unset, callers go
@@ -269,6 +292,170 @@ func (c *Config) resolveJumpChain(p *Profile, visiting map[string]bool) []JumpHo
 		delete(visiting, hop.Spec)
 	}
 	return out
+}
+
+// ResolveInherits walks every profile and folds in the fields of the
+// profile named in `Inherits` (recursively up the chain). Mutates the
+// in-memory profile structs; intended to run once at Load() time
+// BEFORE ResolveJumps (so an inherited Jump chain gets the same name-
+// expansion treatment as a directly-declared one). Cycles
+// (`A inherits B inherits A`) short-circuit at the second visit; the
+// inheriting edge silently stops there rather than recursing forever.
+//
+// Per-field merge rules live in mergeProfileFromParent. Documented in
+// the Profile.Inherits doc comment because they're part of the user-
+// facing contract, not just an internal detail.
+func (c *Config) ResolveInherits() {
+	if c == nil {
+		return
+	}
+	for name, p := range c.Profiles {
+		if p == nil {
+			continue
+		}
+		p.Name = name
+		c.applyInheritance(p, map[string]bool{name: true})
+	}
+}
+
+// applyInheritance walks `p.Inherits` (and grandparent links) folding
+// each ancestor's fields into `p` via mergeProfileFromParent. The
+// visiting set carries every name on the current chain so a cycle
+// halts at the repeated edge. Missing parents are silently skipped --
+// dial-time errors against the unresolved field surface them clearly
+// enough (e.g. "no identity_file") and we don't want Load() to fail
+// on a typo in one profile.
+func (c *Config) applyInheritance(p *Profile, visiting map[string]bool) {
+	if p == nil || p.Inherits == "" {
+		return
+	}
+	parent, ok := c.Profiles[p.Inherits]
+	if !ok || parent == nil {
+		return
+	}
+	if visiting[p.Inherits] {
+		return
+	}
+	visiting[p.Inherits] = true
+	// Resolve grandparent's inheritance first so `parent` is itself
+	// fully merged before we read from it. Operates on a temporary
+	// copy because mutating the shared parent would leak the merge
+	// across siblings that inherit from it -- inheritance must be a
+	// child-side rewrite, never a parent-side mutation.
+	effectiveParent := *parent
+	c.applyInheritance(&effectiveParent, visiting)
+	mergeProfileFromParent(p, &effectiveParent)
+}
+
+// mergeProfileFromParent applies the documented merge rules from
+// Profile.Inherits's doc comment: child non-zero wins, slices replace
+// (not append), Env maps merge key-by-key with child winning. Care is
+// taken NOT to copy Name / Inherits / JumpResolved / Extra fields
+// from parent -- those are either bookkeeping (Name, JumpResolved) or
+// would create surprising chained inheritance (Inherits).
+func mergeProfileFromParent(child, parent *Profile) {
+	if child == nil || parent == nil {
+		return
+	}
+	if child.Host == "" {
+		child.Host = parent.Host
+	}
+	if child.User == "" {
+		child.User = parent.User
+	}
+	if child.Port == 0 {
+		child.Port = parent.Port
+	}
+	if child.IdentityFile == "" {
+		child.IdentityFile = parent.IdentityFile
+	}
+	if child.DefaultCwd == "" {
+		child.DefaultCwd = parent.DefaultCwd
+	}
+	if child.Multiplex == nil {
+		child.Multiplex = parent.Multiplex
+	}
+	if child.Compression == nil {
+		child.Compression = parent.Compression
+	}
+	if child.ConnectTimeout == 0 {
+		child.ConnectTimeout = parent.ConnectTimeout
+	}
+	if child.KeepaliveInterval == 0 {
+		child.KeepaliveInterval = parent.KeepaliveInterval
+	}
+	if child.KeepaliveCount == 0 {
+		child.KeepaliveCount = parent.KeepaliveCount
+	}
+	if child.ControlPersist == "" {
+		child.ControlPersist = parent.ControlPersist
+	}
+	if child.SyncRoot == "" {
+		child.SyncRoot = parent.SyncRoot
+	}
+	if child.SyncExclude == nil {
+		child.SyncExclude = parent.SyncExclude
+	}
+	if child.SshOptions == nil {
+		child.SshOptions = parent.SshOptions
+	}
+	if child.Jump == nil {
+		child.Jump = parent.Jump
+	}
+	if child.CompressSync == nil {
+		child.CompressSync = parent.CompressSync
+	}
+	if child.DialAttempts == 0 {
+		child.DialAttempts = parent.DialAttempts
+	}
+	if child.DialBackoff == "" {
+		child.DialBackoff = parent.DialBackoff
+	}
+	if child.AgentForwarding == nil {
+		child.AgentForwarding = parent.AgentForwarding
+	}
+	if child.Ciphers == nil {
+		child.Ciphers = parent.Ciphers
+	}
+	if child.MACs == nil {
+		child.MACs = parent.MACs
+	}
+	if child.KeyExchanges == nil {
+		child.KeyExchanges = parent.KeyExchanges
+	}
+	if child.HostKeyAlgorithms == nil {
+		child.HostKeyAlgorithms = parent.HostKeyAlgorithms
+	}
+	if child.CompressStreams == nil {
+		child.CompressStreams = parent.CompressStreams
+	}
+	if child.Autoconnect == nil {
+		child.Autoconnect = parent.Autoconnect
+	}
+	if child.PoolSize == 0 {
+		child.PoolSize = parent.PoolSize
+	}
+	if child.Proxy == "" {
+		child.Proxy = parent.Proxy
+	}
+	if child.Platform == "" {
+		child.Platform = parent.Platform
+	}
+	// Env: merge key-by-key, child wins on collisions. This is the
+	// one field where the additive semantics actually match how
+	// people structure shared base + per-host overrides. Replicating
+	// the same "child wins if non-nil" rule we use for slices would
+	// force the child to restate every parent var.
+	if len(parent.Env) > 0 {
+		if child.Env == nil {
+			child.Env = map[string]string{}
+		}
+		for k, v := range parent.Env {
+			if _, present := child.Env[k]; !present {
+				child.Env[k] = v
+			}
+		}
+	}
 }
 
 // jumpHopFromProfile converts a referenced profile into a concrete
@@ -602,10 +789,12 @@ func Load() (*Config, error) {
 	if cfg.Profiles == nil {
 		cfg.Profiles = map[string]*Profile{}
 	}
-	// Expand bare profile-name references in every profile's Jump
-	// chain into concrete hops. Done at load so the dial path is
-	// pure: sshx.Dial only needs to iterate JumpResolved (when set)
-	// and doesn't need to thread the whole *Config through.
+	// Fold parent fields into children FIRST (so an inherited Jump
+	// chain gets the same name-expansion treatment), then expand any
+	// bare profile-name references in every profile's Jump chain
+	// into concrete hops. Order matters: ResolveJumps reads the
+	// post-inherit Jump field.
+	cfg.ResolveInherits()
 	cfg.ResolveJumps()
 	srvutil.WarnIfNewerSchema(srvutil.Config(), cfg.Version)
 	return cfg, nil
