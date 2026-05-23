@@ -44,8 +44,18 @@ import (
 // import to keep transfer decoupled from daemon).
 const cacheProbeTimeout = 5 * time.Second
 
+// cacheProbeSkipWindow: when the cached client was used within this
+// window, skip the probe entirely and hand it back. A keepalive
+// round-trip through a high-latency jump path costs 500-800ms;
+// skipping it for back-to-back transfers (the most common pattern)
+// is the dominant residual saving after caching the dial itself.
+// 30s is comfortably below typical NAT idle (60-120s) so we still
+// probe before a conn realistically could have gone stale.
+const cacheProbeSkipWindow = 30 * time.Second
+
 type cachedClient struct {
-	client *sshx.Client
+	client   *sshx.Client
+	lastUsed time.Time
 }
 
 var (
@@ -62,54 +72,75 @@ var (
 // it) won't be handed out. On probe failure the dead client is
 // evicted and a fresh dial replaces it transparently. Callers see
 // only "got a client" or "dial error".
+//
+// Returns (client, note, err) where `note` is a short tag suitable
+// for timing logs: "cache-hit", "cache-stale-redial", "fresh-dial",
+// "lost-race". Empty when the timing knob is off (zero overhead).
 func AcquireSharedClient(profile *config.Profile) (*sshx.Client, error) {
+	c, _, err := acquireSharedClientWithNote(profile)
+	return c, err
+}
+
+// acquireSharedClientWithNote is the internal entry that also
+// returns a one-word note describing how the client was obtained,
+// for the timing breakdown.
+func acquireSharedClientWithNote(profile *config.Profile) (*sshx.Client, string, error) {
 	if profile == nil || profile.Name == "" {
-		// No name to key on: fall through to a fresh dial that the
-		// caller owns. Defensive -- in practice config.Resolve sets
-		// the name, but the cache requires it.
-		return sshx.Dial(profile)
+		c, err := sshx.Dial(profile)
+		return c, "fresh-dial-unkeyed", err
 	}
 
 	clientCacheMu.Lock()
 	entry := clientCache[profile.Name]
 	clientCacheMu.Unlock()
 
+	stale := false
 	if entry != nil && entry.client != nil && entry.client.Conn != nil {
-		if probeOK(entry.client) {
-			return entry.client, nil
+		// Skip the probe when the conn was used very recently:
+		// keepalive RTT through a jump path costs ~0.5-0.8s, and
+		// the conn can't realistically have NAT-timed-out in 30s.
+		if time.Since(entry.lastUsed) < cacheProbeSkipWindow {
+			clientCacheMu.Lock()
+			if cur, ok := clientCache[profile.Name]; ok && cur == entry {
+				cur.lastUsed = time.Now()
+			}
+			clientCacheMu.Unlock()
+			return entry.client, "cache-hit-fresh", nil
 		}
-		// Stale: drop it. The peer goroutine inside probeOK that
-		// might still be blocked on SendRequest unblocks the moment
-		// we call Close (the underlying TCP gets torn down).
+		if probeOK(entry.client) {
+			clientCacheMu.Lock()
+			if cur, ok := clientCache[profile.Name]; ok && cur == entry {
+				cur.lastUsed = time.Now()
+			}
+			clientCacheMu.Unlock()
+			return entry.client, "cache-hit", nil
+		}
+		stale = true
 		clientCacheMu.Lock()
 		if clientCache[profile.Name] == entry {
 			delete(clientCache, profile.Name)
 		}
 		clientCacheMu.Unlock()
 		_ = entry.client.Close()
-		// fall through to dial fresh
 	}
 
-	// Dial fresh and install. Multiple concurrent first-time acquires
-	// race here; the loser of the race throws away its dial. Tolerated
-	// because (a) first-time concurrent push to the same profile is
-	// rare in practice and (b) installing both would just leak one
-	// conn until process exit.
 	c, err := sshx.Dial(profile)
 	if err != nil {
-		return nil, err
+		return nil, "fresh-dial", err
 	}
 	clientCacheMu.Lock()
 	if existing, ok := clientCache[profile.Name]; ok && existing.client != nil && existing.client.Conn != nil {
-		// Lost the race -- another goroutine just installed a healthy
-		// entry. Use that and discard our dial.
+		existing.lastUsed = time.Now()
 		clientCacheMu.Unlock()
 		_ = c.Close()
-		return existing.client, nil
+		return existing.client, "lost-race", nil
 	}
-	clientCache[profile.Name] = &cachedClient{client: c}
+	clientCache[profile.Name] = &cachedClient{client: c, lastUsed: time.Now()}
 	clientCacheMu.Unlock()
-	return c, nil
+	if stale {
+		return c, "cache-stale-redial", nil
+	}
+	return c, "fresh-dial", nil
 }
 
 // probeOK races a single SSH keepalive request against

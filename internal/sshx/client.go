@@ -34,6 +34,14 @@ type Client struct {
 	chain   []*ssh.Client
 	sftpMu  sync.Mutex
 	sftp    *sftp.Client
+	// homeMu guards homeCache; ExpandRemoteHome runs `echo $HOME`
+	// exactly once per Client (per its lifetime) and reuses the
+	// answer thereafter. The remote user's $HOME doesn't change
+	// mid-session; on a high-latency jump path the ~3 RTTs of the
+	// echo round-trip was costing every push/pull ~1.4s of pure
+	// wait.
+	homeMu    sync.Mutex
+	homeCache string
 	// stopCh is closed by Close() so the keepalive goroutine returns
 	// immediately instead of waiting up to one full keepalive_interval
 	// for its next tick. Matters for short-lived clients (every MCP
@@ -438,6 +446,16 @@ func (c *Client) SFTP() (*sftp.Client, error) {
 	}
 	c.sftp = s
 	return s, nil
+}
+
+// SFTPInitialized reports whether the next SFTP() call will return a
+// cached subchannel (true) or open a fresh one (false). Used by
+// transfer's timing instrumentation to tag the first-open cost
+// separately from the warm-reuse cost.
+func (c *Client) SFTPInitialized() bool {
+	c.sftpMu.Lock()
+	defer c.sftpMu.Unlock()
+	return c.sftp != nil
 }
 
 // RunCaptureResult bundles the output of a captured remote command.
@@ -1122,16 +1140,29 @@ func (c *Client) ExpandRemoteHome(p string) (string, error) {
 	if !strings.HasPrefix(p, "~") {
 		return p, nil
 	}
-	res, err := c.RunCapture("echo $HOME", "")
-	if err != nil {
-		return p, err
-	}
-	if res.ExitCode != 0 {
-		return p, fmt.Errorf("remote $HOME lookup failed: %s", strings.TrimSpace(res.Stderr))
-	}
-	home := strings.TrimSpace(res.Stdout)
+	// Cache fast path. Mutex held only across the map read so a
+	// concurrent ExpandRemoteHome doesn't serialize on the actual
+	// echo round-trip. Race on first call (two goroutines both run
+	// echo $HOME, second one wastes the work) is intentional: same
+	// value lands either way, no correctness hazard.
+	c.homeMu.Lock()
+	home := c.homeCache
+	c.homeMu.Unlock()
 	if home == "" {
-		return p, fmt.Errorf("remote $HOME empty")
+		res, err := c.RunCapture("echo $HOME", "")
+		if err != nil {
+			return p, err
+		}
+		if res.ExitCode != 0 {
+			return p, fmt.Errorf("remote $HOME lookup failed: %s", strings.TrimSpace(res.Stderr))
+		}
+		home = strings.TrimSpace(res.Stdout)
+		if home == "" {
+			return p, fmt.Errorf("remote $HOME empty")
+		}
+		c.homeMu.Lock()
+		c.homeCache = home
+		c.homeMu.Unlock()
 	}
 	if p == "~" {
 		return home, nil

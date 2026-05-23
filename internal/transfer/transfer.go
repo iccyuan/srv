@@ -16,6 +16,7 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"github.com/pkg/sftp"
 )
@@ -93,13 +94,38 @@ func chunkParallel() int {
 // adjustment, so callers (CLI confirmation lines, MCP responses) can
 // surface where the file really went rather than the user's raw input.
 func PushPath(profile *config.Profile, local, remote string, recursive bool) (int, string, error) {
-	// AcquireSharedClient memoizes one *sshx.Client per profile for
-	// this process's lifetime; repeated push/pull on the same profile
-	// pay the SSH handshake (+ jump chain) exactly once. Stale conns
-	// are auto-detected and replaced via a bounded liveness probe at
-	// next acquire. We deliberately do NOT defer Close -- ownership
-	// stays with the cache.
-	c, err := AcquireSharedClient(profile)
+	// One-extra-attempt guard wraps the whole body: if the cached
+	// SSH client turned out to be dead inside the 30s skip-probe
+	// window (network blip / jump host restart / NAT forgetting
+	// us), the first attempt's SFTP op surfaces a conn-level error;
+	// withRetryOnConnDeath evicts the dead cache entry and runs the
+	// body once more on a fresh dial. Business errors (no such
+	// file, perm denied) are NOT retried -- only the connection-
+	// level signature triggers the second attempt.
+	var (
+		exitCode    int
+		finalRemote = remote
+	)
+	profName := ""
+	if profile != nil {
+		profName = profile.Name
+	}
+	err := withRetryOnConnDeath(profName, func() error {
+		ec, fr, e := pushPathOnce(profile, local, remote, recursive)
+		exitCode = ec
+		finalRemote = fr
+		return e
+	})
+	return exitCode, finalRemote, err
+}
+
+func pushPathOnce(profile *config.Profile, local, remote string, recursive bool) (int, string, error) {
+	pt := newPhaseTimer("push")
+	defer pt.Flush()
+
+	acqStart := time.Now()
+	c, acqNote, err := acquireSharedClientWithNote(profile)
+	pt.Record("acquire-client", time.Since(acqStart), acqNote)
 	if err != nil {
 		return 255, remote, err
 	}
@@ -112,12 +138,22 @@ func PushPath(profile *config.Profile, local, remote string, recursive bool) (in
 		recursive = true
 	}
 
-	resolved, err := c.ExpandRemoteHome(remote)
-	if err != nil {
+	var resolved string
+	if err := pt.Time("expand-home", func() error {
+		var e error
+		resolved, e = c.ExpandRemoteHome(remote)
+		return e
+	}); err != nil {
 		return 1, remote, err
 	}
 
+	sftpStart := time.Now()
+	sftpNote := "cache-hit"
+	if !c.SFTPInitialized() {
+		sftpNote = "first-open"
+	}
 	s, err := c.SFTP()
+	pt.Record("sftp-init", time.Since(sftpStart), sftpNote)
 	if err != nil {
 		return 1, resolved, err
 	}
@@ -128,18 +164,24 @@ func PushPath(profile *config.Profile, local, remote string, recursive bool) (in
 	// which returns the unhelpful "Failure" (SSH_FX_FAILURE) -- the SFTP
 	// server can't overwrite a directory with a file. Mirrors the
 	// symmetric handling PullPath has had since v1.
+	statStart := time.Now()
 	if rstat, statErr := s.Stat(resolved); statErr == nil && rstat.IsDir() {
 		resolved = path.Join(resolved, path.Base(local))
 	}
+	pt.Record("stat-remote-target", time.Since(statStart), "")
+	uploadStart := time.Now()
 	if recursive {
 		if err := uploadDir(c, local, resolved); err != nil {
+			pt.Record("upload", time.Since(uploadStart), "dir")
 			return 1, resolved, err
 		}
 	} else {
 		if err := Upload(c, local, resolved); err != nil {
+			pt.Record("upload", time.Since(uploadStart), "file")
 			return 1, resolved, err
 		}
 	}
+	pt.Record("upload", time.Since(uploadStart), "")
 	return 0, resolved, nil
 }
 
@@ -149,22 +191,56 @@ func PushPath(profile *config.Profile, local, remote string, recursive bool) (in
 // existing dir" rule fires, so callers can stat it to report transfer
 // size or surface to the user where bytes really ended up.
 func PullPath(profile *config.Profile, remote, local string, recursive bool) (int, string, error) {
-	// See PushPath for the cache rationale; ownership stays with
-	// AcquireSharedClient so we do NOT Close.
-	c, err := AcquireSharedClient(profile)
+	// One-extra-attempt guard; see PushPath for the rationale.
+	var (
+		exitCode   int
+		finalLocal = local
+	)
+	profName := ""
+	if profile != nil {
+		profName = profile.Name
+	}
+	err := withRetryOnConnDeath(profName, func() error {
+		ec, fl, e := pullPathOnce(profile, remote, local, recursive)
+		exitCode = ec
+		finalLocal = fl
+		return e
+	})
+	return exitCode, finalLocal, err
+}
+
+func pullPathOnce(profile *config.Profile, remote, local string, recursive bool) (int, string, error) {
+	pt := newPhaseTimer("pull")
+	defer pt.Flush()
+
+	acqStart := time.Now()
+	c, acqNote, err := acquireSharedClientWithNote(profile)
+	pt.Record("acquire-client", time.Since(acqStart), acqNote)
 	if err != nil {
 		return 255, local, err
 	}
 
-	resolved, err := c.ExpandRemoteHome(remote)
-	if err != nil {
+	var resolved string
+	if err := pt.Time("expand-home", func() error {
+		var e error
+		resolved, e = c.ExpandRemoteHome(remote)
+		return e
+	}); err != nil {
 		return 1, local, err
+	}
+	sftpStart := time.Now()
+	sftpNote := "cache-hit"
+	if !c.SFTPInitialized() {
+		sftpNote = "first-open"
 	}
 	s, err := c.SFTP()
+	pt.Record("sftp-init", time.Since(sftpStart), sftpNote)
 	if err != nil {
 		return 1, local, err
 	}
+	statStart := time.Now()
 	st, err := s.Stat(resolved)
+	pt.Record("stat-remote-source", time.Since(statStart), "")
 	if err != nil {
 		return 1, local, err
 	}
@@ -177,15 +253,20 @@ func PullPath(profile *config.Profile, remote, local string, recursive bool) (in
 	if li, err := os.Stat(local); err == nil && li.IsDir() {
 		finalLocal = filepath.Join(local, path.Base(resolved))
 	}
+	downloadStart := time.Now()
 	if recursive {
 		if err := downloadDir(c, resolved, finalLocal); err != nil {
+			pt.Record("download", time.Since(downloadStart), "dir")
 			return 1, finalLocal, err
 		}
+		pt.Record("download", time.Since(downloadStart), "dir")
 		return 0, finalLocal, nil
 	}
 	if err := Download(c, resolved, finalLocal); err != nil {
+		pt.Record("download", time.Since(downloadStart), "file")
 		return 1, finalLocal, err
 	}
+	pt.Record("download", time.Since(downloadStart), "file")
 	return 0, finalLocal, nil
 }
 
