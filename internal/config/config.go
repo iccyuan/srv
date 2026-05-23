@@ -567,6 +567,17 @@ func (p *Profile) GetAgentForwarding() bool {
 
 func (p *Profile) GetDialAttempts() int {
 	if p.DialAttempts < 1 {
+		// Profiles with a ProxyJump chain have more failure points
+		// (every hop's TCP + SSH handshake adds an opportunity for a
+		// transient timeout / sshd MaxStartups burst / mid-path NAT
+		// blip). A single retry costs ~500ms-2s and dramatically
+		// reduces visible failures against flaky bastion paths. The
+		// default stays 1 for direct profiles -- a healthy LAN box
+		// shouldn't pay even one retry. Explicit dial_attempts in the
+		// profile overrides this auto-bump.
+		if len(p.Jump) > 0 {
+			return 2
+		}
 		return 1
 	}
 	return p.DialAttempts

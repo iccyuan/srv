@@ -226,6 +226,14 @@ const (
 	// Pooled connections idle longer than this get a keepalive ping
 	// before reuse, so we don't hand callers a silently-dead conn.
 	poolHealthThreshold = 30 * time.Second
+	// Upper bound on how long the probe itself blocks. A NAT-broken
+	// TCP conn can swallow probe writes for minutes before the
+	// kernel surfaces an error; without this deadline a stale conn
+	// would freeze acquireClient. 5s is comfortably above any
+	// healthy SSH RTT (transcontinental + jump-host ~200-500ms)
+	// while staying well below the user's "this looks frozen"
+	// threshold. On timeout we treat the conn as stale.
+	poolProbeTimeout = 5 * time.Second
 	// Whole-daemon idle shutdown threshold.
 	daemonIdleTTL = 30 * time.Minute
 	// Cleanup tick.
@@ -643,11 +651,18 @@ func (s *daemonState) acquireClient(profileName string) (*sshx.Client, *config.P
 	// Idle-conn health check: if we'd hand out a conn that's been
 	// idle past poolHealthThreshold, ping it first. Same logic as
 	// before the multi-conn refactor, just lifted out so each pool
-	// slot can be re-validated independently.
+	// slot can be re-validated independently. The probe MUST be
+	// bounded: a TCP-NAT-broken conn won't surface the failure to
+	// SendRequest synchronously (kernel-level retransmits take 5+
+	// minutes), so without the deadline a single dead conn could
+	// hang every subsequent acquireClient call for the whole user-
+	// visible session.
 	if best != nil && best.inflight.Load() == 0 && time.Since(best.lastUsed) > poolHealthThreshold {
 		s.mu.Unlock()
-		if _, _, err := best.client.Conn.SendRequest("keepalive@openssh.com", true, nil); err != nil {
-			// Stale -- drop from pool and fall through to dial.
+		probeErr := probePoolConn(best.client.Conn, poolProbeTimeout)
+		if probeErr != nil {
+			// Stale (probe failed OR timed out) -- drop from pool and
+			// fall through to dial.
 			s.mu.Lock()
 			s.evictFromSlot(profileName, best)
 			pcs = s.pool[profileName]
@@ -723,6 +738,33 @@ func (s *daemonState) leaseRelease(pc *pooledClient, profile *config.Profile) (*
 // Caller MUST hold s.mu. Does NOT close the client -- caller decides
 // whether to close it (e.g. health-check failure closes; disconnect-
 // all closes; GC closes).
+// probePoolConn sends one SSH keepalive request bounded by `timeout`,
+// returning the request error or a timeout error if it doesn't
+// resolve in that window. The goroutine that fires the request is
+// allowed to outlive this function call: a NAT-broken conn can take
+// minutes for the kernel to surface the failure, but we can't block
+// acquireClient on that. The caller treats EITHER a request error
+// OR a timeout as "conn is stale, evict and dial fresh", so the
+// goroutine's eventual return value is harmless if it arrives late.
+// The conn it was probing is closed by the caller in that branch,
+// which makes SendRequest unblock immediately on the next syscall.
+func probePoolConn(conn interface {
+	SendRequest(string, bool, []byte) (bool, []byte, error)
+}, timeout time.Duration) error {
+	type result struct{ err error }
+	ch := make(chan result, 1)
+	go func() {
+		_, _, err := conn.SendRequest("keepalive@openssh.com", true, nil)
+		ch <- result{err: err}
+	}()
+	select {
+	case r := <-ch:
+		return r.err
+	case <-time.After(timeout):
+		return fmt.Errorf("pool health probe timed out after %v (likely NAT-stale TCP)", timeout)
+	}
+}
+
 func (s *daemonState) evictFromSlot(profileName string, target *pooledClient) {
 	pcs := s.pool[profileName]
 	for i, pc := range pcs {

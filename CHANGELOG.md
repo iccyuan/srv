@@ -2,6 +2,9 @@
 
 ## [Unreleased]
 
+### Fixed
+- **jump 链路上瞬时 SSH 握手 timeout / NAT 半死池条目两个真实故障**:验证 MCP 工具集时复现到 `mcp__srv__pull Mac` 连续 2 次 `jump "root@154.12.191.69": ssh: handshake failed: read tcp ...: i/o timeout`,但 `check Mac` 立刻能成功,第三次 pull 也 ok。两条互补修复:**(1)** profile 有 jump 时 `GetDialAttempts` 默认从 1 上调到 2 —— jump 链每多一 hop 多一个 TCP+SSH 握手失败面(sshd MaxStartups burst、中间路径瞬时 NAT 抖动),一次重试 500ms-2s 代价换大幅成功率提升。直连 profile 保持 1 不变。显式 `dial_attempts` 仍然完全覆盖默认。**(2)** daemon 池健康探测加 5s deadline(`probePoolConn`)—— `SendRequest("keepalive@openssh.com")` 之前没超时,NAT-broken 的 TCP 链路能让它阻塞 5+ 分钟(内核重传级别),触发后整个 acquireClient 都会冻住。现在 probe 在 5s 内不返回就视为 stale,evict + 重新 dial。背景 goroutine 即使后续才返回也无害(连接已被 close,SendRequest 下次系统调用立刻解除阻塞)。
+
 ### Added
 - **MCP `sudo` 工具**:AI 客户端(Claude / Codex)可以直接通过 srv MCP server 调 sudo,但有两条不可配置的安全门:**(1)** 每次调用强制走 elicitation(让人在客户端 Allow/Deny),不支持 elicitation 的客户端直接 hard-deny —— **没有 `confirm: true` 之类的 model-side bypass**(跟 `run` 工具的 guard 不同,sudo 的人在环验证不可绕开)。**(2)** MCP 路径**只读** daemon 的密码缓存,**从不写**。也就是密码必须人在 TTY 跑一次 `srv sudo --cache-ttl 15m -P <profile> true` 把它种进 daemon 内存(从不落盘),MCP 才能消费,15 分钟内复用。缓存空 / 过期时返回结构化 `{cached: false}` 引导回 CLI 种密码,不会要求 AI 去问你密码。完整 cmd 走 `~/.srv/mcp-replay.jsonl` 跟其他 MCP 调用一致。`--no-cache` 故意不暴露到 MCP(那条路径会变成"贴密码进 chat")。
 - **`profile.inherits` 字段做 profile 间字段继承**:`srv config set child inherits parent` 让 child 从 parent 拿默认值。合并规则一致:child 标量非零赢、`*bool` 非 nil 赢、slice 非 nil 赢(设 `[]` 清空)、`env` 例外是 key-by-key 合并(child 赢冲突)。递归(A→B→C),环检测。`Name`/`Inherits`/`JumpResolved` 不传递。**已知 footgun**:解析在 `Load()` mutating 内存 profile,后续 Save(`srv config set` / `edit` 都走 Save)会把继承字段平铺写回 JSON,符号链接断开。要长期符号化,直接编辑 `config.json`,别走 set/edit。文档里把这点写明了。
