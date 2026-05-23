@@ -155,8 +155,16 @@ func runRemote(profile *config.Profile, cwd, cmd, password string) (int, error) 
 	return c.RunStreamStdin(full, strings.NewReader(password+"\n"))
 }
 
-// cacheGet returns the cached sudo password for `profile`, or "" on
-// miss / no daemon. Decoded from the wire base64 form.
+// CacheGet returns the cached sudo password for `profile`, or "" on
+// miss / no daemon. Decoded from the wire base64 form. Exported so
+// the MCP sudo handler can read the cache WITHOUT exposing any
+// write path -- by design the MCP layer can only consume a password
+// that was already seeded from a TTY via `srv sudo`. Internal
+// callers should keep using the lowercase alias right below.
+func CacheGet(profile string) string {
+	return cacheGet(profile)
+}
+
 func cacheGet(profile string) string {
 	conn := daemon.DialSock(300 * time.Millisecond)
 	if conn == nil {

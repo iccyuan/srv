@@ -269,6 +269,21 @@ var tools = []tool{
 	},
 	{
 		def: toolDef{
+			Name:        "sudo",
+			Description: "Run a privileged command on the remote via `sudo -S`. Two boundaries make this safe enough to expose to an AI client (and neither is configurable):\n\n  1. Every call goes through MCP elicitation (interactive Allow/Deny shown to the human). A client that didn't advertise the `elicitation` capability is hard-denied -- there is NO `confirm` arg or any model-side way to bypass the human gate. Unlike the `run` tool's guard (which a model can `confirm: true` past at its own discretion), crossing the privilege boundary always asks a human.\n  2. The password is read from the daemon's in-memory cache only. MCP NEVER writes to that cache. A password enters it solely via the TTY-prompting `srv sudo` CLI: run `srv sudo --cache-ttl 15m -P <profile> true` (or any harmless sudo command) once from a terminal to seed the cache, then this tool can consume it for up to 15 minutes. If the cache is empty / expired, the response includes `structuredContent.cached: false` and the body text tells the user to seed from a terminal.\n\nFailure modes:\n  - Cache miss            -> isError=true, structured `cached: false`, no SSH made.\n  - Elicitation declined  -> isError=true, guard_denied=true.\n  - Elicitation unavailable (client without the capability) -> isError=true, guard_blocked=true.\n  - sudo exit 1 / wrong password -> isError=true, normal exit code surfaced; the bad cache entry is NOT auto-cleared (next call still hits the same cache; re-seed via CLI).\n\nOutput exceeding 64 KiB is rejected with the structured stub still flowing back; narrow with `| head -n N` / `| tail -n N` / `| grep PATTERN`.\n\nNo `confirm` arg and no `--no-cache` arg are exposed by design.",
+			InputSchema: map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"command": strSchema("Remote shell command to run under sudo (without the `sudo` prefix; that's added by the wrapper)."),
+					"profile": strSchema(""),
+				},
+				"required": []string{"command"},
+			},
+		},
+		handler: handleSudo,
+	},
+	{
+		def: toolDef{
 			Name:        "run_group",
 			Description: "Run the same remote command across every profile in a named group, in parallel. Returns one result per member with exit code, stdout/stderr, and duration. Use this when you'd otherwise have to loop `run` over N hosts (deploys, restarts, status checks). Synchronous: subject to the same 60s MCP per-tool cap as `run`, so keep the command short or run it via `detach` per-profile and then poll.\n\nOutput exceeding 64 KiB (combined across all members) is rejected (not truncated). Narrow the `group` membership, or run the command per-profile with a slicer (`| head -n N`, `| grep PATTERN`).",
 			InputSchema: map[string]any{

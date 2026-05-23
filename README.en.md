@@ -353,6 +353,8 @@ srv sudo --clear-cache               # drop the cached entry now
 
 Password is read with `term.ReadPassword` (no echo, no shell history) and piped to remote `sudo -S`. Cache lives in daemon process memory only -- never written to disk; auto-evicted on exit 1 (likely auth failure).
 
+**MCP `sudo` tool**: Claude / Codex can drive sudo via the srv MCP server, gated by two non-configurable rules: **(1)** every call goes through MCP elicitation (a real human Allow/Deny prompt in the client) -- a client that didn't advertise the `elicitation` capability is hard-denied. There is no `confirm` arg or any other model-side way to bypass the human gate. **(2)** The MCP path **only reads** the daemon's password cache; it never writes. A password enters the cache only via the TTY-prompting `srv sudo` CLI -- seed it once with `srv sudo --cache-ttl 15m -P <profile> true` and MCP can consume it for the next 15 minutes. On cache miss, the response is a structured `{cached: false}` with a CLI hint -- the AI is NEVER told to ask the user for a password.
+
 ### State dashboard (srv ui)
 
 ```

@@ -348,6 +348,8 @@ srv -G web "systemctl restart nginx"
 
 密码只缓存在 daemon 进程内存里，不落盘。
 
+**MCP `sudo` 工具**:Claude / Codex 可以通过 srv MCP server 调 `sudo`,但有两条不可配置的安全门:(1) **每次调用都强制走 elicitation 让人在客户端 Allow/Deny**(不支持 elicitation 的客户端直接 hard-deny,**没有 `confirm: true` 之类的 model-side bypass**);(2) **MCP 路径只读 daemon 密码缓存,从不写**。也就是说密码必须先在 TTY 终端跑一次 `srv sudo --cache-ttl 15m -P <profile> true` 把它种进 daemon 内存,MCP 这边才能消费,15 分钟内无需再种。缓存空 / 过期时 MCP 返回结构化 `{cached: false}` 引导你回 CLI 种密码,不会要求 AI 去问你密码。
+
 ## 9. 本地辅助与诊断
 
 | 命令 | 作用 |
