@@ -582,6 +582,7 @@ Set with `srv config set <profile> <key> <value>`. Bool strings (`true`/`false`)
 | `compress_sync` | true | Gzip the `srv sync` tar stream (~70% smaller for code/text; ms-level CPU) |
 | `env` | `{}` | Profile-level environment variables, prepended to every remote command and detached job (managed via `srv env ...`) |
 | `jump` | `[]` | ProxyJump bastion chain. The ergonomic form is a **profile-name reference**: `srv config set B jump A` makes B dial through profile A, reusing A's host/user/port/identity_file; if A itself has a `jump`, that chain is recursively prepended. Literal SSH host specs `[user@]host[:port]` are also accepted; tack on `+<keyfile>` per entry to pin a per-hop identity. See the [ProxyJump example](#proxyjump-relay-example) below. |
+| `platform` | (auto) | Remote OS family. Accepts `linux`, `darwin`, `other`, or blank for auto-detect. Auto-detect runs `uname -s` once and caches under `~/.srv/cache/platform-<profile>.txt` with a 24h TTL. `srv journal` automatically dispatches to the macOS `log` tool when this is `darwin` (no need for `--prefer log` per call). Set explicitly to skip detection -- useful when re-targeting a profile to a different host or running against a stripped-down image where `uname` is unreliable. Delete the cache file to force a re-probe before the TTL elapses. |
 | `ssh_options` | `[]` | Raw `-o` strings, appended **last** (overrides everything above) |
 
 ### ProxyJump relay example

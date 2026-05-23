@@ -132,6 +132,17 @@ type Profile struct {
 	// errors -- they don't fall back to direct connect, because that
 	// would defeat a corporate egress policy that blocks the bypass.
 	Proxy string `json:"proxy,omitempty"`
+	// Platform is an optional override for the remote operating system
+	// kind. Accepted values: "linux", "darwin", "other" (BSD/illumos/
+	// etc), or "" (unset, auto-detect). When unset, callers go
+	// through remote.GetPlatform which probes `uname -s` once and
+	// caches under ~/.srv/cache/platform-<name>.txt for 24h.
+	//
+	// Set explicitly to skip auto-detection -- useful for stripped-
+	// down remotes where the probe is slow / unreliable, or to force
+	// "treat as X" while a host migration is in progress. The escape
+	// hatch wins absolutely; auto-detect is the default.
+	Platform string `json:"platform,omitempty"`
 	// Free-form bag for unknown keys forwarded from older Python configs.
 	Extra map[string]any `json:"-"`
 	// Name is the profile's lookup key in Config.Profiles. Populated by

@@ -3,6 +3,8 @@
 ## [Unreleased]
 
 ### Added
+- **远端平台自动检测 + `profile.platform` 字段**:`internal/remote.GetPlatform()` 首次调用跑一次 `uname -s`,把 linux / darwin / other 缓存到 `~/.srv/cache/platform-<profile>.txt`(TTL 24h)。`srv journal` 在检测到 `darwin` 时**自动派发到 macOS `log` 工具**,不用再每次手动 `--prefer log`。`profile.platform: "linux"|"darwin"|"other"` 显式覆盖永远优先,缓存损坏自动重新探测,re-target 后删 cache 文件立即重测。MCP `journal` 同样吃这个自动派发,显式 `prefer_log: true|false` 仍然优先。这是后续混合 OS group fan-out / 平台感知命令翻译的基础设施。
+- **MCP `wait_job` 暴露 `log_unchanged_seconds`**:job 的 .log 文件 mtime 到当前时间的秒数,结构化字段始终带上,running 状态下 ≥ 15s 会进 hint 字符串(`[running after 8s, log unchanged 42s -- ...]`)。clang 编大 TU、`make ... | tail -N` 这种 block-buffer 场景下,模型能直接看出"日志静默不等于卡住",改用文件系统信号(`find ... -name '*.o' \| wc -l`)探进度,而不是无止境 poll。脚本通过 `stat -c %Y` / `stat -f %m` 双 fallback 取 mtime,Linux / macOS 通用。
 - **`profile.jump` 支持 profile-name 引用**:`srv config set B jump A` 让 B 通过 profile A 中转,A 的 `host`/`user`/`port`/`identity_file` 自动复用,A 自带的 `jump` 链会被递归前置(B → A 实际拨号变成 `A 的 jump → A → B`)。环引用(`A→B→A`)被检测后短路,保留字面值让 dial 报清晰错误,不会无限递归。判别规则:hop spec **含 `@` 或 `:`** 按字面 SSH host 解析,**否则**先查 profile 表,查不到再回落到字面 hostname。展开发生在 `config.Load()` 调用的 `Config.ResolveJumps()`,不修改持久化的 `Jump` 字段(保留符号名,save round-trip 不丢)。
 - **`profile.jump` 支持 per-hop key**:JSON 形态 `{"spec": "user@host", "identity_file": "~/.ssh/keyA"}`,CLI 内联 `srv config set B jump host+~/.ssh/keyA`(逗号分隔多条)。`+` 在 SSH user/host/port 中都不合法,与字面 spec 解析无歧义。
 - **Hop auth 隔离**(`internal/sshx.hopKeyPath`):hop 的 SSH auth 永远不读父 profile 的 `identity_file`。hop 自己有 key 用它,没有就走默认 key chain(agent + `~/.ssh/id_ed25519` / `id_rsa` / `id_ecdsa`)—— **父 profile 的 key 只用于最终目标**。匹配 OpenSSH ProxyJump 语义。这是为什么"Mac 用 Mac 专属 key、经 bastion 中转、bastion 不认那把 key"能正常工作。`hopKeyPath` 签名故意不接收父 profile,从类型层面杜绝泄露。

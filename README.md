@@ -610,6 +610,7 @@ srv hooks set pre-sync 'cd $SRV_LOCAL && go vet ./...'
 | `compress_sync` | `true` | 同步 tar 流是否 gzip 压缩。 |
 | `env` | `{}` | 远端命令前置环境变量。 |
 | `jump` | `[]` | ProxyJump 链。最常见的写法是直接引用**另一个 profile 名**:`srv config set B jump A` 就让 B 通过 A 中转,A 自己的 host/user/port/identity_file 全部被自动复用;A 自带的 jump 链也会被递归展开。也支持字面 hop `[user@]host[:port]`,或在尾巴加 `+<keyfile>` 指定 per-hop 私钥作 escape hatch。详见下方[中转(ProxyJump)配置示例](#中转proxyjump配置示例)。 |
+| `platform` | (auto) | 远端 OS 类型,可选值 `linux` / `darwin` / `other` / 空(自动检测)。空时首次调用会跑一次 `uname -s` 并把结果缓存到 `~/.srv/cache/platform-<profile>.txt`(TTL 24h)。`srv journal` 在检测到 `darwin` 时自动派发到 macOS 统一日志(等价于 `--prefer log`,无需手动指定)。显式设置会跳过自动检测;改了 profile.host 想立刻重测,删掉对应 cache 文件即可。 |
 | `ssh_options` | `[]` | 原始 SSH `-o` 选项，最后追加。 |
 
 ### 中转(ProxyJump)配置示例

@@ -261,7 +261,10 @@ func handleJournal(args map[string]any, cfg *config.Config, profileOverride stri
 	}
 	lines, linesClamped := clampLines(lines, 2000)
 	grep, _ := args["grep"].(string)
-	preferLog, _ := args["prefer_log"].(bool)
+	// Two-step prefer_log resolution: explicit arg wins, otherwise
+	// fall through to remote-platform auto-detect after we know
+	// which profile to query (see below, post resolveProfile).
+	preferLog, preferLogExplicit := args["prefer_log"].(bool)
 	follow := 0
 	if v, ok := args["follow_seconds"].(float64); ok && v > 0 {
 		follow = int(v)
@@ -286,6 +289,19 @@ func handleJournal(args map[string]any, cfg *config.Config, profileOverride stri
 		return *errResult
 	}
 	cwd := config.GetCwd(profName, prof)
+
+	// Auto-detect: when the caller didn't pass prefer_log either way,
+	// probe the remote's OS once (cached 24h). A darwin remote gets
+	// the macOS dispatch by default so journal "just works" without
+	// the user having to remember the flag per call. Explicit
+	// prefer_log=false still wins -- a caller who deliberately wants
+	// to see the journalctl-not-found failure (e.g. for a diagnostic
+	// script) can ask for it.
+	if !preferLogExplicit {
+		if remote.GetPlatform(prof) == remote.PlatformDarwin {
+			preferLog = true
+		}
+	}
 
 	jc := streams.JournalCmd{
 		Unit: unit, Since: since, Priority: priority, Lines: lines, Grep: grep,

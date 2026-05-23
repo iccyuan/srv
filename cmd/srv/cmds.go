@@ -391,6 +391,16 @@ func applyProfileSet(p *config.Profile, key, value string) {
 		p.PoolSize = n
 	case "proxy":
 		p.Proxy = value
+	case "platform":
+		// Accepts linux / darwin / other / "" (clear). Anything else
+		// stored as-is so it'll surface as "unknown" at use time
+		// (caller can spot the typo via `srv config show`).
+		switch v {
+		case "", "null", "none":
+			p.Platform = ""
+		default:
+			p.Platform = value
+		}
 	case "agent_forwarding":
 		p.AgentForwarding = asBool()
 	case "connect_timeout":

@@ -36,6 +36,15 @@ func Journal(args []string, cfg *config.Config, profileOverride string) error {
 	if err != nil {
 		return srvutil.Errf(1, "%v", err)
 	}
+	// Auto-dispatch when the user didn't explicitly set --prefer log.
+	// A darwin remote gets the macOS path by default so `srv journal`
+	// just works on a Mac profile without remembering the flag. The
+	// CLI has no "explicitly false" form, so a true PreferLog means
+	// the user passed --prefer log and we respect it; otherwise we
+	// fall through to the auto-detect.
+	if !jc.PreferLog && remote.GetPlatform(profile) == remote.PlatformDarwin {
+		jc.PreferLog = true
+	}
 	remoteCmd := jc.ToRemoteCommand()
 	cwd := config.GetCwd(profName, profile)
 
