@@ -1,9 +1,42 @@
 package sshx
 
 import (
+	"path/filepath"
+	"srv/internal/config"
 	"strings"
 	"testing"
 )
+
+// TestHopKeyPath_NoParentLeak guards the bug fix: in an earlier
+// iteration, dialOnce fell back to the parent profile's identity_file
+// when a jump hop had no key of its own. That broke "Mac uses a
+// mac-only key" + "jump = [品川, which doesn't trust that key]" by
+// offering the Mac key to 品川. The fix moved the per-hop key
+// decision into hopKeyPath, whose signature deliberately takes ONLY
+// the hop -- no parent context to leak through.
+//
+// This test locks in that signature shape AND the mapping:
+//   - empty IdentityFile -> ""  (default key chain at use time)
+//   - set IdentityFile   -> expanded absolute path
+func TestHopKeyPath_NoParentLeak(t *testing.T) {
+	// No per-hop key: must return "" (caller treats "" as "use
+	// default chain", NOT "fall back to some other context").
+	if got := hopKeyPath(config.JumpHop{Spec: "bastion"}); got != "" {
+		t.Errorf("empty hop key = %q, want \"\" (default chain marker)", got)
+	}
+
+	// Explicit per-hop key: must expand ~ and be returned verbatim.
+	hop := config.JumpHop{Spec: "bastion", IdentityFile: "~/.ssh/bastion_key"}
+	got := hopKeyPath(hop)
+	if got == "" || strings.HasPrefix(got, "~") {
+		t.Errorf("expected expanded ~/.ssh/bastion_key, got %q", got)
+	}
+	// And the suffix should match what was requested -- catches a
+	// regression where an over-zealous helper rewrites the basename.
+	if filepath.Base(got) != "bastion_key" {
+		t.Errorf("basename = %q, want %q", filepath.Base(got), "bastion_key")
+	}
+}
 
 // TestDetachSpawnCmd_PortableBase64Decode guards the macOS/BSD
 // compatibility fix: the detached-job wrapper must decode its base64

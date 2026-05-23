@@ -76,7 +76,10 @@ internal/mcp            stdio MCP server, tool handlers, pre-exec gates
 internal/guard          `srv guard` CLI (toggle / rules / status)
 internal/group          profile groups, parallel fan-out (-G)
 internal/sudo           remote `sudo -S` password handling
-internal/streams        tail / journal streaming with auto-reconnect
+internal/streams        tail / journal streaming with auto-reconnect;
+                        `journal` dispatches to macOS `/usr/bin/log show`
+                        or `log stream` (NSPredicate translation) when
+                        `--prefer log` / `prefer_log: true` is set
 internal/tunnel         port-forward definitions
 internal/tunnelproc     independent tunnel subprocess mode
 internal/jobs           detached job records (jobs.json)
@@ -170,6 +173,38 @@ gates, so agents must go through MCP.
 `Client.Close()` tears down SFTP, the primary connection, the
 ProxyJump chain (reverse order), and the keepalive goroutine (via a
 stop channel so short-lived MCP clients don't pile up idle goroutines).
+
+### ProxyJump chain / per-hop key
+
+`profile.jump` is an ordered list of hops. Two JSON shapes coexist and
+the format round-trips to the minimal one on save:
+
+- `"jump": ["A"]` --- **profile-name reference**. `config.ResolveJumps()`
+  runs in `Load()` and expands the name into concrete connection info;
+  A's own `jump` chain is recursively prepended (dialing B via A
+  actually becomes `A's jump -> A -> B`). Cycles (`A -> B -> A`) are
+  detected and short-circuited by leaving the literal name in place so
+  dial surfaces a normal lookup failure instead of spinning forever.
+- `"jump": [{"spec": "user@host:port", "identity_file": "~/.ssh/keyA"}]`
+  --- **literal hop with optional per-hop key**. CLI shorthand:
+  `srv config set B jump A+~/.ssh/keyA` (comma-separates multiple).
+
+Discrimination lives in `looksLikeProfileName`: a spec containing `@`
+or `:` is parsed as a literal SSH host, otherwise it's looked up as a
+profile name. Collisions are rare in practice -- profile names tend
+to be `prod` / `bastion`, while legal hostnames almost always contain
+a dot.
+
+**Auth isolation is load-bearing** (`internal/sshx.hopKeyPath`): a
+hop's auth list NEVER reads the parent profile's `identity_file`. A
+hop with its own `identity_file` uses agent + that key; a hop without
+one uses the default key chain (`agent + ~/.ssh/id_ed25519 / id_rsa /
+id_ecdsa`). The parent's `identity_file` is only ever applied to the
+**final target**. This matches OpenSSH ProxyJump semantics and is what
+lets "Mac uses a mac-only key, jumped through a bastion that doesn't
+trust that key" work: the bastion hop is never offered the Mac key.
+`hopKeyPath` deliberately takes only the hop -- no parent parameter
+exists for the destination key to leak through.
 
 ## Daemon
 

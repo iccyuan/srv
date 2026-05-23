@@ -261,6 +261,7 @@ func handleJournal(args map[string]any, cfg *config.Config, profileOverride stri
 	}
 	lines, linesClamped := clampLines(lines, 2000)
 	grep, _ := args["grep"].(string)
+	preferLog, _ := args["prefer_log"].(bool)
 	follow := 0
 	if v, ok := args["follow_seconds"].(float64); ok && v > 0 {
 		follow = int(v)
@@ -288,13 +289,22 @@ func handleJournal(args map[string]any, cfg *config.Config, profileOverride stri
 
 	jc := streams.JournalCmd{
 		Unit: unit, Since: since, Priority: priority, Lines: lines, Grep: grep,
-		Follow: follow > 0,
+		Follow:    follow > 0,
+		PreferLog: preferLog,
 	}
 	remoteCmd := jc.ToRemoteCommand()
 
 	if follow == 0 {
 		res, _ := remote.RunCapture(prof, cwd, remoteCmd)
 		text := buildRunText(res, cwd)
+		// Detect the "no journalctl on this remote" failure and
+		// append a hint pointing at `prefer_log: true`. Only fires
+		// when we're NOT already on the macOS path -- a real `log`
+		// failure on macOS has a different shape and would get the
+		// wrong advice from this hint.
+		if hint := streams.MissingJournalctlHint(res.ExitCode, res.Stderr, preferLog); hint != "" {
+			text += "\n[hint] " + hint
+		}
 		if len(text) > ResultByteMax {
 			return oversizeResult("journal", len(text),
 				"narrow `unit` / `since` / `priority`, use a tighter `grep`, or lower `lines`",

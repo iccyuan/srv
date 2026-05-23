@@ -315,12 +315,15 @@ Five commands share one auto-reconnect engine (exponential backoff 1s -> 2s -> 4
 ```
 srv tail [-f] [-n N] [--grep RE] <path>...    # any remote file
 srv journal [-u UNIT] [--since TIME] [-f]     # systemd unit log
+srv journal --prefer log [...]                # macOS unified logging (log show / log stream)
 srv logs <id> [-f]                            # detached-job output
 srv watch [-n SECS] [--diff] <cmd>            # periodic in-place command
 srv top [-n SECS]                             # streamed `top -b`
 ```
 
 `tail` / `journal` / `top` survive SSH drops -- they reconnect and keep streaming. `watch --diff` highlights changed lines. `srv -t top` is the pty-in-place variant; `srv top` is the scrolling log variant.
+
+**macOS hosts** don't ship `journalctl`. Pass `--prefer log` and `srv journal` dispatches to the macOS unified logging tools (`log show`, or `log stream` under `-f`) -- the same `-u` / `--since` / `-p` / `-g` / `-n` flag set translates into NSPredicate filters + `--last` + `--info/--debug` + a final `| tail -n N`. `-u UNIT` matches `subsystem` OR `process` so the same flag works whether you point at a service bundle ID or a binary name. Calling `srv journal` on a Mac without `--prefer log` returns the `journalctl: command not found` exit code with a hint reminding you of the flag. MCP equivalent: `prefer_log: true`.
 
 ### Parallel fan-out (profile groups)
 
@@ -578,8 +581,63 @@ Set with `srv config set <profile> <key> <value>`. Bool strings (`true`/`false`)
 | `sync_exclude` | `[]` | Profile-level extra excludes for `srv sync`, merged with defaults |
 | `compress_sync` | true | Gzip the `srv sync` tar stream (~70% smaller for code/text; ms-level CPU) |
 | `env` | `{}` | Profile-level environment variables, prepended to every remote command and detached job (managed via `srv env ...`) |
-| `jump` | `[]` | ProxyJump bastion chain. Each entry `[user@]host[:port]`, dialed in array order before the final target |
+| `jump` | `[]` | ProxyJump bastion chain. The ergonomic form is a **profile-name reference**: `srv config set B jump A` makes B dial through profile A, reusing A's host/user/port/identity_file; if A itself has a `jump`, that chain is recursively prepended. Literal SSH host specs `[user@]host[:port]` are also accepted; tack on `+<keyfile>` per entry to pin a per-hop identity. See the [ProxyJump example](#proxyjump-relay-example) below. |
 | `ssh_options` | `[]` | Raw `-o` strings, appended **last** (overrides everything above) |
+
+### ProxyJump relay example
+
+Scenario: two boxes — **A** (publicly reachable, your bastion) and **B** (only reachable from A's internal network).
+
+The simplest path is to make A a normal profile, then have B reference A by name in its `jump`. srv looks up A in the config and reuses its `host`, `user`, `port`, and `identity_file` — you never type A's connection string twice.
+
+```sh
+srv init                              # configure A
+srv init                              # configure B (B's own connection info only)
+srv config set B jump A               # the key step: B relays through A
+
+srv check -P B                        # verify the full chain A → B
+srv -P B uptime
+```
+
+The resulting `~/.srv/config.json`:
+
+```json
+{
+  "profiles": {
+    "A": {
+      "host": "a.example.com",
+      "user": "alice",
+      "port": 22,
+      "identity_file": "~/.ssh/id_ed25519_a"
+    },
+    "B": {
+      "host": "10.10.0.5",
+      "user": "bob",
+      "port": 22,
+      "identity_file": "~/.ssh/id_ed25519_b",
+      "jump": ["A"]
+    }
+  }
+}
+```
+
+More variations:
+
+```sh
+# Multi-hop: A → some intermediate M → B. M isn't a profile, write it literally.
+srv config set B jump A,user@10.0.0.9:2222
+
+# A itself has a jump (say, A goes through "bastion"). Dialing B expands to bastion → A → B.
+srv config set A jump bastion
+
+# Escape hatch: pin a specific key for one hop (profile-name + dedicated key).
+srv config set B jump A+~/.ssh/special_key_for_A
+
+# The literal SSH-host form still works (legacy).
+srv config set B jump alice@a.example.com:22
+```
+
+A jump entry that **contains `@` or `:`** is parsed as a literal SSH host. **Otherwise** it's looked up as a profile name; if no profile matches, it falls back to a bare hostname. Cycles (A→B→A) are detected and broken so resolution never recurses forever.
 
 ---
 

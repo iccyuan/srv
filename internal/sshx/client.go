@@ -80,10 +80,17 @@ func DialOpts(profile *config.Profile, opts DialOptions) (*Client, error) {
 		}
 	}
 
-	mkConfig := func(user string) *ssh.ClientConfig {
+	mkConfig := func(user string, hopAuths []ssh.AuthMethod) *ssh.ClientConfig {
+		// nil hopAuths => caller (the final target) wants the profile's
+		// full auth chain. Hops always pass an explicit list (either
+		// their own pinned key or the default key chain) so they never
+		// leak the parent profile's identity_file to an intermediate.
+		if hopAuths == nil {
+			hopAuths = auths
+		}
 		cfg := &ssh.ClientConfig{
 			User:              user,
-			Auth:              auths,
+			Auth:              hopAuths,
 			HostKeyCallback:   hkc,
 			Timeout:           timeout,
 			HostKeyAlgorithms: profile.HostKeyAlgorithms,
@@ -139,31 +146,53 @@ func DialOpts(profile *config.Profile, opts DialOptions) (*Client, error) {
 // the final hop. Each TCP-level dial gets OS keepalive enabled so a
 // silently-dead conn shows up as an EOF inside seconds rather than
 // blocking forever on a write.
-func dialOnce(profile *config.Profile, defaultUser string, mkConfig func(string) *ssh.ClientConfig, timeout time.Duration) (*Client, error) {
+func dialOnce(profile *config.Profile, defaultUser string, mkConfig func(string, []ssh.AuthMethod) *ssh.ClientConfig, timeout time.Duration) (*Client, error) {
 	var chain []*ssh.Client
 	var err error
-	for _, spec := range profile.Jump {
-		hopUser, hopHost, hopPort := parseHostSpec(spec, defaultUser, 22)
+	// Prefer the post-resolution chain (bare profile-name references
+	// already expanded to concrete hops). Falls back to the literal
+	// Jump for tests / fixtures that construct Profile without going
+	// through config.Load.
+	hops := profile.JumpResolved
+	if hops == nil {
+		hops = profile.Jump
+	}
+	for _, hop := range hops {
+		hopUser, hopHost, hopPort := parseHostSpec(hop.Spec, defaultUser, 22)
 		hopAddr := net.JoinHostPort(hopHost, srvutil.IntToStr(hopPort))
-		hopCfg := mkConfig(hopUser)
-		var hop *ssh.Client
+		// Hops ALWAYS use a self-contained auth list: pinned key when
+		// the hop has IdentityFile set, otherwise the default key
+		// chain (agent + ~/.ssh/id_ed25519 / id_rsa / id_ecdsa). The
+		// final target's profile.identity_file is NEVER applied to a
+		// hop -- a key meant only for the destination must not be
+		// offered to bastions on the way there, and vice versa. This
+		// matches OpenSSH ProxyJump semantics: each hop authenticates
+		// with its own configured identity (or the user's defaults),
+		// independent of the final destination's IdentityFile.
+		hopAuths, hopAuthErr := buildAuthMethodsForKey(hopKeyPath(hop))
+		if hopAuthErr != nil {
+			closeChain(chain)
+			return nil, fmt.Errorf("jump %q: %w", hop.Spec, hopAuthErr)
+		}
+		hopCfg := mkConfig(hopUser, hopAuths)
+		var sshHop *ssh.Client
 		if len(chain) == 0 {
 			// First jump: only the outermost dial gets the proxy
 			// treatment. Inner hops travel through the SSH channel
 			// above and can't (shouldn't) reroute via proxy again.
-			hop, err = sshDialTCP(profile, hopAddr, hopCfg, timeout)
+			sshHop, err = sshDialTCP(profile, hopAddr, hopCfg, timeout)
 		} else {
-			hop, err = dialThrough(chain[len(chain)-1], hopAddr, hopCfg, timeout)
+			sshHop, err = dialThrough(chain[len(chain)-1], hopAddr, hopCfg, timeout)
 		}
 		if err != nil {
 			closeChain(chain)
-			return nil, fmt.Errorf("jump %q: %w", spec, err)
+			return nil, fmt.Errorf("jump %q: %w", hop.Spec, err)
 		}
-		chain = append(chain, hop)
+		chain = append(chain, sshHop)
 	}
 
 	targetAddr := net.JoinHostPort(profile.Host, srvutil.IntToStr(profile.GetPort()))
-	targetCfg := mkConfig(defaultUser)
+	targetCfg := mkConfig(defaultUser, nil)
 	var conn *ssh.Client
 	if len(chain) == 0 {
 		// Direct connection (no ProxyJump). This is the only place
@@ -295,6 +324,20 @@ func dialThrough(via *ssh.Client, addr string, cfg *ssh.ClientConfig, timeout ti
 	// Clear the deadline so subsequent traffic isn't bounded.
 	_ = netConn.SetDeadline(time.Time{})
 	return ssh.NewClient(clientConn, chans, reqs), nil
+}
+
+// hopKeyPath returns the SSH private-key path to use when authenticating
+// to a ProxyJump hop, or "" to mean "use the default key chain (agent +
+// ~/.ssh/id_ed25519 / id_rsa / id_ecdsa)". The signature deliberately
+// takes ONLY the hop -- the parent profile is not a parameter, so the
+// destination profile's identity_file has no path to leak into hop auth.
+// This isolation is what makes "Mac has its own mac-only key" + "jump
+// through bastion that doesn't trust that key" actually work.
+func hopKeyPath(hop config.JumpHop) string {
+	if hop.IdentityFile == "" {
+		return ""
+	}
+	return expandHome(hop.IdentityFile)
 }
 
 // parseHostSpec splits a "[user@]host[:port]" into its components, falling
@@ -931,11 +974,27 @@ func cwdOrTilde(cwd string) string {
 	return cwd
 }
 
-// buildAuthMethods returns the auth chain for an ssh.ClientConfig. Order:
+// buildAuthMethods returns the auth chain for an ssh.ClientConfig for
+// the FINAL target (last hop). Order:
 //   - SSH agent (if SSH_AUTH_SOCK set)
-//   - profile.identity_file (if set)
-//   - common defaults: ~/.ssh/id_ed25519, ~/.ssh/id_rsa
+//   - profile.identity_file (if set), otherwise the default key chain
+//     ~/.ssh/id_ed25519, ~/.ssh/id_rsa, ~/.ssh/id_ecdsa
+//
+// Per-hop overrides go through buildAuthMethodsForKey instead -- the
+// final target's auth chain is built once at the start of Dial and
+// reused for every redial in the retry loop.
 func buildAuthMethods(profile *config.Profile) ([]ssh.AuthMethod, error) {
+	if profile.IdentityFile != "" {
+		return buildAuthMethodsForKey(expandHome(profile.IdentityFile))
+	}
+	return buildAuthMethodsForKey("")
+}
+
+// buildAuthMethodsForKey is the shared core: agent (if any) plus the
+// requested key (or the default key chain when keyPath==""). Used by
+// the profile-level buildAuthMethods AND by per-hop overrides where a
+// jump entry pins its own identity_file.
+func buildAuthMethodsForKey(keyPath string) ([]ssh.AuthMethod, error) {
 	var methods []ssh.AuthMethod
 
 	if sock := os.Getenv("SSH_AUTH_SOCK"); sock != "" {
@@ -945,9 +1004,9 @@ func buildAuthMethods(profile *config.Profile) ([]ssh.AuthMethod, error) {
 		}
 	}
 
-	keyPaths := []string{}
-	if profile.IdentityFile != "" {
-		keyPaths = append(keyPaths, expandHome(profile.IdentityFile))
+	var keyPaths []string
+	if keyPath != "" {
+		keyPaths = append(keyPaths, keyPath)
 	} else {
 		home, _ := os.UserHomeDir()
 		keyPaths = append(keyPaths,

@@ -292,6 +292,7 @@ Job 日志保存在远端 `~/.srv-jobs/<id>.log`。job id 支持前缀匹配，�
 | `srv journal -f` | 持续跟踪 journal。 |
 | `srv journal -g RE` | 用 journalctl grep 过滤。 |
 | `srv journal -n N` | 指定 journal 行数。 |
+| `srv journal --prefer log [...]` | **macOS 远端用这个** —— 不走 journalctl,改派发到 macOS 统一日志(`log show` / `-f` 时 `log stream`)。同一套 `-u`/`--since`/`-p`/`-g`/`-n` 自动翻译成 NSPredicate 谓词 + `--last` + `--info/--debug` + `\| tail -n N`。`-u UNIT` 匹配 subsystem 或 process,`--since` 接受 `10m`/`1h` 这类时间窗(stream 模式忽略,实时流没有"过去")。在 macOS profile 上不带 `--prefer log` 调用 journal 会失败并给出提示。 |
 | `srv watch <cmd>` | 周期性执行远端命令并原地刷新。 |
 | `srv watch -n SECS <cmd>` | 指定刷新间隔。 |
 | `srv watch --diff <cmd>` | 高亮变化行。 |
@@ -608,8 +609,63 @@ srv hooks set pre-sync 'cd $SRV_LOCAL && go vet ./...'
 | `sync_exclude` | `[]` | profile 级同步排除规则。 |
 | `compress_sync` | `true` | 同步 tar 流是否 gzip 压缩。 |
 | `env` | `{}` | 远端命令前置环境变量。 |
-| `jump` | `[]` | ProxyJump 链。 |
+| `jump` | `[]` | ProxyJump 链。最常见的写法是直接引用**另一个 profile 名**:`srv config set B jump A` 就让 B 通过 A 中转,A 自己的 host/user/port/identity_file 全部被自动复用;A 自带的 jump 链也会被递归展开。也支持字面 hop `[user@]host[:port]`,或在尾巴加 `+<keyfile>` 指定 per-hop 私钥作 escape hatch。详见下方[中转(ProxyJump)配置示例](#中转proxyjump配置示例)。 |
 | `ssh_options` | `[]` | 原始 SSH `-o` 选项，最后追加。 |
+
+### 中转(ProxyJump)配置示例
+
+场景:有两台机器 **A**(公网可达,作中转跳板)、**B**(只能从 A 内网到达)。
+
+最简单的方式是先把 A 做成一个完整的 profile,然后让 B 引用它的名字 —— `jump` 字段会自动复用 A 的 `host`、`user`、`port`、`identity_file`,不用重新写一遍。
+
+```sh
+srv init                              # 配 A
+srv init                              # 配 B(只填 B 自己的连接信息)
+srv config set B jump A               # 关键这一步: B 通过 A 中转
+
+srv check -P B                        # 验证: 走 A → B 全链路
+srv -P B uptime
+```
+
+对应的 `~/.srv/config.json` 看起来是这样:
+
+```json
+{
+  "profiles": {
+    "A": {
+      "host": "a.example.com",
+      "user": "alice",
+      "port": 22,
+      "identity_file": "~/.ssh/id_ed25519_a"
+    },
+    "B": {
+      "host": "10.10.0.5",
+      "user": "bob",
+      "port": 22,
+      "identity_file": "~/.ssh/id_ed25519_b",
+      "jump": ["A"]
+    }
+  }
+}
+```
+
+更多写法:
+
+```sh
+# 多跳: A → 中间机 M → B,M 不是 profile,直接写连接串
+srv config set B jump A,user@10.0.0.9:2222
+
+# A 自己也有 jump(比如 A 要通过堡垒机 bastion),那 dial B 时会自动展开成 bastion → A → B
+srv config set A jump bastion
+
+# escape hatch: 给某一跳指定专属私钥(profile 名 + 自己的 key)
+srv config set B jump A+~/.ssh/special_key_for_A
+
+# 完全不用 profile 名,直接字面字符串也支持(老格式)
+srv config set B jump alice@a.example.com:22
+```
+
+`jump` 列表里的每一项,**含 `@` 或 `:`** 就按字面 SSH host 解析;**纯字母数字**就尝试当 profile 名查表,查不到才回落到字面 hostname。环引用(A→B→A)会被检测到并打断,不会无限递归。
 
 ## 开发
 

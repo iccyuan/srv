@@ -108,3 +108,167 @@ func TestJournalCmd_ToRemoteCommand_FullShape(t *testing.T) {
 		}
 	}
 }
+
+// TestParseJournalArgs_PreferLog confirms the opt-in dispatch flag
+// parses in both spelled-out and `=`-equals forms, and that an
+// unknown --prefer value is rejected loudly (so a typo doesn't
+// silently fall back to journalctl).
+func TestParseJournalArgs_PreferLog(t *testing.T) {
+	for _, args := range [][]string{
+		{"--prefer", "log"},
+		{"--prefer=log"},
+	} {
+		jc, err := ParseJournalArgs(args)
+		if err != nil {
+			t.Fatalf("parse %v: %v", args, err)
+		}
+		if !jc.PreferLog {
+			t.Errorf("parse %v: PreferLog not set", args)
+		}
+	}
+	if _, err := ParseJournalArgs([]string{"--prefer", "bogus"}); err == nil {
+		t.Error("expected error on unknown --prefer value")
+	}
+}
+
+// TestToMacOSLogCommand_OneShot locks in the show-mode translation
+// for the common shape: unit -> NSPredicate covering subsystem+process,
+// since -> --last, lines -> piped tail, priority "err" -> messageType
+// predicate, grep -> NSPredicate MATCHES.
+func TestToMacOSLogCommand_OneShot(t *testing.T) {
+	jc := JournalCmd{
+		Unit: "nginx", Since: "10m", Priority: "err", Lines: 100, Grep: "timeout",
+		PreferLog: true,
+	}
+	got := jc.ToRemoteCommand()
+	for _, want := range []string{
+		"/usr/bin/log show",
+		"--style syslog",
+		"--last 10m",
+		"subsystem == \"nginx\"",
+		"process == \"nginx\"",
+		`eventMessage MATCHES "timeout"`,
+		`messageType == "error"`,
+		"| /usr/bin/tail -n 100",
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("missing %q in:\n  %s", want, got)
+		}
+	}
+	if strings.Contains(got, "journalctl") {
+		t.Errorf("PreferLog should not emit journalctl: %s", got)
+	}
+	if strings.Contains(got, "log stream") {
+		t.Errorf("non-follow should use `log show`, not `log stream`: %s", got)
+	}
+}
+
+// TestToMacOSLogCommand_Stream confirms follow mode picks the
+// `log stream` subcommand AND drops --last (which only applies to
+// `log show`) AND skips the `| tail -n N` pipeline (stream is
+// unbounded; the line cap is moot in stream mode).
+func TestToMacOSLogCommand_Stream(t *testing.T) {
+	jc := JournalCmd{
+		Unit: "myapp", Since: "10m", Lines: 100, Follow: true, PreferLog: true,
+	}
+	got := jc.ToRemoteCommand()
+	if !strings.Contains(got, "/usr/bin/log stream") {
+		t.Errorf("follow mode should use `/usr/bin/log stream`: %s", got)
+	}
+	if strings.Contains(got, "--last") {
+		t.Errorf("--last has no meaning for `log stream`: %s", got)
+	}
+	if strings.Contains(got, "tail -n") {
+		t.Errorf("line cap should not pipe through tail in stream mode: %s", got)
+	}
+	if !strings.Contains(got, `subsystem == "myapp"`) {
+		t.Errorf("predicate should still apply in stream mode: %s", got)
+	}
+}
+
+// TestToMacOSLogCommand_AbsolutePathRequired guards a real bug we hit
+// on live macOS: zsh ships `log` as a builtin that prints login
+// history and rejects subcmds with "too many arguments". The system
+// log tool we want is /usr/bin/log; without the absolute path the
+// builtin shadows it on the default macOS shell. Lock this in so a
+// future cleanup doesn't quietly revert to bare `log` and reintroduce
+// the failure.
+func TestToMacOSLogCommand_AbsolutePathRequired(t *testing.T) {
+	for _, follow := range []bool{false, true} {
+		got := JournalCmd{PreferLog: true, Follow: follow}.ToRemoteCommand()
+		if !strings.HasPrefix(got, "/usr/bin/log ") {
+			t.Errorf("follow=%v: must invoke /usr/bin/log to bypass zsh builtin, got:\n  %s", follow, got)
+		}
+	}
+}
+
+// TestToMacOSLogCommand_PriorityMapping documents the priority->log
+// translation so a future refactor doesn't quietly change it. info
+// becomes a --info flag (not a predicate); debug pulls in both
+// --info and --debug; an unrecognized value passes through as a
+// literal predicate so `log` itself reports the parse error rather
+// than silently dropping the filter.
+func TestToMacOSLogCommand_PriorityMapping(t *testing.T) {
+	cases := []struct {
+		priority string
+		want     string
+	}{
+		{"info", "--info"},
+		{"debug", "--debug"},
+		{"warning", "--info"},                           // closest match
+		{"fault", `messageType == "error"`},             // grouped with err
+		{"weirdcustom", `messageType == "weirdcustom"`}, // passthrough
+	}
+	for _, tc := range cases {
+		jc := JournalCmd{PreferLog: true, Priority: tc.priority}
+		got := jc.ToRemoteCommand()
+		if !strings.Contains(got, tc.want) {
+			t.Errorf("priority %q: want %q in %q", tc.priority, tc.want, got)
+		}
+	}
+}
+
+// TestMissingJournalctlHint_BashAndZsh covers both common shells'
+// not-found wording. The hint must fire on a bash-style
+// `journalctl: command not found` AND a zsh-style
+// `command not found: journalctl` -- modern macOS defaults to zsh,
+// which is the whole point of having this hint.
+func TestMissingJournalctlHint_BashAndZsh(t *testing.T) {
+	for _, stderr := range []string{
+		"bash: journalctl: command not found\n",
+		"zsh:2: command not found: journalctl\n",
+		"-bash: journalctl: command not found\n",
+	} {
+		got := MissingJournalctlHint(127, stderr, false)
+		if got == "" {
+			t.Errorf("expected hint for stderr %q", stderr)
+		}
+		if !strings.Contains(got, "--prefer log") {
+			t.Errorf("hint should mention --prefer log: %q", got)
+		}
+	}
+}
+
+// TestMissingJournalctlHint_SuppressedWhenPreferLog: when the user
+// already opted into the macOS path, a follow-up failure has a
+// different cause (e.g. `log` itself missing on a stripped-down
+// container) and the journalctl hint would be misleading. Verify
+// it's suppressed.
+func TestMissingJournalctlHint_SuppressedWhenPreferLog(t *testing.T) {
+	if got := MissingJournalctlHint(127, "zsh: command not found: journalctl", true); got != "" {
+		t.Errorf("expected no hint when PreferLog=true, got %q", got)
+	}
+}
+
+// TestMissingJournalctlHint_NoFireOnSuccessOrOtherErrors: the hint
+// must NOT fire on (a) successful runs (exit 0) or (b) unrelated
+// stderr text -- a generic "permission denied" or empty stderr
+// shouldn't suggest the macOS path.
+func TestMissingJournalctlHint_NoFireOnSuccessOrOtherErrors(t *testing.T) {
+	if got := MissingJournalctlHint(0, "journalctl: command not found", false); got != "" {
+		t.Errorf("exit 0 should suppress hint, got %q", got)
+	}
+	if got := MissingJournalctlHint(1, "permission denied\n", false); got != "" {
+		t.Errorf("unrelated stderr should suppress hint, got %q", got)
+	}
+}

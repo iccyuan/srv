@@ -65,7 +65,9 @@ internal/mcp            stdio MCP server、工具处理、执行前 gate
 internal/guard          `srv guard` CLI(开关 / 规则 / status)
 internal/group          profile group、并行扇出(-G)
 internal/sudo           远端 `sudo -S` 密码处理
-internal/streams        tail / journal 流式 + 自动重连
+internal/streams        tail / journal 流式 + 自动重连;journal 在
+                        `--prefer log` / `prefer_log: true` 下分派到 macOS
+                        `/usr/bin/log show` 或 `log stream`(NSPredicate 翻译)
 internal/tunnel         端口转发定义
 internal/tunnelproc     独立进程模式 tunnel
 internal/jobs           后台任务记录(jobs.json)
@@ -136,6 +138,17 @@ profile 解析优先级:
 - SFTP 客户端懒初始化,归 `*Client` 所有。
 
 `Client.Close()` 拆掉 SFTP、主连接、ProxyJump 链(反序)、keepalive goroutine(用 stop channel,这样短命的 MCP 客户端不会堆积空闲 goroutine)。
+
+### ProxyJump 链 / per-hop key
+
+`profile.jump` 是有序 hop 列表。两种 JSON 形态共存,序列化时按"最简"形式回写:
+
+- `"jump": ["A"]` —— **profile-name 引用**。`config.ResolveJumps()` 在 `Load()` 时把名字展开成具体连接信息,A 自带的 `jump` 链会被递归前置(B → A 实际拨号变成 A 的 jump → A → B),环引用(A→B→A)被检测后短路并保留字面值让 dial 报清晰错误,不会无限递归。
+- `"jump": [{"spec": "user@host:port", "identity_file": "~/.ssh/keyA"}]` —— **字面 hop + 可选 per-hop key**。CLI 简写:`srv config set B jump A+~/.ssh/keyA`(逗号分隔多条)。
+
+判别规则在 `looksLikeProfileName`:**hop spec 含 `@` 或 `:` 就按字面 SSH host 解析,否则尝试 profile 查表**。命名冲突极少 —— profile 名通常是 `prod` / `bastion`,合法 hostname 而又恰好不含标点的极少见。
+
+**Auth 隔离是设计核心**(`internal/sshx.hopKeyPath`):hop 的 auth 永远不读父 profile 的 `identity_file`。hop 自己有 key 就用它,没有就走默认 key chain(agent + `~/.ssh/id_ed25519` / `id_rsa` / `id_ecdsa`)—— **父 profile 的 key 只用于最终目标**。这匹配 OpenSSH ProxyJump 语义,也是为什么"Mac 用 Mac 专属 key、走 bastion 中转,bastion 不认那把 key"能正常工作:bastion 那一跳压根不会被试到 Mac 的 key。`hopKeyPath` 签名故意不接收父 profile,从类型层面杜绝泄露。
 
 ## Daemon
 

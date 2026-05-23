@@ -6,6 +6,7 @@ import (
 	"os"
 	"srv/internal/project"
 	"srv/internal/session"
+	"strings"
 	"time"
 
 	"srv/internal/i18n"
@@ -39,9 +40,19 @@ type Profile struct {
 	SshOptions        []string          `json:"ssh_options,omitempty"`
 	Env               map[string]string `json:"env,omitempty"`
 	// Jump (ProxyJump) -- one or more bastion hops dialed in order before
-	// the final target. Each entry: "[user@]host[:port]". Auth uses the
-	// same agent + identity_file + default key chain as the profile.
-	Jump []string `json:"jump,omitempty"`
+	// the final target. Each entry is "[user@]host[:port]" plus an
+	// optional per-hop identity_file. Two JSON forms are accepted on
+	// load and the simpler one round-trips on save:
+	//
+	//	"jump": ["userA@10.0.0.1:22"]                       // string form
+	//	"jump": [{"spec":"userA@10.0.0.1","identity_file":"~/.ssh/keyA"}]
+	//
+	// When a hop has its own identity_file, the SSH agent (if any) plus
+	// THAT key are used for the hop's handshake -- the profile's
+	// identity_file is bypassed for that hop only. Hops without their
+	// own key fall back to the same agent + profile.identity_file +
+	// default key chain as the final target.
+	Jump []JumpHop `json:"jump,omitempty"`
 	// CompressSync controls whether `srv sync` gzips the tar stream over
 	// the wire. nil = default true. ~70% size reduction for code, single-
 	// digit ms CPU on the hot path.
@@ -127,6 +138,144 @@ type Profile struct {
 	// ResolveProfile so deeper layers can include it in diagnostics
 	// without threading the name through every signature. NOT serialized.
 	Name string `json:"-"`
+	// JumpResolved is the post-resolution form of Jump. Populated by
+	// Config.ResolveJumps (called from Load) after expanding any bare
+	// profile-name entries in Jump into concrete "[user@]host[:port]"
+	// hops + propagated identity_file. The dial path iterates this slice
+	// when non-nil; the persisted Jump keeps the symbolic form so save
+	// round-trips don't lose the reference. NOT serialized.
+	JumpResolved []JumpHop `json:"-"`
+}
+
+// JumpHop is one entry in a profile's ProxyJump chain. Spec is the
+// "[user@]host[:port]" string parsed by sshx.parseHostSpec. IdentityFile
+// is optional; when set, that key (rather than the parent profile's
+// identity_file) is used for the hop's SSH handshake.
+type JumpHop struct {
+	Spec         string `json:"spec"`
+	IdentityFile string `json:"identity_file,omitempty"`
+}
+
+// UnmarshalJSON accepts either a bare string ("user@host:22") or the
+// full object form ({"spec":"...","identity_file":"..."}). The bare
+// string form is the historical layout -- we keep accepting it so
+// existing configs don't need migration when this field grew an
+// optional per-hop key.
+func (h *JumpHop) UnmarshalJSON(b []byte) error {
+	if len(b) > 0 && b[0] == '"' {
+		var s string
+		if err := json.Unmarshal(b, &s); err != nil {
+			return err
+		}
+		h.Spec = s
+		h.IdentityFile = ""
+		return nil
+	}
+	type alias JumpHop
+	return json.Unmarshal(b, (*alias)(h))
+}
+
+// MarshalJSON emits the bare string form when IdentityFile is empty so
+// pre-existing configs round-trip unchanged. Hops with their own key
+// fall back to the object form.
+func (h JumpHop) MarshalJSON() ([]byte, error) {
+	if h.IdentityFile == "" {
+		return json.Marshal(h.Spec)
+	}
+	type alias JumpHop
+	return json.Marshal(alias(h))
+}
+
+// looksLikeProfileName reports whether a jump entry's Spec is a bare
+// profile-name reference (e.g. "bastion") vs. an SSH host literal
+// ("user@10.0.0.1:22"). Profile names cannot contain '@' or ':', so the
+// absence of both is a reliable signal -- and we additionally require
+// the name to exist in cfg.Profiles before expanding, so a typo in a
+// hostname won't accidentally swallow a literal that just happens to
+// be punctuation-free.
+func looksLikeProfileName(spec string) bool {
+	return spec != "" &&
+		!strings.ContainsAny(spec, "@:")
+}
+
+// ResolveJumps populates each profile's JumpResolved by expanding any
+// bare profile-name references in Jump into concrete hops. When a hop
+// references profile A, A's own Jump is recursively prepended so the
+// full chain to A is honored before A itself is dialed. Cycles (A→B→A)
+// are broken: the offending entry resolves to a bare literal of the
+// name so the dial surfaces a clear failure instead of looping forever.
+//
+// Per-hop IdentityFile takes precedence over the referenced profile's
+// identity_file -- this lets callers override A's default key for one
+// hop without touching A's profile.
+func (c *Config) ResolveJumps() {
+	if c == nil {
+		return
+	}
+	for name, p := range c.Profiles {
+		if p == nil {
+			continue
+		}
+		p.Name = name
+		p.JumpResolved = c.resolveJumpChain(p, map[string]bool{name: true})
+	}
+}
+
+// resolveJumpChain walks `p.Jump` and returns the flattened, concrete
+// list of hops to dial before reaching `p` itself. `visiting` carries
+// every profile name on the current resolution stack so a cycle short-
+// circuits with the literal name (and dial then fails with a helpful
+// "profile not found" / parse error rather than an infinite recursion).
+func (c *Config) resolveJumpChain(p *Profile, visiting map[string]bool) []JumpHop {
+	if p == nil || len(p.Jump) == 0 {
+		return nil
+	}
+	out := make([]JumpHop, 0, len(p.Jump))
+	for _, hop := range p.Jump {
+		if !looksLikeProfileName(hop.Spec) {
+			out = append(out, hop)
+			continue
+		}
+		ref, ok := c.Profiles[hop.Spec]
+		if !ok {
+			// Unknown name -- leave it as-is. Dial will surface a
+			// "lookup hostname failed" the user can act on; we do
+			// NOT silently drop it.
+			out = append(out, hop)
+			continue
+		}
+		if visiting[hop.Spec] {
+			// Cycle. Keep the literal so dial fails loudly rather
+			// than this function spinning.
+			out = append(out, hop)
+			continue
+		}
+		visiting[hop.Spec] = true
+		// Recursively prepend A's own jump chain.
+		out = append(out, c.resolveJumpChain(ref, visiting)...)
+		// Then add A itself as a concrete hop.
+		out = append(out, jumpHopFromProfile(ref, hop.IdentityFile))
+		delete(visiting, hop.Spec)
+	}
+	return out
+}
+
+// jumpHopFromProfile converts a referenced profile into a concrete
+// JumpHop. `override` wins over the referenced profile's identity_file
+// when set, so callers can pin a different key for this one hop.
+func jumpHopFromProfile(p *Profile, override string) JumpHop {
+	spec := p.Host
+	if p.User != "" {
+		spec = p.User + "@" + spec
+	}
+	if p.Port != 0 && p.Port != 22 {
+		spec = spec + ":" + srvutil.IntToStr(p.Port)
+	}
+	id := override
+	if id == "" {
+		id = p.IdentityFile
+	}
+	return JumpHop{Spec: spec, IdentityFile: id}
 }
 
 func (p *Profile) GetPort() int {
@@ -442,6 +591,11 @@ func Load() (*Config, error) {
 	if cfg.Profiles == nil {
 		cfg.Profiles = map[string]*Profile{}
 	}
+	// Expand bare profile-name references in every profile's Jump
+	// chain into concrete hops. Done at load so the dial path is
+	// pure: sshx.Dial only needs to iterate JumpResolved (when set)
+	// and doesn't need to thread the whole *Config through.
+	cfg.ResolveJumps()
 	srvutil.WarnIfNewerSchema(srvutil.Config(), cfg.Version)
 	return cfg, nil
 }

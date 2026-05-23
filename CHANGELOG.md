@@ -1,5 +1,14 @@
 # Changelog
 
+## [Unreleased]
+
+### Added
+- **`profile.jump` 支持 profile-name 引用**:`srv config set B jump A` 让 B 通过 profile A 中转,A 的 `host`/`user`/`port`/`identity_file` 自动复用,A 自带的 `jump` 链会被递归前置(B → A 实际拨号变成 `A 的 jump → A → B`)。环引用(`A→B→A`)被检测后短路,保留字面值让 dial 报清晰错误,不会无限递归。判别规则:hop spec **含 `@` 或 `:`** 按字面 SSH host 解析,**否则**先查 profile 表,查不到再回落到字面 hostname。展开发生在 `config.Load()` 调用的 `Config.ResolveJumps()`,不修改持久化的 `Jump` 字段(保留符号名,save round-trip 不丢)。
+- **`profile.jump` 支持 per-hop key**:JSON 形态 `{"spec": "user@host", "identity_file": "~/.ssh/keyA"}`,CLI 内联 `srv config set B jump host+~/.ssh/keyA`(逗号分隔多条)。`+` 在 SSH user/host/port 中都不合法,与字面 spec 解析无歧义。
+- **Hop auth 隔离**(`internal/sshx.hopKeyPath`):hop 的 SSH auth 永远不读父 profile 的 `identity_file`。hop 自己有 key 用它,没有就走默认 key chain(agent + `~/.ssh/id_ed25519` / `id_rsa` / `id_ecdsa`)—— **父 profile 的 key 只用于最终目标**。匹配 OpenSSH ProxyJump 语义。这是为什么"Mac 用 Mac 专属 key、经 bastion 中转、bastion 不认那把 key"能正常工作。`hopKeyPath` 签名故意不接收父 profile,从类型层面杜绝泄露。
+- **`srv journal --prefer log`(macOS 适配)**:macOS 远端没有 `journalctl`。`--prefer log` / MCP `prefer_log: true` 把 journal 调用派发到 macOS 统一日志(`/usr/bin/log show`,follow 时 `/usr/bin/log stream`)。同一套 `-u`/`--since`/`-p`/`-g`/`-n` 自动翻译:`-u UNIT` → NSPredicate `(subsystem == "U" OR process == "U")`;`--since` → `--last`(stream 模式忽略);priority `err`/`fault` → `messageType` 谓词,`info`/`debug` → `--info`/`--debug`,`warning` → `--info`(macOS 无 warning 等级,取最接近);`-g` → NSPredicate `eventMessage MATCHES`;`-n N` → `| /usr/bin/tail -n N`(`log` 无原生 `-n`);`-f` 切到 `log stream` 子命令。绝对路径 `/usr/bin/log` 绕过 zsh 的同名 builtin。
+- **journal "command not found" 友好提示**:CLI 和 MCP 两条路径都会在 journal 失败且 stderr 命中 bash/zsh 两种 "command not found: journalctl" 写法时,追加一行 `[hint] srv journal: this remote has no journalctl. For macOS hosts, retry with `--prefer log` (MCP: pass `prefer_log: true`).`。已经 `prefer_log` 的调用不会触发(那种失败原因不同,提示会误导)。
+
 ## [Go 2.6.8] - 2026-05-18
 
 ### Added

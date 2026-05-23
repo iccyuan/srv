@@ -412,17 +412,33 @@ func applyProfileSet(p *config.Profile, key, value string) {
 	case "sync_root":
 		p.SyncRoot = value
 	case "jump":
-		// Comma-separated list of "[user@]host[:port]" hops. Empty / null
-		// clears.
+		// Comma-separated list of hops; each hop is
+		// "[user@]host[:port]" with an optional "+keyfile" tail that
+		// pins a per-hop identity. Empty / null clears.
+		//
+		//   srv config set B jump userA@10.0.0.1
+		//   srv config set B jump userA@10.0.0.1+~/.ssh/keyA
+		//   srv config set B jump userA@10.0.0.1+~/.ssh/keyA,userMid@10.0.0.2
+		//
+		// `+` is chosen because it is not legal in SSH usernames /
+		// hostnames / port numbers, so splitting on the FIRST `+` is
+		// unambiguous against the host spec on the left of it.
 		if v == "" || v == "null" || v == "none" {
 			p.Jump = nil
 		} else {
 			parts := strings.Split(value, ",")
-			out := make([]string, 0, len(parts))
+			out := make([]config.JumpHop, 0, len(parts))
 			for _, s := range parts {
-				if s = strings.TrimSpace(s); s != "" {
-					out = append(out, s)
+				s = strings.TrimSpace(s)
+				if s == "" {
+					continue
 				}
+				hop := config.JumpHop{Spec: s}
+				if specPart, keyPart, found := strings.Cut(s, "+"); found {
+					hop.Spec = strings.TrimSpace(specPart)
+					hop.IdentityFile = strings.TrimSpace(keyPart)
+				}
+				out = append(out, hop)
 			}
 			p.Jump = out
 		}
