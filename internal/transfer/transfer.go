@@ -93,11 +93,16 @@ func chunkParallel() int {
 // adjustment, so callers (CLI confirmation lines, MCP responses) can
 // surface where the file really went rather than the user's raw input.
 func PushPath(profile *config.Profile, local, remote string, recursive bool) (int, string, error) {
-	c, err := sshx.Dial(profile)
+	// AcquireSharedClient memoizes one *sshx.Client per profile for
+	// this process's lifetime; repeated push/pull on the same profile
+	// pay the SSH handshake (+ jump chain) exactly once. Stale conns
+	// are auto-detected and replaced via a bounded liveness probe at
+	// next acquire. We deliberately do NOT defer Close -- ownership
+	// stays with the cache.
+	c, err := AcquireSharedClient(profile)
 	if err != nil {
 		return 255, remote, err
 	}
-	defer c.Close()
 
 	st, err := os.Stat(local)
 	if err != nil {
@@ -144,11 +149,12 @@ func PushPath(profile *config.Profile, local, remote string, recursive bool) (in
 // existing dir" rule fires, so callers can stat it to report transfer
 // size or surface to the user where bytes really ended up.
 func PullPath(profile *config.Profile, remote, local string, recursive bool) (int, string, error) {
-	c, err := sshx.Dial(profile)
+	// See PushPath for the cache rationale; ownership stays with
+	// AcquireSharedClient so we do NOT Close.
+	c, err := AcquireSharedClient(profile)
 	if err != nil {
 		return 255, local, err
 	}
-	defer c.Close()
 
 	resolved, err := c.ExpandRemoteHome(remote)
 	if err != nil {

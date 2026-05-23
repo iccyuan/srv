@@ -3,6 +3,7 @@
 ## [Unreleased]
 
 ### Fixed
+- **push/pull 跨调用 SSH 握手反复冷拨(每次 16-17s on Mac via jump)**:`internal/transfer/transfer.go` 一直直接 `sshx.Dial`,**完全绕过 daemon 连接池**(daemon 池只服务 `run`/`ls`/`cd` 这些经过 `internal/remote.RunCapture` 的路径)。一个 MCP session 里反复 push/pull 同 profile,每次都付完整握手 + jump chain 代价。修复:**进程内 per-profile client cache**(`internal/transfer/client_cache.go`)—— `AcquireSharedClient` 首次拨号缓存 `*sshx.Client`,后续 push/pull 复用同一连接,重用前走 5s bounded 健康探测(同 `daemon.probePoolConn` 的形态,deadline 避免 NAT 半死链路阻塞)。诚实记录限制:**只解决"同一 MCP server 进程内反复 push/pull"** 这一最常见 AI 用法;CLI 单次 `srv push X` 出进程就缓存失效(那个 case 要彻底 daemon-side SFTP refactor,几百行的工作)。跨进程共享 SSH 连接是系统层不可能的事(SSH conn 绑在一个进程的 fd 上,SFTP 又架在 SSH 子通道上)。
 - **jump 链路上瞬时 SSH 握手 timeout / NAT 半死池条目两个真实故障**:验证 MCP 工具集时复现到 `mcp__srv__pull Mac` 连续 2 次 `jump "root@154.12.191.69": ssh: handshake failed: read tcp ...: i/o timeout`,但 `check Mac` 立刻能成功,第三次 pull 也 ok。两条互补修复:**(1)** profile 有 jump 时 `GetDialAttempts` 默认从 1 上调到 2 —— jump 链每多一 hop 多一个 TCP+SSH 握手失败面(sshd MaxStartups burst、中间路径瞬时 NAT 抖动),一次重试 500ms-2s 代价换大幅成功率提升。直连 profile 保持 1 不变。显式 `dial_attempts` 仍然完全覆盖默认。**(2)** daemon 池健康探测加 5s deadline(`probePoolConn`)—— `SendRequest("keepalive@openssh.com")` 之前没超时,NAT-broken 的 TCP 链路能让它阻塞 5+ 分钟(内核重传级别),触发后整个 acquireClient 都会冻住。现在 probe 在 5s 内不返回就视为 stale,evict + 重新 dial。背景 goroutine 即使后续才返回也无害(连接已被 close,SendRequest 下次系统调用立刻解除阻塞)。
 
 ### Added
