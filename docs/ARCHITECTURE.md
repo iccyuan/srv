@@ -200,6 +200,22 @@ profile 解析优先级:
 
 **包分层。** `config` import `session`,所以 env+session 这层放在 `session.GuardPref()`(三态:enabled/disabled/unset,不带默认),全局+默认层放在 `config.GuardActive()`。`session` 不能 import `config`(成环),所以 `GuardActive` 是唯一真相源;凡是手里有 `*config.Config` 的 guard 消费方都必须调它,而不是只看 env+session 的 `session.GuardOn()`。
 
+## sudo(CLI + MCP)
+
+`srv sudo <cmd>` 远端跑 `sudo -S` 把密码从 stdin 喂进去。本地 `term.ReadPassword` 关回显读密码;daemon 进程内存按 profile 缓存 password,默认 TTL 5 min,daemon 硬上限 60 min,**绝不落盘**。`exit 1` + 错密文案的常见片段命中时自动清缓存,避免下次仍用错密触发账户锁定。
+
+**MCP `sudo` 工具:两条强制 + 一个 per-profile opt-in。**
+
+- **强制 1:每次都 elicit。** 不像 `run` 的 guard,sudo 没有 `confirm=true` 这种 model-side bypass —— 跨越权限边界永远问真人。客户端没 elicitation capability 直接 hard-deny。
+- **强制 2:写缓存路径不暴露给 MCP。** 默认配置下,密码只能从 TTY 的 `srv sudo` CLI 进 daemon 缓存(`internal/sudo.cacheSet`,小写,不导出)。`handleSudo` 只读 `sudo.CacheGet`。AI 在任何路径都拿不到通用写权,模型不会被指示去问你密码,也没有"贴密码进 chat"的回路。
+- **opt-in:`profile.enable_mcp_password_prompt = true`** 给 MCP 加一条**受控**写路径(`sudo.CacheSet` 是大写、单一调用点)。开启后,cache miss → MCP 发**第二次 `elicitation/create`**(schema 是一个 required string 字段),客户端弹密码框 → 用户答复 `{action: accept, content: {password: "..."}}` → `handleSudo` 把 password 直接喂给 `sudo.CacheSet`(5min TTL)+ 继续 dial+run。密码走 client UI → srv → daemon,**不进任何 tool result,模型不可见**。mcplog 只记 `action=accept`,密码/长度/任何衍生都不落日志。
+
+**为什么默认 off。** opt-in 流程比 TTY-seed 多一条 prompt-injection 通路:恶意 tool result 诱导模型调 `sudo` 也会触发同样的密码框,用户看到时无法分辨是不是自己发起的。TTY-seed 的隐含安全属性是"密码进入系统必须是一条真人主动跑的终端命令" —— 这是 injection 跨不过去的边界。所以默认关,有意识的用户在合适的 profile 上显式打开。继承上故意不传染(`EnableMCPPasswordPrompt` 不写进 `mergeFrom`),避免 child profile 隐式拿到这个开关。
+
+**Schema 兼容性(2026-05-24 live verify 验证项)。** 最初设计带 `format: "password"` 期望客户端渲染掩码;Claude Code 的 MCP client 校验 `requestedSchema` 时只接受 `format ∈ {email,uri,date,date-time}`,带 `format:"password"` 的请求被它在渲染前就 `-32602 invalid params` 拒掉,整个 elicit-pw 静默失败(`asked=false`)。最终方案是 schema 不带 `format`,纯 string 字段加 `description` 标注敏感性,跨客户端通用;代价是支持 `format:"password"` 的客户端(比如 MCP Inspector)也走明文渲染。`elicit_test.go` 把这点固化成反向不变量(如果将来谁加回 `format:"password"` 就是回归)。
+
+**传输上的两个 elicit 共享同一个 reader。** `elicitPassword` 跟 `elicitConfirm` 一样,复用 loop 的 `bufio.Reader` 内联抽帧,避免"发请求等回包"在串行 loop 里死锁,顺带处理客户端可能插进来的 ping / notification 帧。这两个函数有相当多重复——MVP 时刻意没抽公共抽象,先看 opt-in 路径是否真有人在用。
+
 ## 跨平台说明
 
 `srv` 用一个二进制覆盖 Windows、macOS、Linux、BSD。会咬人的不可移植细节:

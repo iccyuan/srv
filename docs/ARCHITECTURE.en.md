@@ -344,6 +344,75 @@ unset, no default applied) and the global+default layers live in
 holding a `*config.Config` must call it rather than
 `session.GuardOn()` (which only sees the env+session slice).
 
+## sudo (CLI + MCP)
+
+`srv sudo <cmd>` runs `sudo -S` on the remote and feeds the password
+in over stdin. Local `term.ReadPassword` reads with echo off; the
+daemon keeps the password in per-profile process memory only,
+default TTL 5 min, hard-capped at 60 min by the daemon, **never
+written to disk**. Exit 1 plus the usual incorrect-password fragments
+auto-clear the cache so the next call doesn't re-submit a known-bad
+password and lock the remote account.
+
+**MCP `sudo` tool: two hard boundaries + one per-profile opt-in.**
+
+- **Hard 1: elicit every time.** Unlike `run`'s guard, sudo has no
+  `confirm=true` model-side bypass — crossing the privilege boundary
+  always asks a human. A client without the `elicitation` capability
+  is hard-denied.
+- **Hard 2: the cache write path is not exposed to MCP.** With
+  default config, a password only enters the daemon cache from the
+  TTY-prompting `srv sudo` CLI (`internal/sudo.cacheSet`, lowercase,
+  unexported). `handleSudo` reads via `sudo.CacheGet` and that's it.
+  The AI never gets a generic write surface; the model is never
+  instructed to ask you for a password, and there is no "paste it
+  into chat" loop.
+- **Opt-in: `profile.enable_mcp_password_prompt = true`** adds one
+  *controlled* write path for MCP (`sudo.CacheSet`, exported,
+  single call site). On cache miss, `handleSudo` sends a **second**
+  `elicitation/create` — schema is one required string field — and
+  the client renders an input. The reply
+  `{action: accept, content: {password: "..."}}` flows back, the
+  handler feeds it directly to `sudo.CacheSet` (5 min TTL), then
+  continues to dial + run. The password travels client UI -> srv ->
+  daemon; it **never enters a tool result, the model never sees
+  it**. mcplog records only `action=accept` — not the password, its
+  length, or any derivative.
+
+**Why off by default.** The opt-in widens prompt injection: a
+malicious tool result that pushes the model into calling `sudo` will
+trigger the same password prompt, and the user can't tell whether
+they initiated that request. The TTY-seed path has a stronger
+implicit property — a password enters the system only via a
+deliberate terminal command, which prompt injection can't cross. So
+default off, enabled per-profile by someone who explicitly accepts
+the trade-off. Inheritance deliberately does NOT propagate the flag
+(`EnableMCPPasswordPrompt` is not in `mergeFrom`) so child profiles
+can't implicitly pick up the toggle.
+
+**Schema compatibility (verified live 2026-05-24).** The original
+design used `format: "password"` to nudge clients toward a masked
+input. Claude Code's MCP client validates `requestedSchema` against
+a strict subset where the only legal string formats are
+email/uri/date/date-time and rejects anything else with -32602
+*before any UI renders* — the elicit-pw silently fails (`asked =
+false`). The final shape is schema with no `format`, a plain string
+field plus a `description` flagging it as sensitive — works across
+clients. The cost: clients that *would* honor `format:"password"`
+(MCP Inspector, etc.) also see plain text now. `elicit_test.go`
+captures this as a *reverse* invariant — re-adding
+`format:"password"` would fail the test, so the regression can't
+silently come back.
+
+**Both elicits share the same reader.** `elicitPassword` mirrors
+`elicitConfirm`: it reuses the loop's `bufio.Reader` to inline-pump
+frames until the matching reply arrives, dodging the
+"send-then-await" deadlock in the serial loop, and handles
+interleaved ping / notification frames. The two functions have real
+duplication — at MVP we deliberately did NOT extract a common
+helper, in case the opt-in path turns out to be unused and we end
+up reverting it.
+
 ## Cross-Platform Notes
 
 `srv` targets Windows, macOS, Linux, and the BSDs from one binary.

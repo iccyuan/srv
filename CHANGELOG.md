@@ -1,5 +1,12 @@
 # Changelog
 
+## [Unreleased]
+
+### Added
+- **MCP `sudo` opt-in 客户端密码 elicitation**(`profile.enable_mcp_password_prompt: true`,默认 off):缓存空 / 过期时,MCP 不再只回 `{cached: false}` 提示去终端 seed,而是发**第二次 `elicitation/create`**(带一个 required string 字段),让客户端弹密码框 —— 你直接在 MCP 客户端里填密码,答复走 client UI → srv → `sudo.CacheSet` → daemon 内存(5 min TTL),**模型不可见、不进任何 tool result**;mcplog 只记 `action=accept`,密码/长度/任何衍生都不落日志。给纯 MCP 用户(Claude Desktop 之类没本地终端习惯的场景)省掉"切回终端跑 `srv sudo` seed 一次"的摩擦。**默认关。** Trade-off:opt-in 路径比 TTY-seed 多一条 prompt-injection 表面(恶意 tool result 诱导模型调 `sudo` 也会触发同样的密码框);TTY-seed 的隐含属性是"密码进入系统必须是真人主动跑的终端命令",injection 跨不过去。继承上故意不传染(`EnableMCPPasswordPrompt` 不进 `mergeFrom`),避免 child profile 隐式拿到。
+- **Schema 兼容性 fix(2026-05-24 live verify 验证)**:原计划 schema 带 `format: "password"` 让客户端渲染掩码;Claude Code 的 MCP client 校验 `requestedSchema` 时只接受 `format ∈ {email,uri,date,date-time}`,带 `format:"password"` 会被它 `-32602 invalid params` 在渲染前就拒掉,elicit-pw 静默失败。最终 schema 不带 `format`,纯 string 字段加 `description` 标注敏感性,跨客户端可用;**代价**:支持 `format:"password"` 的客户端(MCP Inspector 等)现在也走明文渲染。`elicit_test.go` 把"schema 不含 `format:\"password\"`"固化成反向不变量,防回归。
+- **`sudo.CacheSet`(exported)**:跟 `cacheSet`(unexported)区分命名,grep 一眼能看出 MCP-originated 缓存写入入口的位置。MVP 仅一个调用点(opt-in 路径)。
+
 ## [Go 2.6.9] - 2026-05-23
 
 ### Fixed

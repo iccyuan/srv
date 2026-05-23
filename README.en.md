@@ -353,7 +353,15 @@ srv sudo --clear-cache               # drop the cached entry now
 
 Password is read with `term.ReadPassword` (no echo, no shell history) and piped to remote `sudo -S`. Cache lives in daemon process memory only -- never written to disk; auto-evicted on exit 1 (likely auth failure).
 
-**MCP `sudo` tool**: Claude / Codex can drive sudo via the srv MCP server, gated by two non-configurable rules: **(1)** every call goes through MCP elicitation (a real human Allow/Deny prompt in the client) -- a client that didn't advertise the `elicitation` capability is hard-denied. There is no `confirm` arg or any other model-side way to bypass the human gate. **(2)** The MCP path **only reads** the daemon's password cache; it never writes. A password enters the cache only via the TTY-prompting `srv sudo` CLI -- seed it once with `srv sudo --cache-ttl 15m -P <profile> true` and MCP can consume it for the next 15 minutes. On cache miss, the response is a structured `{cached: false}` with a CLI hint -- the AI is NEVER told to ask the user for a password.
+**MCP `sudo` tool**: Claude / Codex can drive sudo via the srv MCP server, gated by two non-configurable rules and one per-profile opt-in:
+
+- **(Hard 1)** Every call goes through MCP elicitation (a real human Allow/Deny prompt in the client). A client that didn't advertise the `elicitation` capability is hard-denied. No `confirm` arg or any model-side way to bypass.
+- **(Hard 2)** Passwords enter the daemon cache only through srv's own controlled write paths -- the MCP layer never gets a generic write surface. The AI is never instructed to ask you for a password, and there's no "paste it into chat" loop.
+- **(Opt-in)** `profile.enable_mcp_password_prompt: true` lets the MCP sudo handler send a **second** elicitation (with a password field) on cache miss, so the client renders a prompt and you type the password there. The answer travels client UI -> srv -> daemon; the model never sees it. Trade-off: removes the "drop to a terminal to seed once" friction at the cost of widening the prompt-injection surface (a malicious tool result that nudges the model into calling sudo will pop the same prompt). **Default off.** Enable per profile only when you're sure that trade-off is acceptable -- typically a no-terminal MCP-only client.
+
+With opt-in off: cache miss / expiry returns `{cached: false}` and points you at `srv sudo --cache-ttl 15m -P <profile> true` to seed once from a terminal; MCP can then consume it for 15 minutes. With opt-in on: cache miss triggers the in-client password prompt directly.
+
+> **Claude Code note**: its MCP client validates `requestedSchema` against a strict subset where only `format ∈ {email,uri,date,date-time}` is accepted -- `format:"password"` is rejected with -32602 before any UI renders. srv therefore omits the password format hint, so the password field is a plain string and **the characters you type are not masked** in Claude Code. Other clients that honor `format:"password"` would have masked the input; this is the cross-client compatibility cost.
 
 ### State dashboard (srv ui)
 
