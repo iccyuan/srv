@@ -1,6 +1,6 @@
 # Changelog
 
-## [Unreleased]
+## [Go 2.6.9] - 2026-05-23
 
 ### Fixed
 - **`$HOME` 解析每次都跑 `echo $HOME`(注释撒谎说会 cache 但代码没 cache)+ skip-probe 死链路自动恢复**:`sshx.ExpandRemoteHome` 现在真的把第一次解析的结果缓存到 `*sshx.Client.homeCache`,后续 push/pull/edit 直接复用,每次省 1.3-1.4s(jump 路径上的 3 RTT)。Transfer 的 client cache 加 30s skip-probe 窗口:连接最近 30s 内用过就跳过 keepalive 探活(省 0.5-0.8s)。配套**conn-level 自动重试**(`internal/transfer/retry.go`):skip-probe 窗口内 cached client 突然死(网络抖动 / jump host 重启 / 上游 NAT 表丢),SFTP 触发 `io.EOF` / `connection closed` / `i/o timeout` 等典型 conn-death signature,自动 evict cache + 重新 dial + 重试一次。**用户看到"慢一拍",不是"看到错误"**。业务错误(no such file / permission denied / disk full)显式不命中重试 signature,原样上抛,不会被噪声化。bounded 一次:第二次 attempt 仍失败就原样报错,避免对真挂掉远端无限 spin。
