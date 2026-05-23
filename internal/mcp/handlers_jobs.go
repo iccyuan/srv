@@ -179,15 +179,29 @@ func handleTailLog(args map[string]any, cfg *config.Config, profileOverride stri
 // handleWaitJob turns it into a retryable error rather than a
 // successful poll. exitCode is -1 unless a STATUS=completed EXIT=<n>
 // was parsed.
-func classifyWaitStatus(stdout string) (status string, exitCode int, body string) {
+//
+// logUnchanged is parsed off the `LOG_UNCHANGED=<seconds>` field the
+// wait-loop script also writes on the STATUS line; -1 means "marker
+// not present" (older remote, or stat fallback failed). Surfaced so
+// the model can distinguish "log is quietly updating" from "log has
+// been silent for N seconds -- probe filesystem signals instead of
+// just polling wait_job harder."
+func classifyWaitStatus(stdout string) (status string, exitCode int, logUnchanged int, body string) {
 	statusLine, body, _ := strings.Cut(stdout, "\n")
 	exitCode = -1
+	logUnchanged = -1
 	switch {
 	case strings.HasPrefix(statusLine, "STATUS=completed"):
 		status = "completed"
 		if _, after, ok := strings.Cut(statusLine, "EXIT="); ok {
-			if n, err := strconv.Atoi(strings.TrimSpace(after)); err == nil {
-				exitCode = n
+			// EXIT=<n>[<space>...] -- stop at the first whitespace
+			// so a trailing LOG_UNCHANGED=... doesn't fold into the
+			// number.
+			tok := strings.Fields(after)
+			if len(tok) > 0 {
+				if n, err := strconv.Atoi(tok[0]); err == nil {
+					exitCode = n
+				}
 			}
 		}
 	case strings.HasPrefix(statusLine, "STATUS=killed"):
@@ -197,7 +211,15 @@ func classifyWaitStatus(stdout string) (status string, exitCode int, body string
 	default:
 		status = "unknown"
 	}
-	return status, exitCode, body
+	if _, after, ok := strings.Cut(statusLine, "LOG_UNCHANGED="); ok {
+		tok := strings.Fields(after)
+		if len(tok) > 0 {
+			if n, err := strconv.Atoi(tok[0]); err == nil && n >= 0 {
+				logUnchanged = n
+			}
+		}
+	}
+	return status, exitCode, logUnchanged, body
 }
 
 func handleWaitJob(args map[string]any, cfg *config.Config, profileOverride string) toolResult {
@@ -230,28 +252,43 @@ func handleWaitJob(args map[string]any, cfg *config.Config, profileOverride stri
 	// the log tail; if maxWait elapses the same shape is returned
 	// with STATUS=running so the model can loop.
 	exitFile := fmt.Sprintf("~/.srv-jobs/%s.exit", j.ID)
+	// log_unchanged_seconds = now - log_file_mtime. Portable across
+	// Linux (GNU stat -c %Y) and macOS/BSD (stat -f %m) by trying both
+	// and falling back to 0 (treated as "unknown" by the parser). A
+	// missing/empty log gives 0 too, which is the right answer ("log
+	// hasn't been written" is indistinguishable from "log was just
+	// touched" for the model's decision -- both mean "no info yet").
+	logUnchangedExpr := fmt.Sprintf(
+		`m=$(stat -c %%Y %s 2>/dev/null || stat -f %%m %s 2>/dev/null || echo 0); n=$(date +%%s); echo $((n - m))`,
+		j.Log, j.Log)
 	script := fmt.Sprintf(`for i in $(seq 1 %d); do
   if [ -f %s ]; then
     code=$(cat %s)
-    printf 'STATUS=completed EXIT=%%s\n' "$code"
+    lu=$(%s)
+    printf 'STATUS=completed EXIT=%%s LOG_UNCHANGED=%%s\n' "$code" "$lu"
     tail -n %d %s
     exit 0
   fi
   if ! kill -0 %d 2>/dev/null; then
-    echo STATUS=killed
+    lu=$(%s)
+    printf 'STATUS=killed LOG_UNCHANGED=%%s\n' "$lu"
     tail -n %d %s
     exit 0
   fi
   sleep 1
 done
-echo STATUS=running
+lu=$(%s)
+printf 'STATUS=running LOG_UNCHANGED=%%s\n' "$lu"
 tail -n %d %s
-`, maxWait, exitFile, exitFile, tailLines, j.Log, j.Pid, tailLines, j.Log, tailLines, j.Log)
+`, maxWait,
+		exitFile, exitFile, logUnchangedExpr, tailLines, j.Log,
+		j.Pid, logUnchangedExpr, tailLines, j.Log,
+		logUnchangedExpr, tailLines, j.Log)
 	start := time.Now()
 	res, _ := remote.RunCapture(prof, "", script)
 	waited := time.Since(start).Seconds()
 
-	status, exitCode, body := classifyWaitStatus(res.Stdout)
+	status, exitCode, logUnchanged, body := classifyWaitStatus(res.Stdout)
 	switch status {
 	case "completed":
 		// Job finished -- record the outcome but KEEP the entry so
@@ -298,12 +335,25 @@ tail -n %d %s
 			j.ID, waited, diag))
 	}
 
+	// logQuietFragment is only inlined into the running-hint and only
+	// past a meaningful threshold; for completed/killed it would just
+	// be noise (the job's done, the log freshness doesn't matter).
+	// Threshold 15s chosen to be larger than the typical 8s poll
+	// window so "you just polled and got a fresh log" doesn't print
+	// the warning, while a build whose tool block-buffers output
+	// (clang dumping a 4KB chunk only every ~30s on big TUs) DOES
+	// surface as quiet.
+	logQuietFragment := ""
+	if status == "running" && logUnchanged >= 15 {
+		logQuietFragment = fmt.Sprintf(", log unchanged %ds", logUnchanged)
+	}
+
 	var hint string
 	switch status {
 	case "completed":
 		hint = fmt.Sprintf("[%s exit=%d after %.1fs]", status, exitCode, waited)
 	case "running":
-		hint = fmt.Sprintf("[%s after %.1fs -- call wait_job again to keep waiting, or kill_job to stop]", status, waited)
+		hint = fmt.Sprintf("[%s after %.1fs%s -- call wait_job again to keep waiting, or kill_job to stop]", status, waited, logQuietFragment)
 	default:
 		hint = fmt.Sprintf("[%s after %.1fs]", status, waited)
 	}
@@ -315,6 +365,12 @@ tail -n %d %s
 		"job_id":         j.ID,
 		"status":         status,
 		"waited_seconds": waited,
+	}
+	if logUnchanged >= 0 {
+		// Always surface in structured even when below the hint
+		// threshold -- the field is cheap (4 bytes) and clients
+		// (custom UIs, future tooling) may want the raw signal.
+		structured["log_unchanged_seconds"] = logUnchanged
 	}
 	if status == "completed" {
 		structured["exit_code"] = exitCode

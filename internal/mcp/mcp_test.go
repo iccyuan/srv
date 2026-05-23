@@ -418,31 +418,42 @@ func TestDetachedResult(t *testing.T) {
 // retryable error instead of a silent {status:"unknown"} success.
 func TestClassifyWaitStatus(t *testing.T) {
 	cases := []struct {
-		name     string
-		stdout   string
-		status   string
-		exitCode int
-		body     string
+		name         string
+		stdout       string
+		status       string
+		exitCode     int
+		logUnchanged int
+		body         string
 	}{
-		{"completed exit 0", "STATUS=completed EXIT=0\nlog line a\nlog line b", "completed", 0, "log line a\nlog line b"},
-		{"completed nonzero", "STATUS=completed EXIT=7\nboom", "completed", 7, "boom"},
-		{"completed no body", "STATUS=completed EXIT=0", "completed", 0, ""},
-		{"completed garbled exit", "STATUS=completed EXIT=notanum\nx", "completed", -1, "x"},
-		{"killed", "STATUS=killed\npartial output", "killed", -1, "partial output"},
-		{"running", "STATUS=running\n", "running", -1, ""},
+		{"completed exit 0", "STATUS=completed EXIT=0\nlog line a\nlog line b", "completed", 0, -1, "log line a\nlog line b"},
+		{"completed nonzero", "STATUS=completed EXIT=7\nboom", "completed", 7, -1, "boom"},
+		{"completed no body", "STATUS=completed EXIT=0", "completed", 0, -1, ""},
+		{"completed garbled exit", "STATUS=completed EXIT=notanum\nx", "completed", -1, -1, "x"},
+		{"killed", "STATUS=killed\npartial output", "killed", -1, -1, "partial output"},
+		{"running", "STATUS=running\n", "running", -1, -1, ""},
+		// LOG_UNCHANGED parsed off the same status line on all three
+		// terminal+active states. Trailing whitespace / extra fields
+		// must not contaminate either EXIT or LOG_UNCHANGED.
+		{"completed with log_unchanged", "STATUS=completed EXIT=0 LOG_UNCHANGED=3\nfinished", "completed", 0, 3, "finished"},
+		{"running with log_unchanged", "STATUS=running LOG_UNCHANGED=42\nstale tail", "running", -1, 42, "stale tail"},
+		{"killed with log_unchanged", "STATUS=killed LOG_UNCHANGED=8\n", "killed", -1, 8, ""},
+		{"log_unchanged garbled", "STATUS=running LOG_UNCHANGED=notanum\n", "running", -1, -1, ""},
 		// The bug: empty stdout (gzip-wrapper glitch) must NOT look
 		// like any terminal/active state.
-		{"empty -> unknown", "", "unknown", -1, ""},
-		{"shell noise -> unknown", "zsh: command not found: seq\n", "unknown", -1, ""},
+		{"empty -> unknown", "", "unknown", -1, -1, ""},
+		{"shell noise -> unknown", "zsh: command not found: seq\n", "unknown", -1, -1, ""},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			st, ec, body := classifyWaitStatus(tc.stdout)
+			st, ec, lu, body := classifyWaitStatus(tc.stdout)
 			if st != tc.status {
 				t.Errorf("status = %q, want %q", st, tc.status)
 			}
 			if ec != tc.exitCode {
 				t.Errorf("exitCode = %d, want %d", ec, tc.exitCode)
+			}
+			if lu != tc.logUnchanged {
+				t.Errorf("logUnchanged = %d, want %d", lu, tc.logUnchanged)
 			}
 			if body != tc.body {
 				t.Errorf("body = %q, want %q", body, tc.body)
