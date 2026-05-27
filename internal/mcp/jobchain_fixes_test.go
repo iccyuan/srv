@@ -1,6 +1,9 @@
 package mcp
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 // P-CHAIN-5: the sync-blocking sleep gate must fire only when `sleep`
 // is at a command position, not when the text merely appears inside
@@ -32,6 +35,67 @@ func TestRejectSync_SleepCommandPositionOnly(t *testing.T) {
 		if got := rejectSync(c); got != "" {
 			t.Errorf("rejectSync(%q) = %q; want \"\" (must not false-positive)", c, got)
 		}
+	}
+}
+
+// TestRejectSync_NohupCommandPositionOnly verifies that the nohup
+// gate fires only when `nohup` sits at a command position. The
+// keyword shows up in legitimate read-only inspection (`cat
+// /tmp/nohup.out`, `grep nohup` in logs) which must not be rejected.
+func TestRejectSync_NohupCommandPositionOnly(t *testing.T) {
+	blocking := []string{
+		"nohup ./hub -config hub.json &",
+		"  nohup ./bin/start &",
+		"cd /opt/svc && nohup ./hub &",
+		"echo starting; nohup ./hub -p 8080 &",
+		"(nohup ./hub &)",
+		"nohup\t./hub", // tab counts as \s
+	}
+	for _, c := range blocking {
+		if rejectSync(c) == "" {
+			t.Errorf("rejectSync(%q) = \"\"; want it rejected (real nohup)", c)
+		}
+	}
+	notBlocking := []string{
+		"cat /tmp/nohup.out",
+		"head -n 50 /var/log/nohup.out",
+		"grep nohup /var/log/syslog",
+		`grep "nohup ./hub" /var/log/audit`,
+		"echo nohup",
+		"ls -la nohup.out",
+		"pkill -f nohup",
+		"ls -la", // baseline
+	}
+	for _, c := range notBlocking {
+		if got := rejectSync(c); got != "" {
+			t.Errorf("rejectSync(%q) = %q; want \"\" (must not false-positive)", c, got)
+		}
+	}
+}
+
+// TestRejectMessage_NohupGuidesToBackground locks in the message
+// shape: the tailored nohup error must (a) point at background: true
+// and (b) strip the `nohup` prefix + trailing `&` from the suggested
+// command so the model copies a clean background invocation rather
+// than mixing both detach mechanisms.
+func TestRejectMessage_NohupGuidesToBackground(t *testing.T) {
+	cmd := "cd /opt/svc && nohup ./hub -config hub.json &"
+	why := rejectSync(cmd)
+	if why == "" {
+		t.Fatalf("rejectSync(%q) = \"\"; expected rejection", cmd)
+	}
+	msg := rejectMessage(cmd, why)
+	if !strings.Contains(msg, "background: true") {
+		t.Errorf("nohup rejection message must mention background: true, got %q", msg)
+	}
+	// The suggested command in the message should not still contain
+	// `nohup` (we tell the model to drop it).
+	if strings.Contains(msg, "nohup ./hub") {
+		t.Errorf("suggested command should have nohup stripped, got %q", msg)
+	}
+	// And the trailing `&` should be gone too.
+	if strings.Contains(msg, "hub.json &") {
+		t.Errorf("suggested command should have trailing & stripped, got %q", msg)
 	}
 }
 

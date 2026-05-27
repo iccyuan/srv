@@ -10,10 +10,10 @@ import (
 )
 
 // Pre-execution gates: high-risk command guard, sync-rejection
-// patterns (sleep N, tail -f, etc), token-economy filters for
-// unbounded sources (cat /file, dmesg, journalctl, find /), and the
-// streaming-must-have-a-filter rule. All called from handlers; none
-// touch SSH directly.
+// patterns (sleep N, tail -f, nohup ..., etc), token-economy filters
+// for unbounded sources (cat /file, dmesg, journalctl, find /), and
+// the streaming-must-have-a-filter rule. All called from handlers;
+// none touch SSH directly.
 
 // riskyPattern flags a remote command as destructive enough to
 // require confirm=true when the session guard is on. Each pattern is
@@ -395,6 +395,22 @@ var foreverPatterns = []*regexp.Regexp{
 	regexp.MustCompile(`\bjournalctl\b[^;&|\n]*?\s(?:-f|--follow)\b`),
 }
 
+// reSyncNohup matches `nohup ...` at a command position -- start of
+// line, after a shell separator (`; & | ( ) { }` / newline), or after
+// a `do`/`then` keyword. Same anchor shape as longWaitSleep so token
+// references (`cat /tmp/nohup.out`, `grep nohup`, `echo nohup`) don't
+// false-positive.
+//
+// Rationale: `nohup` signals "I want to detach this from the session"
+// -- almost always paired with a long-running service. Running it via
+// synchronous `run` still captures the service's startup banner /
+// config dump / listen-port lines into MCP tokens for no benefit
+// (4-5 KiB per service start is typical; the standard background path
+// returns ~150 B regardless of how loud the service is). Route the
+// model to `background: true` + wait_job + tail_log, which gives the
+// same detach semantics with bounded token spend.
+var reSyncNohup = regexp.MustCompile(`(?:^|[;&|(){}\n]|\bdo\b|\bthen\b)\s*nohup\s+\S`)
+
 // rejectSync inspects a command planned for synchronous execution
 // and returns a non-empty hint if it would block the MCP turn for
 // too long. AI clients reach for sleep+poll loops by reflex, but
@@ -413,18 +429,59 @@ func rejectSync(cmd string) string {
 			return fmt.Sprintf("contains a never-terminating pattern (%s)", cmd[loc[0]:loc[1]])
 		}
 	}
+	if reSyncNohup.MatchString(cmd) {
+		return "uses `nohup` (intent to detach)"
+	}
 	return ""
 }
 
 // rejectMessage builds the educational error returned when sync run
 // hits a long-blocking pattern. Tells the model exactly what to swap
-// to.
+// to. nohup gets a tailored message (the cost isn't the 60s timeout,
+// it's the startup-banner tokens captured into the result).
 func rejectMessage(cmd, why string) string {
+	if reSyncNohup.MatchString(cmd) {
+		stripped := stripNohup(cmd)
+		return fmt.Sprintf(
+			"rejected: %s. `nohup` signals you want a detached process, but synchronous `run` still captures the service's startup output (banners, listen ports, config dumps) into MCP tokens for no benefit -- typical service starts spend 4-5 KiB this way.\n\nUse the background pattern instead (drop the `nohup` prefix; srv detaches the job from the MCP session already):\n  run { command: %q, background: true }   -> returns job_id immediately (~150 B)\n  wait_job { id: <returned id> }           -> confirm it stayed up (default 8s, cap 15s)\n  tail_log { id: <returned id>, lines: N } -> read startup lines only if needed",
+			why, stripped,
+		)
+	}
 	return fmt.Sprintf(
 		"rejected: %s. Synchronous `run` is bound by the MCP per-tool timeout (default 60s); long blocks tank the connection.\n\nUse the background pattern instead:\n  run { command: %q, background: true }   -> returns job_id immediately\n  wait_job { id: <returned id> }           -> short polls (default 8s, cap 15s)\n\nFor commands that legitimately need their full output streamed back synchronously, restructure them to finish in <60s (e.g. cap with `head`/`timeout 30`).",
 		why, cmd,
 	)
 }
+
+// stripNohup rewrites the command suggestion to drop a leading `nohup`
+// (and any trailing `&` background marker) so the model copies a
+// background-pattern call that doesn't fight srv's own detach. Only
+// the first occurrence is stripped -- subsequent `nohup` inside the
+// command (e.g. inside a script the user is invoking) is left intact.
+//
+// Best-effort cosmetic: a quoted-string `nohup` would also be stripped
+// if it happened to sit at command position, but that case is so
+// unusual it's not worth the parsing complexity.
+func stripNohup(cmd string) string {
+	out := reSyncNohupStrip.ReplaceAllString(cmd, "$1$2")
+	// Trim a single trailing ` &` (with any preceding whitespace) --
+	// background=true takes over the detach role and the model
+	// shouldn't leave the literal `&` in the new command shape.
+	out = reTrailingBackground.ReplaceAllString(out, "")
+	return out
+}
+
+// reSyncNohupStrip mirrors reSyncNohup but captures the parts AROUND
+// `nohup ` so a replacement can drop the keyword while keeping the
+// leading separator (group 1) and the following first non-space char
+// (group 2).
+var reSyncNohupStrip = regexp.MustCompile(`((?:^|[;&|(){}\n]|\bdo\b|\bthen\b)\s*)nohup\s+(\S)`)
+
+// reTrailingBackground matches a final ` &` (optionally followed by
+// trailing whitespace). Used to strip the background marker after
+// nohup is removed -- the new shape relies on background=true, not
+// shell `&`.
+var reTrailingBackground = regexp.MustCompile(`\s*&\s*$`)
 
 // Token-economy gates for MCP `run`. The ResultByteMax (64 KiB) cap
 // stops the model from drowning in output, but it doesn't stop the

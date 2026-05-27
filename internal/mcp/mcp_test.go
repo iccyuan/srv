@@ -206,6 +206,11 @@ func TestRejectSync(t *testing.T) {
 		{"watch -n 1 ls", true},
 		{"journalctl -u nginx -f", true},
 		{"journalctl -u nginx --since 1h", false},
+		{"nohup ./hub -config hub.json &", true},
+		{"cd /opt/svc && nohup ./bin/start.sh &", true},
+		{"cat /tmp/nohup.out", false},
+		{"grep nohup /var/log/syslog", false},
+		{"echo nohup", false},
 		{"ls -la", false},
 		{"", false},
 	}
