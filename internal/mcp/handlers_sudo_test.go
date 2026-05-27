@@ -125,33 +125,33 @@ func TestHandleSudo_NoConfirmArgBypassesGate(t *testing.T) {
 	}
 }
 
-// sudoTestCfgOptIn returns the same minimal profile as sudoTestCfg
-// but with EnableMCPPasswordPrompt = true. Used by the opt-in path
-// tests to assert that the password-elicit branch is taken only when
-// the profile explicitly opts in.
-func sudoTestCfgOptIn() *config.Config {
+// sudoTestCfgOptOut returns the same minimal profile as sudoTestCfg
+// but with EnableMCPPasswordPrompt explicitly set to false. Used by
+// the opt-out path tests to assert that the password-elicit branch
+// is skipped only when the profile explicitly opts out (default is
+// on; absent = on).
+func sudoTestCfgOptOut() *config.Config {
+	off := false
 	return &config.Config{
 		DefaultProfile: "p",
 		Profiles: map[string]*config.Profile{
-			"p": {Name: "p", Host: "127.0.0.1", User: "nobody", Port: 22, EnableMCPPasswordPrompt: true},
+			"p": {Name: "p", Host: "127.0.0.1", User: "nobody", Port: 22, EnableMCPPasswordPrompt: &off},
 		},
 	}
 }
 
-// TestHandleSudo_OptInOff_CacheMissStillReturnsHint: when the toggle
-// is off (the default and what sudoTestCfg uses), a cache miss must
-// behave exactly like the pre-opt-in implementation -- structured
-// cached:false plus a hint to seed from a terminal. The hint text
-// also gains a sentence advertising the opt-in path, so we assert
-// both bits are present.
-func TestHandleSudo_OptInOff_CacheMissStillReturnsHint(t *testing.T) {
+// TestHandleSudo_OptOut_CacheMissReturnsHint: when the profile
+// explicitly sets enable_mcp_password_prompt:false, a cache miss
+// must behave like the pre-prompt-default implementation --
+// structured cached:false plus a hint to seed from a terminal,
+// AND the hint advertises that the opt-out is what's blocking the
+// in-client prompt. We also assert the elicitPassword seam is
+// never consulted in this branch.
+func TestHandleSudo_OptOut_CacheMissReturnsHint(t *testing.T) {
 	t.Setenv("SRV_HOME", t.TempDir())
 	elicitFnForTests = func(string) (bool, bool) { return true, true }
-	// Sanity check: even if a password-elicit seam were installed,
-	// the opt-in-off path must not consult it. Set the seam to a
-	// fataling fn so any unexpected call surfaces immediately.
 	elicitPasswordFnForTests = func(string) (string, bool) {
-		t.Fatal("opt-in OFF must not invoke elicitPassword")
+		t.Fatal("opt-out must not invoke elicitPassword")
 		return "", false
 	}
 	t.Cleanup(func() {
@@ -159,26 +159,27 @@ func TestHandleSudo_OptInOff_CacheMissStillReturnsHint(t *testing.T) {
 		elicitPasswordFnForTests = nil
 	})
 
-	r := handleSudo(map[string]any{"command": "whoami"}, sudoTestCfg(), "")
+	r := handleSudo(map[string]any{"command": "whoami"}, sudoTestCfgOptOut(), "")
 	if !r.IsError {
-		t.Fatal("opt-in OFF + cache miss must error")
+		t.Fatal("opt-out + cache miss must error")
 	}
 	body := resultText(r)
 	if !strings.Contains(body, "no cached password") {
 		t.Errorf("body missing 'no cached password': %q", body)
 	}
 	if !strings.Contains(body, "enable_mcp_password_prompt") {
-		t.Errorf("body should advertise the opt-in alternative, got %q", body)
+		t.Errorf("body should reference the opt-out toggle so the user knows what's gating the prompt, got %q", body)
 	}
 }
 
-// TestHandleSudo_OptInOn_DeclineReturnsHint: the human Allow-ed the
-// command, opt-in is on, but they cancel / decline the subsequent
-// password prompt (or the client returns empty). The handler must
-// fall back to the same cached:false hint -- no half-state where we
-// dial without a password. The hint here should NOT include the
-// "set enable_mcp_password_prompt: true" line (already true).
-func TestHandleSudo_OptInOn_DeclineReturnsHint(t *testing.T) {
+// TestHandleSudo_DefaultOn_DeclineReturnsHint: default profile (no
+// explicit toggle) takes the in-client prompt path; the user
+// declines / the client returns empty. The handler must fall back
+// to the cached:false hint -- no half-state where we dial without
+// a password. The hint should NOT mention `enable_mcp_password_prompt`
+// because the prompt is already on (so suggesting a toggle would
+// just confuse the user).
+func TestHandleSudo_DefaultOn_DeclineReturnsHint(t *testing.T) {
 	t.Setenv("SRV_HOME", t.TempDir())
 	elicitFnForTests = func(string) (bool, bool) { return true, true }
 	elicitPasswordFnForTests = func(string) (string, bool) { return "", false }
@@ -187,26 +188,27 @@ func TestHandleSudo_OptInOn_DeclineReturnsHint(t *testing.T) {
 		elicitPasswordFnForTests = nil
 	})
 
-	r := handleSudo(map[string]any{"command": "whoami"}, sudoTestCfgOptIn(), "")
+	r := handleSudo(map[string]any{"command": "whoami"}, sudoTestCfg(), "")
 	if !r.IsError {
-		t.Fatal("opt-in ON + password decline must error")
+		t.Fatal("default-on + password decline must error")
 	}
 	body := resultText(r)
 	if !strings.Contains(body, "no cached password") {
 		t.Errorf("body missing 'no cached password': %q", body)
 	}
 	if strings.Contains(body, "enable_mcp_password_prompt") {
-		t.Errorf("opt-in already on; should not advertise the toggle, got %q", body)
+		t.Errorf("prompt already on; should not advertise the toggle, got %q", body)
 	}
 }
 
-// TestHandleSudo_OptInOn_AcceptProceedsPastCacheCheck: the human
-// supplies a password via the elicit-password seam. The handler must
-// move past the cache-miss branch and into the dial+run code. We
-// can't reach a real SSH endpoint from a test, so the success
-// signal is "no longer the cached:false hint" -- the error must be
-// a downstream dial failure, not the cache-miss diagnostic.
-func TestHandleSudo_OptInOn_AcceptProceedsPastCacheCheck(t *testing.T) {
+// TestHandleSudo_DefaultOn_AcceptProceedsPastCacheCheck: default
+// profile (no toggle) supplies a password via the elicit-password
+// seam. The handler must move past the cache-miss branch and into
+// the dial+run code. We can't reach a real SSH endpoint from a
+// test, so the success signal is "no longer the cached:false hint"
+// -- the error must be a downstream dial failure, not the cache-
+// miss diagnostic.
+func TestHandleSudo_DefaultOn_AcceptProceedsPastCacheCheck(t *testing.T) {
 	t.Setenv("SRV_HOME", t.TempDir())
 	elicitFnForTests = func(string) (bool, bool) { return true, true }
 	elicitPasswordFnForTests = func(string) (string, bool) { return "secret", true }
@@ -215,7 +217,7 @@ func TestHandleSudo_OptInOn_AcceptProceedsPastCacheCheck(t *testing.T) {
 		elicitPasswordFnForTests = nil
 	})
 
-	r := handleSudo(map[string]any{"command": "whoami"}, sudoTestCfgOptIn(), "")
+	r := handleSudo(map[string]any{"command": "whoami"}, sudoTestCfg(), "")
 	if !r.IsError {
 		// We don't actually expect success -- the test profile points
 		// at 127.0.0.1:22 with bogus creds, so the dial will fail. A
@@ -225,6 +227,6 @@ func TestHandleSudo_OptInOn_AcceptProceedsPastCacheCheck(t *testing.T) {
 	}
 	body := resultText(r)
 	if strings.Contains(body, "no cached password") {
-		t.Errorf("opt-in accept path took the cache-miss branch despite a seeded password: %q", body)
+		t.Errorf("default-on accept path took the cache-miss branch despite a seeded password: %q", body)
 	}
 }

@@ -352,9 +352,9 @@ srv -G web "systemctl restart nginx"
 
 - **(强制 1)** 每次调用都强制走 elicitation 让人在客户端 Allow/Deny;不支持 elicitation 的客户端直接 hard-deny,**没有 `confirm: true` 之类的 model-side bypass**。
 - **(强制 2)** 密码进入 daemon 缓存的入口收窄到 srv 自己的两条受控写路径,**MCP 永远拿不到通用写权**。AI 不会被指示去问你密码,也不会出现"贴密码进 chat"的回路。
-- **(可选)** `profile.enable_mcp_password_prompt: true` 打开后,缓存空时 MCP 会发**第二次 elicitation**(带 password 字段)向客户端要密码;答复走 client UI → srv → daemon,模型不可见。Trade-off:省掉"切回终端跑 `srv sudo` seed 一次"的摩擦,代价是 prompt-injection 表面变大(恶意 tool result 诱导模型调 `sudo` 也会触发同样的密码框);**默认 off**,推荐只在没有本地终端习惯的纯 MCP 客户端场景下逐 profile 显式打开。
+- **(默认开启)** 缓存空时 MCP 会发**第二次 elicitation**(带 password 字段)向客户端要密码;答复走 client UI → srv → daemon,模型不可见。**默认 on**:省掉"每个新 session 都得切回终端跑 `srv sudo` seed 一次"的摩擦。强制 1 的 Allow/Deny 弹窗永远在密码框之前,真人不点 Allow 密码框根本不会渲染;所以即使是恶意 tool result 诱导模型调 `sudo`,也得真人先放行。需要"密码只能从真人终端命令进入系统"这种更强属性的 profile(比如生产机、共享 bastion),显式设 `profile.enable_mcp_password_prompt: false` 退到 TTY-seed 模式。
 
-不打开 opt-in 时:缓存空 / 过期 → MCP 返回 `{cached: false}`,请先在 TTY 跑一次 `srv sudo --cache-ttl 15m -P <profile> true` 种进 daemon 内存,15 分钟内 MCP 可复用。打开 opt-in 时:缓存空 → MCP 弹密码框,你填完即用。
+默认 / 显式 true:缓存空 → MCP 弹密码框,你填完即用。显式 false:缓存空 / 过期 → MCP 返回 `{cached: false}`,请先在 TTY 跑一次 `srv sudo --cache-ttl 15m -P <profile> true` 种进 daemon 内存,15 分钟内 MCP 可复用。
 
 > **Claude Code 客户端注意**:其 MCP 实现校验 `requestedSchema` 时只接受 `format ∈ {email,uri,date,date-time}`,**不接受 `format:"password"`**。srv 因此在 schema 里没设 password 格式提示,密码字段是普通文本(你输入的密码字符**不会被掩码**显示)。其它支持 `format:"password"` 的客户端会自然走掩码,行为一致。
 

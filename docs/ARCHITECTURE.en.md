@@ -354,41 +354,55 @@ written to disk**. Exit 1 plus the usual incorrect-password fragments
 auto-clear the cache so the next call doesn't re-submit a known-bad
 password and lock the remote account.
 
-**MCP `sudo` tool: two hard boundaries + one per-profile opt-in.**
+**MCP `sudo` tool: two hard boundaries + one per-profile opt-out.**
 
 - **Hard 1: elicit every time.** Unlike `run`'s guard, sudo has no
   `confirm=true` model-side bypass — crossing the privilege boundary
   always asks a human. A client without the `elicitation` capability
-  is hard-denied.
-- **Hard 2: the cache write path is not exposed to MCP.** With
-  default config, a password only enters the daemon cache from the
-  TTY-prompting `srv sudo` CLI (`internal/sudo.cacheSet`, lowercase,
-  unexported). `handleSudo` reads via `sudo.CacheGet` and that's it.
-  The AI never gets a generic write surface; the model is never
-  instructed to ask you for a password, and there is no "paste it
-  into chat" loop.
-- **Opt-in: `profile.enable_mcp_password_prompt = true`** adds one
-  *controlled* write path for MCP (`sudo.CacheSet`, exported,
-  single call site). On cache miss, `handleSudo` sends a **second**
-  `elicitation/create` — schema is one required string field — and
-  the client renders an input. The reply
+  is hard-denied. This Allow/Deny check runs *before* any password
+  prompt below; nothing that touches a password renders until a
+  human clicks Allow.
+- **Hard 2: only two controlled write paths reach the daemon cache.**
+  Passwords enter the in-memory cache through exactly two call sites:
+  the TTY-prompting `srv sudo` CLI (`internal/sudo.cacheSet`,
+  lowercase, unexported) and the MCP sudo handler's password
+  elicitation (`sudo.CacheSet`, exported, single call site). MCP
+  never gets a generic write surface; the model is never instructed
+  to ask you for a password, and there is no "paste it into chat"
+  loop — the only "write" path goes through the controlled
+  elicitation channel described next.
+- **Default-on password elicitation.** On cache miss, `handleSudo`
+  sends a **second** `elicitation/create` — schema is one required
+  string field — and the client renders an input. The reply
   `{action: accept, content: {password: "..."}}` flows back, the
   handler feeds it directly to `sudo.CacheSet` (5 min TTL), then
   continues to dial + run. The password travels client UI -> srv ->
   daemon; it **never enters a tool result, the model never sees
   it**. mcplog records only `action=accept` — not the password, its
-  length, or any derivative.
+  length, or any derivative. Set
+  `profile.enable_mcp_password_prompt: false` to explicitly opt out
+  of the prompt and fall back to TTY-seed-only behaviour
+  (`cached:false` hint pointing back to `srv sudo`).
 
-**Why off by default.** The opt-in widens prompt injection: a
-malicious tool result that pushes the model into calling `sudo` will
-trigger the same password prompt, and the user can't tell whether
-they initiated that request. The TTY-seed path has a stronger
-implicit property — a password enters the system only via a
-deliberate terminal command, which prompt injection can't cross. So
-default off, enabled per-profile by someone who explicitly accepts
-the trade-off. Inheritance deliberately does NOT propagate the flag
+**Why default on (and when off still makes sense).** The earlier
+default-off argument was that the prompt adds a prompt-injection
+surface — a malicious tool result that pushes the model into
+calling `sudo` will trigger the same password prompt, and a user
+might not tell whether they initiated it. But **Hard 1's Allow/Deny
+runs first**: the password field doesn't render until a human
+clicks Allow. So an injected sudo call still has to clear that
+human gate before any password UI appears — at that point the
+"did I initiate this?" question is already answered by the
+preceding Allow click. The default-off cost (every fresh session
+forced a context switch to a terminal) outweighed the residual
+benefit, so the default flipped to on. The stronger property
+"password enters the system only via a deliberate terminal command"
+— which prompt injection cannot cross even with a clicked Allow —
+still matters for production hosts and shared bastions. Set
+`enable_mcp_password_prompt: false` per-profile to keep that
+discipline. Inheritance deliberately does NOT propagate the flag
 (`EnableMCPPasswordPrompt` is not in `mergeFrom`) so child profiles
-can't implicitly pick up the toggle.
+never silently inherit an opt-out (or the new default).
 
 **Schema compatibility (verified live 2026-05-24).** The original
 design used `format: "password"` to nudge clients toward a masked

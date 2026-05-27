@@ -187,12 +187,13 @@ func cacheGet(profile string) string {
 
 // CacheSet seeds the daemon's in-memory sudo password cache for a
 // single, narrow caller: the MCP sudo handler's elicitation-based
-// password prompt (enabled per-profile via
-// Profile.EnableMCPPasswordPrompt). The lowercase cacheSet below is
-// the actual implementation; this is the controlled write-path the
-// MCP layer can reach. Default TTL 5 min when ttl <= 0, matching the
-// CLI default. Kept distinct from cacheSet to make it grep-obvious
-// where MCP-originated cache writes enter the system.
+// password prompt (default on; per-profile opt-out via
+// Profile.EnableMCPPasswordPrompt = false). The lowercase cacheSet
+// below is the actual implementation; this is the controlled
+// write-path the MCP layer can reach. Default TTL 5 min when
+// ttl <= 0, matching the CLI default. Kept distinct from cacheSet
+// to make it grep-obvious where MCP-originated cache writes enter
+// the system.
 func CacheSet(profile, password string, ttl time.Duration) {
 	if ttl <= 0 {
 		ttl = 5 * time.Minute

@@ -166,32 +166,43 @@ type Profile struct {
 	// "treat as X" while a host migration is in progress. The escape
 	// hatch wins absolutely; auto-detect is the default.
 	Platform string `json:"platform,omitempty"`
-	// EnableMCPPasswordPrompt opts this profile in to the MCP sudo
-	// handler's elicitation-based password prompt. Default false.
+	// EnableMCPPasswordPrompt controls whether the MCP sudo handler is
+	// allowed to ask the client for a password (via a SECOND
+	// elicitation/create round trip) on cache miss. Pointer-bool so
+	// "absent" is distinct from "explicit false". **Default ON** when
+	// unset; use `MCPPasswordPromptEnabled()` to read.
 	//
-	// When OFF (default): a `sudo` MCP call with an empty/expired
-	// daemon cache returns `cached:false` and tells the caller to seed
-	// from a terminal via `srv sudo --cache-ttl 15m -P <name> true`.
-	// The password can ONLY enter the cache via that TTY-driven CLI.
+	// ON (nil / unset / true, default): on cache miss handleSudo
+	// sends a second `elicitation/create` with a single required
+	// string field. The client renders an input; the answer is read by
+	// the srv process, seeded into the daemon cache (5 min TTL), and
+	// the sudo command proceeds in the same tool call. The model
+	// NEVER sees the password -- it travels client UI -> srv ->
+	// daemon, not through the tool result. The mandatory Allow/Deny
+	// elicitation BEFORE the password prompt still asks a human, so
+	// any sudo path -- benign or prompt-injected -- requires a click
+	// before the password field even renders.
 	//
-	// When ON: the same cache miss triggers a SECOND elicitation round
-	// trip, this time with a `format:"password"` field. The client
-	// renders a masked input; the answer is read by the srv process,
-	// seeded into the daemon cache (5 min TTL), and the sudo command
-	// proceeds in the same tool call. The model NEVER sees the
-	// password -- it travels client UI -> srv -> daemon, not through
-	// the tool result.
+	// OFF (explicit false): the same cache miss returns `cached:false`
+	// and tells the caller to seed from a terminal via
+	// `srv sudo --cache-ttl 15m -P <name> true`. The password can
+	// ONLY enter the cache via that TTY-driven CLI. Stronger property:
+	// "a password enters the system only via a deliberate terminal
+	// command" -- prompt injection cannot cross that boundary at all.
+	// Set false on profiles where you specifically want the TTY-only
+	// seed discipline (e.g. production hosts, shared bastions).
 	//
-	// Trade-off: removes the "drop to a terminal" friction at the cost
-	// of widening the attack surface for prompt injection. A malicious
-	// tool result that nudges the model into calling `sudo` will now
-	// pop up a password prompt -- the user has to recognise whether
-	// they actually initiated that request. The CLI-only seed path is
-	// stronger because crossing the privilege boundary requires a
-	// deliberate terminal action. Enable per-profile only when you've
-	// decided that trade-off is acceptable, e.g. on dev / staging
-	// remotes accessed exclusively from a no-terminal client.
-	EnableMCPPasswordPrompt bool `json:"enable_mcp_password_prompt,omitempty"`
+	// Default was flipped from off to on after the off-by-default
+	// friction (every fresh session forced a context switch to a
+	// terminal even on clients that render password elicitations
+	// perfectly well) outweighed the marginal injection-surface
+	// benefit -- the Allow/Deny gate above already requires a human
+	// in every sudo path.
+	//
+	// Inheritance deliberately does NOT propagate the flag
+	// (EnableMCPPasswordPrompt is not in mergeFrom) so a child
+	// profile never silently inherits an opt-out.
+	EnableMCPPasswordPrompt *bool `json:"enable_mcp_password_prompt,omitempty"`
 	// Free-form bag for unknown keys forwarded from older Python configs.
 	Extra map[string]any `json:"-"`
 	// Name is the profile's lookup key in Config.Profiles. Populated by
@@ -589,6 +600,15 @@ func (p *Profile) GetDefaultCwd() string {
 // existing profiles see no behavior change.
 func (p *Profile) GetAgentForwarding() bool {
 	return p.AgentForwarding != nil && *p.AgentForwarding
+}
+
+// MCPPasswordPromptEnabled reports whether the MCP sudo handler may
+// ask for a password via elicitation on cache miss. Default true;
+// only an explicit `enable_mcp_password_prompt: false` opts out. See
+// the EnableMCPPasswordPrompt field docstring for the security
+// trade-off and why the default is on.
+func (p *Profile) MCPPasswordPromptEnabled() bool {
+	return p.EnableMCPPasswordPrompt == nil || *p.EnableMCPPasswordPrompt
 }
 
 func (p *Profile) GetDialAttempts() int {
