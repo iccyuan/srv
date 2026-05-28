@@ -2,10 +2,23 @@
 
 ## [Unreleased]
 
+## [Go 2.7.0] - 2026-05-28
+
 ### Added
 - **MCP `sudo` 客户端密码 elicitation,默认开启**(`profile.enable_mcp_password_prompt`,unset/true = on,false = off):缓存空 / 过期时,MCP 发**第二次 `elicitation/create`**(带一个 required string 字段),客户端弹密码框 —— 你直接在 MCP 客户端里填密码,答复走 client UI → srv → `sudo.CacheSet` → daemon 内存(5 min TTL),**模型不可见、不进任何 tool result**;mcplog 只记 `action=accept`,密码/长度/任何衍生都不落日志。**默认 on** 省掉每个新 session 都得"切回终端跑 `srv sudo` seed 一次"的摩擦;**强制 1 的 Allow/Deny 弹窗永远在密码框之前**,真人不点 Allow 密码框根本不会渲染,所以即使 injection 诱导模型调 sudo 也得先骗过用户那一击。生产机 / 共享 bastion 想要"密码进入系统必须是真人主动跑的终端命令"这种更强属性(injection 即使能 Allow 也跨不过去),在那条 profile 上设 `enable_mcp_password_prompt: false` 退回 TTY-seed-only。继承上故意不传染(`EnableMCPPasswordPrompt` 不进 `mergeFrom`),避免 child profile 隐式继承 opt-out 或默认 on。字段类型是 `*bool`:nil/缺省 = on,显式 `true` = on,显式 `false` = off,JSON 缺省 round-trip 安全。
 - **Schema 兼容性 fix(2026-05-24 live verify 验证)**:原计划 schema 带 `format: "password"` 让客户端渲染掩码;Claude Code 的 MCP client 校验 `requestedSchema` 时只接受 `format ∈ {email,uri,date,date-time}`,带 `format:"password"` 会被它 `-32602 invalid params` 在渲染前就拒掉,elicit-pw 静默失败。最终 schema 不带 `format`,纯 string 字段加 `description` 标注敏感性,跨客户端可用;**代价**:支持 `format:"password"` 的客户端(MCP Inspector 等)现在也走明文渲染。`elicit_test.go` 把"schema 不含 `format:\"password\"`"固化成反向不变量,防回归。
 - **`sudo.CacheSet`(exported)**:跟 `cacheSet`(unexported)区分命名,grep 一眼能看出 MCP-originated 缓存写入入口的位置。MVP 仅一个调用点(opt-in 路径)。
+- **MCP `run` 拒绝同步 `nohup`**:`nohup ...` 在 shell 里的语义是"把进程脱离 session",但同步 `run` 仍然会把服务的启动 banner / config dump / listen port 灌进 MCP token(每次服务启动典型 4-5 KiB;对应 background 路径只回 ~150 B,无论服务多吵)。在 command-position 锚定的 gate 直接拒绝同步 `nohup`,改派模型走 `run + background: true` → `wait_job` → `tail_log`,且 suggested 命令预先 strip 掉 `nohup` 前缀和可能的尾随 `&`,让 srv 自己的 detach 接管干净。引号 / 参数位置里出现的 `nohup`(`cat /tmp/nohup.out`、`grep nohup log`、`echo nohup`)用同一组 anchor 排除,不会误判。Live verify:Ubuntu / macOS 各跑一遍,拒绝触发、引号场景放行、suggested 命令可直接 copy 运行。
+
+### Changed
+- **`mcplog.DescribeArgs` 补上 `sudo` 分支**:此前 `sudo` 在 switch 里漏掉,`~/.srv/mcp-stats.jsonl` 的 sudo 行 `cmd` 字段为空(`omitempty` 直接缺位),`srv mcp stats sudo` CMD 列全空,by-cmd / per-tool drill 视图失效 —— 看到一个慢的 sudo outlier 必须回头去 grep raw JSONL 才知道是哪条命令,而 raw JSONL 自己也没记下。改成跟 `run` / `detach` 复用同一 `args["command"]` key 取出命令。
+
+### Performance
+- **MCP guard 用户规则正则缓存**(`internal/mcp/gates.go`):用户自定义 guard 规则的 `regexp.Compile` 此前**每次 MCP `run`/`push`/`pull`/`sync`/`sudo` 调用都重跑**(默认规则一直是包级静态编译,这条只影响用户配置)。改成按 GuardConfig 内容指纹做 lock-free 单槽缓存(`atomic.Pointer[guardCacheEntry]`),`config.json` 编辑下一次调用 sig 不一致自动失效重建,稳定配置下完全跳过编译。常态 MCP 会话 100+ 调用 / session 的累计延迟可见下降。
+- **`history.jsonl` 轮转改字节切片**(`internal/history/history.go`):`maybeRotate` 此前是"全文 `json.Unmarshal` → 切尾 → 重新 `Marshal` + `atrest.EncryptLine`"。改成 `bytes.Count('\n')` 算总行数,跨阈值时 `bytes.IndexByte` 找切点,直接 `WriteFileAtomic(data[cut:])`。**字节级保留每行原样**,顺手消除旧路径里"加密 flag 改了之后已归档行可能被重编成明文泄漏"的潜在 risk —— 现在按字节拷贝,加密行原样加密、明文行原样明文,read 侧的 auto-detect 自然续读。新增 2 个测试覆盖 keep-tail 和 below-threshold no-op。
+- **`history.readAll` 预分配 + `bytes.IndexByte` 切行**:`os.ReadFile` 一次读完 → `bytes.Count('\n')` 算出确切容量预分配 `make([]Entry, 0, n)`,省掉 `bufio.ReadString` 每行 string 分配和 append 的 grow-and-copy。
+- **`jobs.Resolve` / `Find` 单遍扫描**(`internal/jobs/jobs.go`):此前精确匹配 + 前缀匹配是两个独立循环;现在一遍 walk 同时做"精确匹配早退"和"首两个前缀命中累计",ambiguous-error 路径零 slice 分配、零 ledger 重遍历。
+- **`hints.Suggest` 跨候选复用 Levenshtein DP buffer**(`internal/hints/hints.go`):`SetCandidates` 时预生成候选切片缓存(替代 `candidateNames()` 每次 Suggest 重建);Suggest 一次性 allocate 两个 `len(s)+1` 的 DP row buffer,通过新的 `levenshteinInto(a, b, prev, curr)` 让所有候选共用。每次 Suggest 的小对象分配数从 `2N` 降到 `2`(N 为候选数,主仓 ~40)。原 `levenshtein(a, b)` API 保留给单点调用 / 测试。
 
 ## [Go 2.6.9] - 2026-05-23
 
