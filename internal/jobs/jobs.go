@@ -91,23 +91,24 @@ func Save(j *File) error {
 // matches and still returns nil so the caller treats "ambiguous" as
 // "not found" and surfaces a hint.
 func Find(j *File, idOrPrefix string) *Record {
+	var first *Record
+	count := 0
 	for _, job := range j.Jobs {
 		if job.ID == idOrPrefix {
 			return job
 		}
-	}
-	matches := []*Record{}
-	for _, job := range j.Jobs {
 		if strings.HasPrefix(job.ID, idOrPrefix) {
-			matches = append(matches, job)
+			count++
+			if count == 1 {
+				first = job
+			}
 		}
 	}
-	if len(matches) == 1 {
-		return matches[0]
+	if count == 1 {
+		return first
 	}
-	if len(matches) > 1 {
-		fmt.Fprintf(os.Stderr, "ambiguous job id %q matches %d jobs.\n", idOrPrefix, len(matches))
-		return nil
+	if count > 1 {
+		fmt.Fprintf(os.Stderr, "ambiguous job id %q matches %d jobs.\n", idOrPrefix, count)
 	}
 	return nil
 }
@@ -117,30 +118,37 @@ func Find(j *File, idOrPrefix string) *Record {
 // Find collapses both to nil + a swallowed stderr warning, which made
 // kill_job/wait_job/tail_log report a misleading "no such job" for an
 // ambiguous prefix even though the README documents prefix matching.
+//
+// Single-pass: exact match short-circuits; otherwise the first two
+// prefix matches are captured so the ambiguous-prefix error can quote
+// a representative pair without ever allocating a slice or re-walking
+// the ledger.
 func Resolve(j *File, idOrPrefix string) (*Record, error) {
+	var first, second *Record
+	count := 0
 	for _, job := range j.Jobs {
 		if job.ID == idOrPrefix {
 			return job, nil
 		}
-	}
-	matches := []*Record{}
-	for _, job := range j.Jobs {
 		if strings.HasPrefix(job.ID, idOrPrefix) {
-			matches = append(matches, job)
+			count++
+			switch count {
+			case 1:
+				first = job
+			case 2:
+				second = job
+			}
 		}
 	}
-	switch len(matches) {
+	switch count {
 	case 1:
-		return matches[0], nil
+		return first, nil
 	case 0:
 		return nil, fmt.Errorf("no such job %q", idOrPrefix)
 	default:
-		sample := matches[0].ID
-		if len(matches) > 1 {
-			sample += ", " + matches[1].ID
-		}
+		sample := first.ID + ", " + second.ID
 		return nil, fmt.Errorf("ambiguous job id %q matches %d jobs (e.g. %s, ...); use a longer prefix or the full id",
-			idOrPrefix, len(matches), sample)
+			idOrPrefix, count, sample)
 	}
 }
 

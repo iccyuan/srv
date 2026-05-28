@@ -1,9 +1,12 @@
 package history
 
 import (
+	"bytes"
+	"fmt"
 	"os"
 	"path/filepath"
 	"srv/internal/atrest"
+	"strings"
 	"testing"
 )
 
@@ -108,6 +111,90 @@ func TestMixedEncryptedAndPlaintextRead(t *testing.T) {
 	if got[0].Cmd != "plain" || got[1].Cmd != "encrypted" {
 		t.Errorf("mixed read order/content wrong: %+v", got)
 	}
+}
+
+// TestMaybeRotateKeepsTail builds a synthetic JSONL exceeding
+// rotateThreshold and verifies that maybeRotate trims to the LAST
+// MaxEntries lines exactly, preserving byte content (no re-encode).
+func TestMaybeRotateKeepsTail(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "history.jsonl")
+	// rotateThreshold + 100 lines, each carrying its index so we can
+	// assert which slice survives. Lines don't need to be valid JSON --
+	// the new rotate path slices on '\n' alone and never decodes.
+	var buf bytes.Buffer
+	total := rotateThreshold + 100
+	for i := range total {
+		fmt.Fprintf(&buf, "line-%07d\n", i)
+	}
+	if err := os.WriteFile(path, buf.Bytes(), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	maybeRotate(path)
+
+	got, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	gotLines := bytes.Count(got, []byte{'\n'})
+	if gotLines != MaxEntries {
+		t.Fatalf("after rotate: %d lines, want %d", gotLines, MaxEntries)
+	}
+	// First surviving line must be the (total - MaxEntries)-th original.
+	firstIdx := total - MaxEntries
+	wantFirst := fmt.Sprintf("line-%07d\n", firstIdx)
+	if !strings.HasPrefix(string(got), wantFirst) {
+		t.Fatalf("first surviving line = %q, want prefix %q",
+			firstLineOf(got), wantFirst)
+	}
+	// Last line must be the original last one (unchanged).
+	wantLast := fmt.Sprintf("line-%07d\n", total-1)
+	if !strings.HasSuffix(string(got), wantLast) {
+		t.Fatalf("last surviving line = %q, want suffix %q",
+			lastLineOf(got), wantLast)
+	}
+}
+
+// TestMaybeRotateBelowThresholdNoop guards against accidental
+// rewriting when the file is small enough that rotation should skip.
+func TestMaybeRotateBelowThresholdNoop(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "history.jsonl")
+	original := []byte("a\nb\nc\n")
+	if err := os.WriteFile(path, original, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	maybeRotate(path)
+	got, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(got, original) {
+		t.Fatalf("below-threshold rotate mutated file: got %q, want %q", got, original)
+	}
+}
+
+func firstLineOf(b []byte) string {
+	if i := bytes.IndexByte(b, '\n'); i >= 0 {
+		return string(b[:i+1])
+	}
+	return string(b)
+}
+
+func lastLineOf(b []byte) string {
+	// b ends in '\n'; find the previous one.
+	if len(b) == 0 {
+		return ""
+	}
+	end := len(b)
+	if b[end-1] == '\n' {
+		// scan back from end-2 to find prior newline
+		i := bytes.LastIndexByte(b[:end-1], '\n')
+		return string(b[i+1:])
+	}
+	i := bytes.LastIndexByte(b, '\n')
+	return string(b[i+1:])
 }
 
 func contains(haystack, needle []byte) bool {

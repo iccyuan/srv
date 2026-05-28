@@ -31,9 +31,15 @@ import (
 // candidates is the universe of names Suggest will fuzzy-match
 // against. Populated once at startup by SetCandidates(); reads are
 // race-free because the dispatch loop is strictly serial.
+//
+// candidatesSlice is the immutable slice view used by Suggest's hot
+// loop -- precomputed at SetCandidates time so we don't rebuild the
+// snapshot on every typo check. Replaced wholesale (never mutated in
+// place), so a reader that captured an old reference stays consistent.
 var (
-	candidatesMu  sync.RWMutex
-	candidatesSet map[string]bool
+	candidatesMu    sync.RWMutex
+	candidatesSet   map[string]bool
+	candidatesSlice []string
 )
 
 // candidatesExcluded names are filtered from fuzzy matching even if
@@ -50,30 +56,33 @@ var candidatesExcluded = map[string]bool{
 // SetCandidates installs the list of names that Suggest considers.
 // Main calls this once during init from the reserved-subcommand
 // registry. Safe to call again later (e.g. a future plugin system);
-// the last call wins.
+// the last call wins. Builds both the lookup map and the immutable
+// iteration slice so Suggest's hot path never has to materialise one.
 func SetCandidates(names []string) {
 	set := make(map[string]bool, len(names))
+	slice := make([]string, 0, len(names))
 	for _, n := range names {
 		if candidatesExcluded[n] {
 			continue
+		}
+		if !set[n] {
+			slice = append(slice, n)
 		}
 		set[n] = true
 	}
 	candidatesMu.Lock()
 	candidatesSet = set
+	candidatesSlice = slice
 	candidatesMu.Unlock()
 }
 
-// candidateNames returns the current candidates as a slice; thread-
-// safe snapshot since SetCandidates replaces the map atomically.
+// candidateNames returns the precomputed iteration slice. The slice is
+// never mutated in place -- SetCandidates swaps in a new one -- so the
+// returned reference is safe to range over without holding the lock.
 func candidateNames() []string {
 	candidatesMu.RLock()
 	defer candidatesMu.RUnlock()
-	out := make([]string, 0, len(candidatesSet))
-	for n := range candidatesSet {
-		out = append(out, n)
-	}
-	return out
+	return candidatesSlice
 }
 
 // isCandidate reports whether `name` is in the active candidate set.
@@ -116,6 +125,14 @@ func Suggest(s string) string {
 	if len(s) >= 5 {
 		threshold = 2
 	}
+	// Two DP row buffers, allocated once and reused across every
+	// candidate. Size: the inner dimension of levenshtein is
+	// min(len(a), len(b)) + 1; since the length-delta filter below
+	// rejects any candidate with |len(cand) - len(s)| > threshold,
+	// min <= len(s), so len(s)+1 always suffices.
+	bufLen := len(s) + 1
+	prev := make([]int, bufLen)
+	curr := make([]int, bufLen)
 	best := ""
 	bestDist := threshold + 1
 	for _, cand := range candidateNames() {
@@ -129,7 +146,7 @@ func Suggest(s string) string {
 		if diff > threshold {
 			continue
 		}
-		d := levenshtein(s, cand)
+		d := levenshteinInto(s, cand, prev, curr)
 		if d < bestDist {
 			bestDist = d
 			best = cand
@@ -142,7 +159,9 @@ func Suggest(s string) string {
 }
 
 // levenshtein computes the standard edit distance between a and b.
-// Two row buffers; allocates O(min(len(a), len(b))) once.
+// Thin wrapper around levenshteinInto that allocates fresh buffers --
+// kept for tests and any external single-shot caller. Hot paths
+// (Suggest) call levenshteinInto with reused buffers instead.
 func levenshtein(a, b string) int {
 	if a == b {
 		return 0
@@ -155,6 +174,30 @@ func levenshtein(a, b string) int {
 	}
 	prev := make([]int, len(b)+1)
 	curr := make([]int, len(b)+1)
+	return levenshteinDP(a, b, prev, curr)
+}
+
+// levenshteinInto is the same edit-distance function as levenshtein
+// but takes caller-owned row buffers so a sweep across N candidates
+// allocates 0 times instead of 2N. Buffers must each have capacity
+// >= min(len(a), len(b)) + 1; Suggest enforces this by sizing them to
+// len(s)+1 (and pre-filtering candidates by length delta).
+func levenshteinInto(a, b string, prev, curr []int) int {
+	if a == b {
+		return 0
+	}
+	if len(a) < len(b) {
+		a, b = b, a
+	}
+	if len(b) == 0 {
+		return len(a)
+	}
+	return levenshteinDP(a, b, prev[:len(b)+1], curr[:len(b)+1])
+}
+
+// levenshteinDP runs the classic two-row DP. Pre-condition: prev and
+// curr have length exactly len(b)+1, and len(a) >= len(b) > 0.
+func levenshteinDP(a, b string, prev, curr []int) int {
 	for j := range prev {
 		prev[j] = j
 	}
@@ -168,14 +211,7 @@ func levenshtein(a, b string) int {
 			ins := curr[j-1] + 1
 			del := prev[j] + 1
 			sub := prev[j-1] + cost
-			min := ins
-			if del < min {
-				min = del
-			}
-			if sub < min {
-				min = sub
-			}
-			curr[j] = min
+			curr[j] = min(ins, del, sub)
 		}
 		prev, curr = curr, prev
 	}

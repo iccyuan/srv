@@ -7,6 +7,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 )
 
 // Pre-execution gates: high-risk command guard, sync-rejection
@@ -103,15 +104,19 @@ var defaultRiskyPatterns = []riskyPattern{
 }
 
 // activePatterns is the effective rule set after merging defaults with
-// the user's GuardConfig. Recomputed each call via mergeGuardConfig so
-// edits to config.json take effect without restarting the MCP server.
-// The cache is small; recompiling user regexes on every guard check is
-// the cost we pay to keep this stateless.
+// the user's GuardConfig. The result is cached behind a content-derived
+// signature so edits to config.json still take effect without a restart
+// (next call sees a different sig, rebuilds) while a stable config
+// avoids paying regexp.Compile on every MCP tool invocation.
 func activePatterns(cfg *config.Config) ([]riskyPattern, []*regexp.Regexp) {
 	if cfg == nil || cfg.Guard == nil {
 		return defaultRiskyPatterns, nil
 	}
 	gc := cfg.Guard
+	sig := guardSig(gc)
+	if e := guardCache.Load(); e != nil && e.sig == sig {
+		return e.rules, e.allow
+	}
 	out := []riskyPattern{}
 	if !gc.DisableDefaults {
 		out = append(out, defaultRiskyPatterns...)
@@ -141,7 +146,55 @@ func activePatterns(cfg *config.Config) ([]riskyPattern, []*regexp.Regexp) {
 		}
 		allow = append(allow, re)
 	}
+	guardCache.Store(&guardCacheEntry{sig: sig, rules: out, allow: allow})
 	return out, allow
+}
+
+// guardCacheEntry holds a compiled rule set keyed by the signature of
+// the GuardConfig that produced it.
+type guardCacheEntry struct {
+	sig   string
+	rules []riskyPattern
+	allow []*regexp.Regexp
+}
+
+// guardCache is a single-slot lock-free cache. In practice users almost
+// never edit guard rules, so this stays warm for the lifetime of the
+// MCP server process. Races between two misses are benign (one of the
+// two compilations wins; both produce identical output).
+var guardCache atomic.Pointer[guardCacheEntry]
+
+// guardSig builds a fingerprint of the inputs activePatterns reads.
+// NUL is a safe separator because regex / rule-name strings are
+// already validated UTF-8 with no embedded NULs. Cost is one
+// allocation proportional to total rule-string length -- orders of
+// magnitude cheaper than even one regexp.Compile call.
+func guardSig(gc *config.GuardConfig) string {
+	var b strings.Builder
+	approx := 4 + len(gc.Rules)*16 + len(gc.Allow)*16
+	for _, r := range gc.Rules {
+		approx += len(r.Name) + len(r.Pattern)
+	}
+	for _, p := range gc.Allow {
+		approx += len(p)
+	}
+	b.Grow(approx)
+	if gc.DisableDefaults {
+		b.WriteByte('D')
+	}
+	b.WriteByte('|')
+	for _, r := range gc.Rules {
+		b.WriteString(r.Name)
+		b.WriteByte(0)
+		b.WriteString(r.Pattern)
+		b.WriteByte(0)
+	}
+	b.WriteByte('|')
+	for _, p := range gc.Allow {
+		b.WriteString(p)
+		b.WriteByte(0)
+	}
+	return b.String()
 }
 
 // guardConfigForTests overrides the active config so unit tests in
