@@ -310,3 +310,119 @@ func TestRejectUnfilteredMessage_StructuredShape(t *testing.T) {
 		t.Errorf("pattern=%v", sc["pattern"])
 	}
 }
+
+// --- heredoc / quoted-content false-positive fixes ---
+
+// TestStripHeredocs_DropsBody verifies the body of a heredoc is removed
+// while the opening command and closing delimiter survive, for the
+// common shapes (bare, quoted, dash, multiple, unterminated).
+func TestStripHeredocs_DropsBody(t *testing.T) {
+	cases := []struct {
+		name string
+		in   string
+		// substrings that must NOT survive (body content) and must
+		// survive (the real command).
+		gone  []string
+		stays []string
+	}{
+		{
+			name:  "tee quoted delim with tail -f in body",
+			in:    "tee /tmp/x <<'EOF'\ndocker logs --tail 100 -f svc\nEOF",
+			gone:  []string{"tail 100 -f", "docker logs"},
+			stays: []string{"tee /tmp/x"},
+		},
+		{
+			name:  "cat write heredoc with cat in body",
+			in:    "cat > /tmp/x <<EOF\ncat /etc/passwd\nEOF",
+			gone:  []string{"/etc/passwd"},
+			stays: []string{"cat > /tmp/x"},
+		},
+		{
+			name:  "dash heredoc, indented close",
+			in:    "cmd <<-END\n\tsleep 90\n\tEND",
+			gone:  []string{"sleep 90"},
+			stays: []string{"cmd <<-END"},
+		},
+		{
+			name:  "unterminated heredoc drops to EOF",
+			in:    "tee f <<EOF\nnohup x &\nsleep 99",
+			gone:  []string{"nohup x", "sleep 99"},
+			stays: []string{"tee f"},
+		},
+		{
+			name:  "quoted << is not a heredoc (not stripped)",
+			in:    `echo "a << b"; sleep 90`,
+			gone:  nil,
+			stays: []string{"sleep 90"},
+		},
+	}
+	for _, c := range cases {
+		got := stripHeredocs(c.in)
+		for _, g := range c.gone {
+			if strings.Contains(got, g) {
+				t.Errorf("%s: body %q should be stripped from %q", c.name, g, got)
+			}
+		}
+		for _, s := range c.stays {
+			if !strings.Contains(got, s) {
+				t.Errorf("%s: %q should survive, got %q", c.name, s, got)
+			}
+		}
+	}
+}
+
+// TestRejectSync_HeredocAndQuotedBodyNotRejected locks in that writing a
+// script whose *content* contains never-terminating / blocking patterns
+// is allowed -- only patterns at a real command position are gated.
+func TestRejectSync_HeredocAndQuotedBodyNotRejected(t *testing.T) {
+	ok := []string{
+		"tee /usr/local/bin/x <<'EOF'\ndocker logs --tail 100 -f c\nEOF",
+		"cat > /tmp/s.sh <<EOF\nwhile true; do sleep 90; done\nEOF",
+		"tee f <<EOF\nnohup myserver &\nEOF",
+		`echo "tail -f /var/log/app.log"`,
+		`grep "sleep 60" /tmp/script.sh`,
+	}
+	for _, cmd := range ok {
+		if why := rejectSync(cmd); why != "" {
+			t.Errorf("should NOT reject (content, not execution): %q -> %q", cmd, why)
+		}
+	}
+}
+
+// TestRejectSync_RealBlockersStillRejected is the regression guard: the
+// stripping must not let a genuine command-position blocker through.
+func TestRejectSync_RealBlockersStillRejected(t *testing.T) {
+	bad := []string{
+		"tail -f /var/log/app.log",
+		"journalctl -u nginx -f",
+		"sleep 90",
+		"echo hi; sleep 30",
+		"watch ls",
+		"nohup ./server &",
+	}
+	for _, cmd := range bad {
+		if why := rejectSync(cmd); why == "" {
+			t.Errorf("should reject real blocker: %q", cmd)
+		}
+	}
+}
+
+// TestRejectUnfiltered_CatWriteAndHeredocAllowed verifies `cat >`/`cat
+// <<EOF` writes and cat-inside-heredoc-body are not gated as unbounded
+// reads, while a genuine `cat <file>` read still is.
+func TestRejectUnfiltered_CatWriteAndHeredocAllowed(t *testing.T) {
+	allowed := []string{
+		"cat > /mnt/app/.env <<EOF\nKEY=val\nEOF",
+		"cat >> /tmp/log.txt",
+		"tee /tmp/x <<'EOF'\ncat /etc/shadow\nEOF",
+	}
+	for _, cmd := range allowed {
+		if label, _ := rejectUnfiltered(cmd); label != "" {
+			t.Errorf("should NOT reject write/heredoc: %q -> %q", cmd, label)
+		}
+	}
+	// Regression: a real read is still gated.
+	if label, _ := rejectUnfiltered("cat /etc/passwd"); label != "cat" {
+		t.Errorf("real `cat <file>` read should still be gated, got %q", label)
+	}
+}

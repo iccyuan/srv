@@ -472,17 +472,23 @@ var reSyncNohup = regexp.MustCompile(`(?:^|[;&|(){}\n]|\bdo\b|\bthen\b)\s*nohup\
 // the model toward background=true / wait_job. Empty return =
 // command is fine to run sync.
 func rejectSync(cmd string) string {
-	if m := longWaitSleep.FindStringSubmatch(cmd); m != nil {
+	// Match against a cleaned view: heredoc bodies removed and quoted
+	// content blanked. This stops a command that merely *writes* a
+	// script containing `sleep 90` / `tail -f` / `nohup ...` (via a
+	// heredoc, or a quoted argument) from being rejected as if it ran
+	// those -- only patterns at a real command position survive.
+	clean := stripShellQuotedContent(stripHeredocs(cmd))
+	if m := longWaitSleep.FindStringSubmatch(clean); m != nil {
 		if n, err := strconv.ParseFloat(m[1], 64); err == nil && n > 5 {
 			return fmt.Sprintf("contains `sleep %s` which would block %ss synchronously", m[1], m[1])
 		}
 	}
 	for _, re := range foreverPatterns {
-		if loc := re.FindStringIndex(cmd); loc != nil {
-			return fmt.Sprintf("contains a never-terminating pattern (%s)", cmd[loc[0]:loc[1]])
+		if loc := re.FindStringIndex(clean); loc != nil {
+			return fmt.Sprintf("contains a never-terminating pattern (%s)", clean[loc[0]:loc[1]])
 		}
 	}
-	if reSyncNohup.MatchString(cmd) {
+	if reSyncNohup.MatchString(clean) {
 		return "uses `nohup` (intent to detach)"
 	}
 	return ""
@@ -493,7 +499,9 @@ func rejectSync(cmd string) string {
 // to. nohup gets a tailored message (the cost isn't the 60s timeout,
 // it's the startup-banner tokens captured into the result).
 func rejectMessage(cmd, why string) string {
-	if reSyncNohup.MatchString(cmd) {
+	// Decide the nohup-tailored message on the cleaned view (matching
+	// rejectSync), but keep the original cmd for the suggested call.
+	if reSyncNohup.MatchString(stripShellQuotedContent(stripHeredocs(cmd))) {
 		stripped := stripNohup(cmd)
 		return fmt.Sprintf(
 			"rejected: %s. `nohup` signals you want a detached process, but synchronous `run` still captures the service's startup output (banners, listen ports, config dumps) into MCP tokens for no benefit -- typical service starts spend 4-5 KiB this way.\n\nUse the background pattern instead (drop the `nohup` prefix; srv detaches the job from the MCP session already):\n  run { command: %q, background: true }   -> returns job_id immediately (~150 B)\n  wait_job { id: <returned id> }           -> confirm it stayed up (default 8s, cap 15s)\n  tail_log { id: <returned id>, lines: N } -> read startup lines only if needed",
@@ -544,9 +552,15 @@ var reTrailingBackground = regexp.MustCompile(`\s*&\s*$`)
 // tokens; the model can read the rejection and pick a `head -n N`
 // / `tail -n N` / `grep` / dedicated MCP tool path.
 var (
-	// reBareCat matches `cat <something>` at a command-position. We
-	// don't reject `cat` with no arg (it's just `stdin -> stdout`).
-	reBareCat        = regexp.MustCompile(`(?i)(?:^|[;&|\n])\s*cat\s+\S`)
+	// reBareCat matches `cat <file>` at a command-position. We don't
+	// reject `cat` with no arg (it's just `stdin -> stdout`), nor a
+	// write/heredoc form: `cat > f`, `cat >> f`, `cat <<EOF` redirect
+	// (often inline heredoc content) INTO a file and read nothing
+	// unbounded. So after any flags the first real token must not be a
+	// redirect / heredoc operator or shell separator (`>`/`<`/`|`/`&`/`;`).
+	// `cat < file` (input redirect) is exempted too -- the lone `<` is
+	// indistinguishable from `<<` here and the case is rare.
+	reBareCat        = regexp.MustCompile(`(?i)(?:^|[;&|\n])\s*cat\s+(?:-\S+\s+)*[^\s>|&;<]`)
 	reBareDmesg      = regexp.MustCompile(`(?i)(?:^|[;&|\n])\s*dmesg\b`)
 	reBareJournalctl = regexp.MustCompile(`(?i)(?:^|[;&|\n])\s*journalctl\b`)
 	reBareFind       = regexp.MustCompile(`(?i)(?:^|[;&|\n])\s*find\s+/`)
@@ -575,7 +589,10 @@ var (
 // into head / tail / grep / wc / ... is enough to call the output
 // bounded, since the model has made an explicit slicing decision.
 func rejectUnfiltered(cmd string) (string, string) {
-	stripped := stripShellQuotedContent(cmd)
+	// Strip heredoc bodies first (so a script written via `tee <<'EOF'
+	// ... cat foo ... EOF` isn't scanned as if it ran `cat foo`), then
+	// quoted content (so `echo "cat foo"` doesn't trip either).
+	stripped := stripShellQuotedContent(stripHeredocs(cmd))
 	if reDownstreamLimiter.MatchString(stripped) ||
 		reHeadBounded.MatchString(stripped) ||
 		reTailBounded.MatchString(stripped) {
@@ -642,6 +659,80 @@ func stripShellQuotedContent(s string) string {
 			continue
 		}
 		b.WriteByte(c)
+	}
+	return b.String()
+}
+
+// reHeredocOp matches a heredoc operator (`<<` or `<<-`) and its
+// delimiter word, allowing optional quotes (`<<'EOF'`, `<<"EOF"`) and
+// optional whitespace (`<< EOF`). Group 1 is the bare delimiter name.
+// Here-strings (`<<<`) don't match: the third `<` isn't a quote or a
+// delimiter letter.
+var reHeredocOp = regexp.MustCompile(`<<-?\s*["']?([A-Za-z_][A-Za-z0-9_]*)["']?`)
+
+// heredocDelims returns the delimiter words of every heredoc operator on
+// `line` that sits at a code position. A `<<` buried in a quoted string
+// (`echo "a << b"`) is not a heredoc and is skipped, so we don't strip
+// lines that aren't actually a heredoc body.
+func heredocDelims(line string) []string {
+	if !strings.Contains(line, "<<") {
+		return nil
+	}
+	locs := reHeredocOp.FindAllStringSubmatchIndex(line, -1)
+	if len(locs) == 0 {
+		return nil
+	}
+	code := codePositions(line)
+	var out []string
+	for _, m := range locs {
+		if m[0] < len(code) && code[m[0]] {
+			out = append(out, line[m[2]:m[3]])
+		}
+	}
+	return out
+}
+
+// stripHeredocs removes heredoc *body* lines from a (possibly
+// multi-line) shell command, keeping the opening line -- which holds the
+// real command, e.g. `tee file <<'EOF'` -- and the closing delimiter
+// line, while dropping everything in between. Without this, the gates
+// would scan inline file content (a script written via `tee <<'EOF' ...
+// EOF` whose body legitimately contains `tail -f`, `cat foo`, `sleep
+// 90`, ...) as if it were commands the shell is about to execute, and
+// reject the write.
+//
+// Best-effort: handles `<<`, `<<-`, quoted/bare delimiters, and multiple
+// heredocs opened on one line (consumed FIFO like bash). An unterminated
+// heredoc consumes to end-of-input. Delimiter matching trims surrounding
+// whitespace, which also covers the leading-tab stripping of `<<-`.
+func stripHeredocs(s string) string {
+	if !strings.Contains(s, "<<") {
+		return s
+	}
+	lines := strings.Split(s, "\n")
+	var b strings.Builder
+	b.Grow(len(s))
+	first := true
+	emit := func(l string) {
+		if !first {
+			b.WriteByte('\n')
+		}
+		first = false
+		b.WriteString(l)
+	}
+	i := 0
+	for i < len(lines) {
+		line := lines[i]
+		emit(line)
+		i++
+		delims := heredocDelims(line)
+		for di := 0; di < len(delims) && i < len(lines); i++ {
+			if strings.TrimSpace(lines[i]) == delims[di] {
+				emit(lines[i]) // keep the closing delimiter line
+				di++
+			}
+			// else: a body line -> dropped (not emitted).
+		}
 	}
 	return b.String()
 }
