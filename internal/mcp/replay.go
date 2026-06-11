@@ -2,10 +2,12 @@ package mcp
 
 import (
 	"bufio"
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"srv/internal/atrest"
 	"srv/internal/srvutil"
@@ -177,6 +179,11 @@ func ReplayCmd(args []string) error {
 				return fmt.Errorf("usage: srv mcp replay show <index>")
 			}
 			return replayShow(args[1])
+		case "diff", "--diff":
+			if len(args) < 3 {
+				return fmt.Errorf("usage: srv mcp replay diff <index_a> <index_b>")
+			}
+			return replayDiff(args[1], args[2])
 		}
 	}
 	return replayList(args)
@@ -187,15 +194,9 @@ func replayShow(idxStr string) error {
 	if err != nil {
 		return err
 	}
-	idx := 0
-	for i, r := range idxStr {
-		if r < '0' || r > '9' {
-			return fmt.Errorf("index must be a non-negative integer (got %q at byte %d)", idxStr, i)
-		}
-		idx = idx*10 + int(r-'0')
-	}
-	if idx >= len(entries) {
-		return fmt.Errorf("index %d out of range [0,%d)", idx, len(entries))
+	idx, err := parseReplayIndex(idxStr, len(entries))
+	if err != nil {
+		return err
 	}
 	b, err := json.MarshalIndent(entries[idx], "", "  ")
 	if err != nil {
@@ -203,6 +204,134 @@ func replayShow(idxStr string) error {
 	}
 	fmt.Println(string(b))
 	return nil
+}
+
+// parseReplayIndex parses a non-negative integer and bounds-checks it
+// against the entry count.
+func parseReplayIndex(s string, count int) (int, error) {
+	if s == "" {
+		return 0, fmt.Errorf("index must be a non-negative integer (got %q)", s)
+	}
+	idx := 0
+	for i, r := range s {
+		if r < '0' || r > '9' {
+			return 0, fmt.Errorf("index must be a non-negative integer (got %q at byte %d)", s, i)
+		}
+		idx = idx*10 + int(r-'0')
+	}
+	if idx >= count {
+		return 0, fmt.Errorf("index %d out of range [0,%d)", idx, count)
+	}
+	return idx, nil
+}
+
+// replayDiff renders a unified line-diff of two replay entries' args
+// and result text. Use case: the model called the same tool twice and
+// the user wants to see precisely what changed between calls. Diffing
+// the full JSON (including dur_ms) would surface noise; sectioning
+// args and result keeps the signal where it matters.
+//
+// Uses `git diff --no-index` for hunked, colored output when git is on
+// PATH; falls back to a side-by-side block dump otherwise.
+func replayDiff(aStr, bStr string) error {
+	entries, err := ReadReplay()
+	if err != nil {
+		return err
+	}
+	ai, err := parseReplayIndex(aStr, len(entries))
+	if err != nil {
+		return err
+	}
+	bi, err := parseReplayIndex(bStr, len(entries))
+	if err != nil {
+		return err
+	}
+	ea, eb := entries[ai], entries[bi]
+
+	fmt.Printf("[%d] %s\n", ai, replayHeader(ea))
+	fmt.Printf("[%d] %s\n", bi, replayHeader(eb))
+	if ea.Tool != eb.Tool {
+		fmt.Printf("\n(note: different tools — %s vs %s)\n", ea.Tool, eb.Tool)
+	}
+
+	argsA, _ := json.MarshalIndent(ea.Args, "", "  ")
+	argsB, _ := json.MarshalIndent(eb.Args, "", "  ")
+	fmt.Println("\n--- args ---")
+	if err := printUnified(argsA, argsB, fmt.Sprintf("[%d].args", ai), fmt.Sprintf("[%d].args", bi)); err != nil {
+		return err
+	}
+
+	fmt.Println("\n--- result ---")
+	return printUnified([]byte(joinResultText(ea.Result)), []byte(joinResultText(eb.Result)),
+		fmt.Sprintf("[%d].result", ai), fmt.Sprintf("[%d].result", bi))
+}
+
+// replayHeader formats one replay entry as a single-line summary
+// (ts / tool / ok-err / duration). Same shape as replayList's rows
+// so the diff header reads like two list rows stacked.
+func replayHeader(e replayEntry) string {
+	ok := "ok"
+	if e.Result.IsError {
+		ok = "err"
+	}
+	return fmt.Sprintf("%s  %-12s %s  %dms", e.TS.Format("15:04:05"), e.Tool, ok, e.DurMs)
+}
+
+// joinResultText joins all text Content blocks (vs the test helper
+// `resultText` which takes just Content[0].Text). The MCP toolResult
+// shape is a slice of {type, text}; for diff purposes we only want
+// the model-visible text, not the structured/metadata blobs (those
+// are in the JSON dump from `replay show`).
+func joinResultText(r toolResult) string {
+	var sb strings.Builder
+	for i, c := range r.Content {
+		if i > 0 {
+			sb.WriteByte('\n')
+		}
+		sb.WriteString(c.Text)
+	}
+	return sb.String()
+}
+
+// printUnified writes a unified diff of a vs b to stdout, preferring
+// `git diff --no-index` for the standard hunked+colored format and
+// falling back to a side-by-side block dump when git isn't available.
+// Equal payloads short-circuit to "(no change)" so the reader sees an
+// explicit "this section is identical" rather than blank space.
+func printUnified(a, b []byte, labelA, labelB string) error {
+	if bytes.Equal(a, b) {
+		fmt.Println("(no change)")
+		return nil
+	}
+	if git, err := exec.LookPath("git"); err == nil {
+		tmp, err := os.MkdirTemp("", "srv-replay-diff-")
+		if err == nil {
+			defer os.RemoveAll(tmp)
+			pa := filepath.Join(tmp, sanitizeLabel(labelA))
+			pb := filepath.Join(tmp, sanitizeLabel(labelB))
+			if os.WriteFile(pa, a, 0o600) == nil && os.WriteFile(pb, b, 0o600) == nil {
+				cmd := exec.Command(git, "diff", "--no-index", "--", pa, pb)
+				cmd.Stdout = os.Stdout
+				cmd.Stderr = os.Stderr
+				_ = cmd.Run() // exit=1 is "files differ", expected here
+				return nil
+			}
+		}
+	}
+	fmt.Printf("(git not available; raw blocks)\n--- %s ---\n%s\n--- %s ---\n%s\n",
+		labelA, string(a), labelB, string(b))
+	return nil
+}
+
+// sanitizeLabel turns `[12].args` into a tmp-filename-safe form so the
+// git diff header shows "[12].args" instead of a temp path collision.
+func sanitizeLabel(s string) string {
+	rep := strings.NewReplacer("/", "_", "\\", "_", ":", "_", " ", "_")
+	out := rep.Replace(s)
+	if out == "" {
+		return "x"
+	}
+	return out
 }
 
 func replayList(args []string) error {

@@ -43,7 +43,7 @@ var aiAgentEnvVars = []string{
 // the caller, so only primaries are listed.
 var remoteSubcommands = map[string]bool{
 	"cd": true, "check": true, "shell": true,
-	"push": true, "pull": true, "sync": true,
+	"push": true, "pull": true, "get": true, "sync": true,
 	"edit": true, "open": true, "code": true, "diff": true,
 	"tunnel": true, "logs": true, "kill": true,
 	"recipe": true, "sudo": true, "ui": true,

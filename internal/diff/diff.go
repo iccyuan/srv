@@ -24,14 +24,17 @@ import (
 	"strings"
 )
 
-// Cmd implements `srv diff <local> [remote]` and `srv diff --changed
-// [scope]`.
+// Cmd implements `srv diff <local> [remote]`, `srv diff --changed
+// [scope]`, and `srv diff --tree <local_dir> [remote_dir]`.
 func Cmd(args []string, cfg *config.Config, profileOverride string) error {
 	if len(args) == 0 {
-		return srvutil.Errf(2, "usage: srv diff <local_file> [remote_file]")
+		return srvutil.Errf(2, "usage: srv diff <local_file> [remote_file]\n       srv diff --tree <local_dir> [remote_dir] [-v]\n       srv diff --changed [staged|modified|untracked]")
 	}
 	if args[0] == "--changed" {
 		return cmdChanged(args[1:], cfg, profileOverride)
+	}
+	if args[0] == "--tree" {
+		return CmdTree(args[1:], cfg, profileOverride)
 	}
 	local := args[0]
 	remoteArg := args[0]

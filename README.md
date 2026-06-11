@@ -238,6 +238,7 @@ srv pull /etc/hosts ./hosts
 | `srv sync /opt/app` | 指定远端根目录。 |
 | `srv sync --root ./subproject` | 指定本地根目录。 |
 | `srv sync --no-git` | 禁用 git 自动模式。 |
+| `srv sync --bwlimit 5M` | 限制 tar 流的吞吐为 5 MB/s(rsync 风格的单位:`500K`、`5MB`、`5MiB`、`2G`,无后缀 = bytes/s)。push 限制写入侧、pull 限制读取侧,通过 SSH 的窗口流控反向施加到网络。压缩在前、限速在后,所以 cap 反映的是线上字节数。`0` 或不设 = 不限速。 |
 | `srv sync --watch` | 监听本地文件变化并持续同步。 |
 
 ### 编辑、打开、比较
@@ -249,6 +250,7 @@ srv pull /etc/hosts ./hosts
 | `srv code [remote_dir]` | 用 VS Code Remote SSH 打开远端目录。 |
 | `srv diff <local_file> [remote_file]` | 比较本地文件和远端文件。 |
 | `srv diff --changed` | 把当前 git 改动文件逐个和远端对应文件比较。 |
+| `srv diff --tree <local_dir> [remote_dir] [-v]` | 树形 diff:本地 + 远端两侧各跑一次 walk(大小 + mtime),按路径对照,输出 `+` 仅远端有 / `-` 仅本地有 / `<` 本地新 / `>` 远端新 / `~` 大小不同但 mtime 近似 / `=` 完全一致(仅 `-v` 显示)。和 `srv sync --diff` 的字典共用,但**不传输**,适合"只想看差异、不打算同步"的场景。Linux 走 `find -printf`、macOS 走 `find -exec stat -f`,自动按 profile 平台分派。 |
 
 ## 5. 后台任务
 
@@ -266,6 +268,8 @@ srv pull /etc/hosts ./hosts
 | `srv kill <id>` | 向远端任务发送 SIGTERM。 |
 | `srv kill <id> -9` | 向远端任务发送 SIGKILL。 |
 | `srv kill <id> --signal=USR1` | 发送自定义信号。 |
+| `srv jobs pause <id>` | 给 job 发 SIGSTOP 暂停(本地记录保留,不像 kill 会清掉)。先 `kill -STOP -PID` 信号整个进程组(detach 走 setsid 时 PID 就是 pgid),失败回落到 `kill -STOP PID`。`.exit` 已存在时直接报"already exited"。 |
+| `srv jobs resume <id>` | 给暂停的 job 发 SIGCONT 恢复运行。 |
 
 ### Supervisor / 资源限制(`srv run` 和 `srv -d` 都支持)
 
@@ -296,6 +300,8 @@ Job 日志保存在远端 `~/.srv-jobs/<id>.log`。job id 支持前缀匹配，�
 | `srv watch <cmd>` | 周期性执行远端命令并原地刷新。 |
 | `srv watch -n SECS <cmd>` | 指定刷新间隔。 |
 | `srv watch --diff <cmd>` | 高亮变化行。 |
+| `srv watch --until '<regex>' <cmd>` | stdout/stderr 任一匹配正则就退出(渲染完最后一帧再退,保留触发证据)。例如 `srv watch --until 'Listening on' 'curl -s localhost:8080'`。 |
+| `srv watch --until-exit N <cmd>` | 命令退出码 == N 就退出。例如 `srv watch --until-exit 0 'systemctl is-active myapp'`。可以和 `--until` 一起用,任一命中即退。SSH 抖动期间的 capture error 不会被误判成 exit 0。 |
 | `srv top` | 从远端流式输出 `top -b`。 |
 | `srv top -n SECS` | 指定刷新间隔。 |
 
@@ -443,6 +449,7 @@ guard 是给 AI / MCP 调用加的一道确认闸,**默认开着**。它只拦"�
 | `srv guard rules defaults off` | 关掉内置 deny 规则(只用自定义规则)。 |
 | `srv mcp replay` | 列出最近 20 条 MCP `tools/call`(args + result 完整记录)。`-n N` 改条数;`--tool NAME` 过滤;`--since 1h` 时间过滤;`--json` 输出 JSONL。 |
 | `srv mcp replay show <idx>` | 看某一条 call 的完整参数 + 结果。 |
+| `srv mcp replay diff <a> <b>` | 对比两条 call 的 args 和 result(unified diff,优先用 `git diff --no-index`)。模型对同一个工具重复调用、结果不一样时排查最顺手。两侧相同的段会显示 `(no change)`。 |
 | `srv mcp replay clear` / `path` | 清空回放文件 / 打印路径。回放写入 `~/.srv/mcp-replay.jsonl`(单独于 `mcp-stats.jsonl`,因为 args 里可能含敏感命令)。 |
 
 Claude Code 示例：

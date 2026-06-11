@@ -51,6 +51,11 @@ type Options struct {
 	// with --watch (a pull watcher would need remote inotify and is
 	// not in scope).
 	Pull bool
+	// BwLimitBps caps the tar-stream throughput in bytes per second.
+	// 0 = unlimited (default). Applies to both push (writer side of
+	// the upload pipe) and pull (reader side of the download pipe).
+	// Parsed from --bwlimit; see parseBwLimit for accepted forms.
+	BwLimitBps int64
 }
 
 func ParseOptions(args []string) *Options {
@@ -179,6 +184,24 @@ func ParseOptions(args []string) *Options {
 				os.Exit(1)
 			}
 			o.DeleteLimit = n
+			i++
+			continue
+		case a == "--bwlimit":
+			bps, err := parseBwLimit(requireValue(a, i))
+			if err != nil {
+				fmt.Fprintln(os.Stderr, "error:", err)
+				os.Exit(1)
+			}
+			o.BwLimitBps = bps
+			i += 2
+			continue
+		case strings.HasPrefix(a, "--bwlimit="):
+			bps, err := parseBwLimit(strings.TrimPrefix(a, "--bwlimit="))
+			if err != nil {
+				fmt.Fprintln(os.Stderr, "error:", err)
+				os.Exit(1)
+			}
+			o.BwLimitBps = bps
 			i++
 			continue
 		case strings.HasPrefix(a, "-"):
@@ -613,7 +636,13 @@ func CollectDeletes(o *Options, localRoot string, allExcludes []string) ([]strin
 // in Go and pipes it into a remote `tar -xf -` running in o.RemoteRoot.
 // Gzips the stream when profile.CompressSync is true (default) -- typical
 // 70% reduction on text/code, ~ms-level CPU cost.
-func TarUploadStream(profile *config.Profile, localRoot string, files []string, remoteRoot string) (int, error) {
+//
+// bwLimitBps > 0 caps the post-compression write rate to that many
+// bytes per second; 0 disables limiting. The limiter sits below the
+// gzip writer so the cap reflects on-the-wire bytes, which is what
+// users care about (rsync's --bwlimit semantics, not "uncompressed
+// input rate").
+func TarUploadStream(profile *config.Profile, localRoot string, files []string, remoteRoot string, bwLimitBps int64) (int, error) {
 	c, err := sshx.Dial(profile)
 	if err != nil {
 		return 255, err
@@ -652,10 +681,20 @@ func TarUploadStream(profile *config.Profile, localRoot string, files []string, 
 			}
 		}()
 		defer pw.Close()
-		// Sink chain: tar -> [gzip ->] pw
-		var sink io.WriteCloser = pw
+		// Sink chain: tar -> [gzip ->] [bwlimit ->] pw
+		// The limiter sits between gzip and pw so the throttled rate
+		// reflects wire bytes (post-compression). If we limited the
+		// tar→gzip edge instead, a heavily compressible payload would
+		// effectively bypass the cap on the wire.
+		var underlying io.Writer = pw
+		if bwLimitBps > 0 {
+			underlying = newLimitedWriter(pw, bwLimitBps)
+		}
+		var sink io.Writer = underlying
+		var gz *gzip.Writer
 		if profile.GetCompressSync() {
-			sink = gzip.NewWriter(pw)
+			gz = gzip.NewWriter(underlying)
+			sink = gz
 		}
 		tw := tar.NewWriter(sink)
 		writeFiles := func() error {
@@ -695,8 +734,8 @@ func TarUploadStream(profile *config.Profile, localRoot string, files []string, 
 		if cerr := tw.Close(); err == nil {
 			err = cerr
 		}
-		if sink != pw {
-			if cerr := sink.Close(); err == nil {
+		if gz != nil {
+			if cerr := gz.Close(); err == nil {
 				err = cerr
 			}
 		}
@@ -928,9 +967,9 @@ func Cmd(args []string, cfg *config.Config, profileOverride string) error {
 	hooks.Run(hookBase)
 	var rc int
 	if o.Pull {
-		rc, err = TarDownloadStream(profile, o.RemoteRoot, files, localRoot)
+		rc, err = TarDownloadStream(profile, o.RemoteRoot, files, localRoot, o.BwLimitBps)
 	} else {
-		rc, err = TarUploadStream(profile, localRoot, files, o.RemoteRoot)
+		rc, err = TarUploadStream(profile, localRoot, files, o.RemoteRoot, o.BwLimitBps)
 	}
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)

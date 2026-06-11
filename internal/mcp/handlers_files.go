@@ -144,6 +144,42 @@ func handlePull(args map[string]any, cfg *config.Config, profileOverride string)
 	}
 }
 
+func handleGet(args map[string]any, cfg *config.Config, profileOverride string) toolResult {
+	rawURL, _ := args["url"].(string)
+	if rawURL == "" {
+		return textErr("url is required")
+	}
+	_, prof, errResult := resolveProfile(cfg, profileOverride)
+	if errResult != nil {
+		return *errResult
+	}
+	local, _ := args["local"].(string)
+	if local == "" {
+		local = "."
+	}
+	start := time.Now()
+	res, err := transfer.RelayDownload(prof, rawURL, local, false)
+	duration := time.Since(start)
+	if err != nil {
+		return textErr(fmt.Sprintf("get FAILED %s [exit %d]: %v", rawURL, res.ExitCode, err))
+	}
+	var bytes int64
+	if res.ExitCode == 0 {
+		bytes = progress.SumLocalSize(res.LocalPath)
+	}
+	text := fmt.Sprintf("downloaded %s -> %s [exit 0]%s", rawURL, res.LocalPath, progress.FmtRate(bytes, duration))
+	return toolResult{
+		Content: []toolContent{{Type: "text", Text: text}},
+		StructuredContent: map[string]any{
+			"exit_code":         res.ExitCode,
+			"url":               rawURL,
+			"local":             res.LocalPath,
+			"bytes_transferred": bytes,
+			"duration_seconds":  duration.Seconds(),
+		},
+	}
+}
+
 func handleSync(args map[string]any, cfg *config.Config, profileOverride string) toolResult {
 	profName, prof, errResult := resolveProfile(cfg, profileOverride)
 	if errResult != nil {
@@ -275,7 +311,9 @@ func handleSync(args map[string]any, cfg *config.Config, profileOverride string)
 	var terr error
 	start := time.Now()
 	if len(files) > 0 {
-		rc, terr = syncx.TarUploadStream(prof, localRoot, files, remoteRoot)
+		// MCP sync doesn't expose --bwlimit: model-driven syncs shouldn't
+		// be choosing a wire rate. Always unlimited (0).
+		rc, terr = syncx.TarUploadStream(prof, localRoot, files, remoteRoot, 0)
 	}
 	if rc == 0 && len(deletes) > 0 {
 		rc, terr = syncx.DeleteRemoteFiles(prof, remoteRoot, deletes)

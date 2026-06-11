@@ -220,7 +220,14 @@ func classifyPull(path string, local, remote RemoteStat) DiffEntry {
 //
 // Gzip on the wire mirrors profile.CompressSync just like push does.
 // Returns (remote exit code, error).
-func TarDownloadStream(profile *config.Profile, remoteRoot string, files []string, localRoot string) (int, error) {
+//
+// bwLimitBps > 0 caps the read rate from the SSH pipe to that many
+// bytes per second; 0 disables limiting. Throttling reads applies
+// backpressure through SSH's per-channel windowed flow control, so
+// the wire rate matches the cap -- there's no separate socket-shaping
+// step. The cap measures wire bytes (pre-gunzip) for the same reason
+// push measures post-gzip.
+func TarDownloadStream(profile *config.Profile, remoteRoot string, files []string, localRoot string, bwLimitBps int64) (int, error) {
 	if len(files) == 0 {
 		return 0, nil
 	}
@@ -271,8 +278,11 @@ func TarDownloadStream(profile *config.Profile, remoteRoot string, files []strin
 	}()
 
 	var src io.Reader = pr
+	if bwLimitBps > 0 {
+		src = newLimitedReader(src, bwLimitBps)
+	}
 	if profile.GetCompressSync() {
-		gz, gerr := gzip.NewReader(pr)
+		gz, gerr := gzip.NewReader(src)
 		if gerr != nil {
 			<-errCh
 			return 1, gerr

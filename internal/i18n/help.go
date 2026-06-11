@@ -43,6 +43,7 @@ Quick start:
   srv open logs/app.log          pull remote file to temp and open locally
   srv code /opt/app              open VS Code Remote SSH for a remote folder
   srv diff local.py remote.py    compare local file with remote file
+  srv diff --tree DIR [REMOTE]   tree-level diff (size + mtime) of two directories
   srv diff --changed             diff all changed git files against remote
   srv env set NODE_ENV prod      set profile-level remote env var
 
@@ -51,6 +52,7 @@ File transfer (uses SFTP via the same SSH session):
   srv push ./dist /opt/app       upload (recursive auto-detected)
   srv pull logs/app.log          download to current dir
   srv pull /etc/hosts ./hosts    explicit local target
+  srv get https://x/f.tgz        relay-download a URL via the remote
 
 Bulk sync of changed files (tar | ssh tar; preserves relative paths):
   srv sync                       in a git repo: modified+staged+untracked
@@ -83,6 +85,8 @@ Detached jobs (background on remote, log to ~/.srv-jobs/<id>.log):
   srv jobs notify test           fire a sample notification
   srv logs <id> [-f]             cat (or tail -f) the remote log
   srv kill <id>                  SIGTERM the remote process and forget it
+  srv jobs pause <id>            SIGSTOP — suspend a running job (record kept)
+  srv jobs resume <id>           SIGCONT — resume a paused job
 
 Supervisor + resource limits (apply to srv run and srv -d):
   srv --restart-on-fail [N] <cmd>      retry on non-zero exit (default unlimited)
@@ -144,7 +148,9 @@ Integrations:
   srv ui                                 one-screen dashboard (profiles, daemon, tunnels, jobs, sessions)
   srv tail [-n LINES] [--grep RE] <remote-path>...
                                          live-follow remote file(s) with auto-reconnect on SSH drop
-  srv watch [-n SECS] [--diff] <cmd>     periodic remote command with in-place refresh (BSD watch over SSH)
+  srv watch [-n SECS] [--diff] [--until RE | --until-exit N] <cmd>
+                                         periodic remote command with in-place refresh (BSD watch over SSH).
+                                         --until exits when stdout/stderr matches RE; --until-exit on exit code.
   srv journal [-u UNIT] [--since TIME] [-f] [-g RE] [-n LINES]
                                          remote systemd journal (one-shot or live-follow)
   srv top [-n SECS]                      stream "top -b" from the remote (auto-reconnect on drop)
@@ -221,6 +227,7 @@ const helpZH = `srv - 跨平台 SSH 远端命令工具,持久 cwd / 连接复用
   srv open logs/app.log          拉远端文件到临时目录,本地默认 app 打开
   srv code /opt/app              用 VS Code Remote SSH 打开远端目录
   srv diff local.py remote.py    对比本地 / 远端文件
+  srv diff --tree DIR [REMOTE]   树形 diff(大小 + mtime):列出两边目录的差异,不传输
   srv diff --changed             对比所有 git 改动文件 vs 远端
   srv env set NODE_ENV prod      设 profile 级远端环境变量
 
@@ -229,6 +236,7 @@ const helpZH = `srv - 跨平台 SSH 远端命令工具,持久 cwd / 连接复用
   srv push ./dist /opt/app       上传(目录自动 -r)
   srv pull logs/app.log          下载到当前目录
   srv pull /etc/hosts ./hosts    显式本地目标
+  srv get https://x/f.tgz        通过服务器中转下载一个 URL
 
 批量同步已变更文件(tar | ssh tar 流,保留相对路径):
   srv sync                       git 仓库:modified+staged+untracked
@@ -260,6 +268,8 @@ const helpZH = `srv - 跨平台 SSH 远端命令工具,持久 cwd / 连接复用
   srv jobs notify test           发一次测试通知
   srv logs <id> [-f]             cat(或 tail -f)远端日志
   srv kill <id>                  SIGTERM 远端进程并丢弃记录
+  srv jobs pause <id>            SIGSTOP — 暂停运行中的 job(记录保留)
+  srv jobs resume <id>           SIGCONT — 恢复一个被暂停的 job
 
 Supervisor / 资源限制(对 srv run 和 srv -d 都生效):
   srv --restart-on-fail [N] <cmd>      非零退出自动重启(N 缺省 = 不限)
@@ -317,7 +327,9 @@ Supervisor / 资源限制(对 srv run 和 srv -d 都生效):
   srv ui                                 一屏总览(profile / daemon / tunnel / job / session)
   srv tail [-n LINES] [--grep RE] <remote-path>...
                                          实时跟踪远端文件,SSH 断了自动重连
-  srv watch [-n SECS] [--diff] <cmd>     周期性跑远端命令,原地刷新(SSH 上的 watch)
+  srv watch [-n SECS] [--diff] [--until RE | --until-exit N] <cmd>
+                                         周期性跑远端命令,原地刷新(SSH 上的 watch)。
+                                         --until 命中正则即退;--until-exit 命中退出码即退。
   srv journal [-u UNIT] [--since TIME] [-f] [-g RE] [-n LINES]
                                          远端 systemd 日志(一次性或持续跟踪)
   srv top [-n SECS]                      流式拉取远端 "top -b",断线自动重连

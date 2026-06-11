@@ -2,6 +2,7 @@ package streams
 
 import (
 	"errors"
+	"regexp"
 	"srv/internal/srvutil"
 	"srv/internal/sshx"
 	"strings"
@@ -99,4 +100,92 @@ func TestHighlightDiffLines_NewTailLines(t *testing.T) {
 	if !strings.Contains(out, srvutil.Reverse+"d"+srvutil.Reset) {
 		t.Errorf("new line 'd' not highlighted: %q", out)
 	}
+}
+
+// untilCond covers the --until / --until-exit decision logic. These
+// tests target the pure helper; the full Watch loop is exercised by
+// the SSH-touching code path that we deliberately don't unit-test.
+
+func TestUntilCond_MatchesStdoutRegex(t *testing.T) {
+	re := mustRe(t, `Listening on :\d+`)
+	u := untilCond{re: re}
+	res := &sshx.RunCaptureResult{Stdout: "starting...\nListening on :8080\n", ExitCode: 0}
+	if !u.matched(res, nil) {
+		t.Errorf("expected match on 'Listening on :8080'")
+	}
+}
+
+func TestUntilCond_MatchesStderrRegex(t *testing.T) {
+	// stderr is concatenated with stdout (joined by \n) so a regex
+	// against an error message in stderr still fires.
+	re := mustRe(t, `Permission denied`)
+	u := untilCond{re: re}
+	res := &sshx.RunCaptureResult{Stdout: "", Stderr: "ssh: Permission denied"}
+	if !u.matched(res, nil) {
+		t.Errorf("expected match on stderr")
+	}
+}
+
+func TestUntilCond_NoMatchYet(t *testing.T) {
+	re := mustRe(t, `READY`)
+	u := untilCond{re: re}
+	res := &sshx.RunCaptureResult{Stdout: "starting...\n"}
+	if u.matched(res, nil) {
+		t.Errorf("did not expect match while output lacks 'READY'")
+	}
+}
+
+func TestUntilCond_ExitCodeMatch(t *testing.T) {
+	u := untilCond{exit: 0, hasExit: true}
+	if !u.matched(&sshx.RunCaptureResult{ExitCode: 0}, nil) {
+		t.Errorf("expected match on exit 0")
+	}
+	if u.matched(&sshx.RunCaptureResult{ExitCode: 1}, nil) {
+		t.Errorf("did not expect match on exit 1")
+	}
+}
+
+func TestUntilCond_BothConditionsOR(t *testing.T) {
+	// Either condition matching exits -- not both required. Common
+	// case: --until 'ready' --until-exit 0 means "leave when EITHER
+	// the output says 'ready' OR the command returns success."
+	u := untilCond{re: mustRe(t, `ready`), exit: 0, hasExit: true}
+	if !u.matched(&sshx.RunCaptureResult{Stdout: "ready"}, nil) {
+		t.Errorf("regex side should match")
+	}
+	if !u.matched(&sshx.RunCaptureResult{Stdout: "not yet", ExitCode: 0}, nil) {
+		t.Errorf("exit side should match")
+	}
+	if u.matched(&sshx.RunCaptureResult{Stdout: "not yet", ExitCode: 1}, nil) {
+		t.Errorf("neither side matches -- expected false")
+	}
+}
+
+func TestUntilCond_CaptureErrorNeverMatches(t *testing.T) {
+	// A transient SSH failure (runErr != nil) keeps the loop running.
+	// Even with --until-exit 0 we must NOT confuse a missing result
+	// for a successful exit.
+	u := untilCond{exit: 0, hasExit: true}
+	if u.matched(nil, errors.New("dial: timeout")) {
+		t.Errorf("capture error must not match --until-exit 0")
+	}
+}
+
+func TestUntilCond_ZeroValueNeverMatches(t *testing.T) {
+	// Without --until or --until-exit, watch keeps polling forever
+	// (Ctrl-C remains the only exit) -- matched() must return false
+	// for any input under the zero value.
+	var u untilCond
+	if u.matched(&sshx.RunCaptureResult{Stdout: "anything", ExitCode: 0}, nil) {
+		t.Errorf("zero-value untilCond must never match")
+	}
+}
+
+func mustRe(t *testing.T, pat string) *regexp.Regexp {
+	t.Helper()
+	re, err := regexp.Compile(pat)
+	if err != nil {
+		t.Fatalf("regexp.Compile(%q): %v", pat, err)
+	}
+	return re
 }

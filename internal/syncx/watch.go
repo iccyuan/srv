@@ -80,7 +80,7 @@ func runWatch(o *Options, profile *config.Profile, localRoot, remoteRoot string,
 			return
 		}
 		fmt.Fprintf(os.Stderr, "[%s] syncing %d files...\n", ts, len(files))
-		rc, err := TarUploadStream(profile, localRoot, files, remoteRoot)
+		rc, err := TarUploadStream(profile, localRoot, files, remoteRoot, o.BwLimitBps)
 		if err != nil {
 			fmt.Fprintln(os.Stderr, err)
 			return

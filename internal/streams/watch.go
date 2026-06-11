@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"os/signal"
+	"regexp"
 	"srv/internal/config"
 	"srv/internal/remote"
 	"srv/internal/srvtty"
@@ -14,6 +15,40 @@ import (
 	"syscall"
 	"time"
 )
+
+// untilCond is the exit condition assembled from --until / --until-exit.
+// Either, both, or neither can be set: when both are set the first one
+// to match wins (OR semantics). Zero value = "never exit on output"
+// (the original `watch` behavior; user Ctrl-C is the only exit path).
+type untilCond struct {
+	re      *regexp.Regexp // --until REGEX (nil if not requested)
+	exit    int            // --until-exit N (when hasExit)
+	hasExit bool
+}
+
+// matched reports whether the latest tick satisfies the user-supplied
+// exit condition. Capture errors and nil results never match -- watch
+// keeps polling through transient SSH drops, same as the original
+// loop. The body scanned for --until is stdout + "\n" + stderr so a
+// regex written against either stream Just Works; the frame's
+// "--- stderr ---" fence is rendering-only and isn't part of the
+// matched text.
+func (u untilCond) matched(res *sshx.RunCaptureResult, err error) bool {
+	if err != nil || res == nil {
+		return false
+	}
+	if u.hasExit && res.ExitCode == u.exit {
+		return true
+	}
+	if u.re != nil {
+		body := res.Stdout
+		if res.Stderr != "" {
+			body += "\n" + res.Stderr
+		}
+		return u.re.MatchString(body)
+	}
+	return false
+}
 
 // Watch runs a remote command repeatedly with an in-place refresh,
 // like the BSD/Linux `watch` utility but over SSH. Reuses the daemon
@@ -30,6 +65,7 @@ import (
 func Watch(args []string, cfg *config.Config, profileOverride string) error {
 	interval := 2 * time.Second
 	diff := false
+	var until untilCond
 	var cmdArgs []string
 	for i := 0; i < len(args); i++ {
 		a := args[i]
@@ -52,6 +88,40 @@ func Watch(args []string, cfg *config.Config, profileOverride string) error {
 			interval = time.Duration(n * float64(time.Second))
 		case a == "-d" || a == "--diff":
 			diff = true
+		case a == "--until":
+			if i+1 >= len(args) {
+				return srvutil.Errf(2, "--until requires a regex")
+			}
+			re, err := regexp.Compile(args[i+1])
+			if err != nil {
+				return srvutil.Errf(2, "bad --until regex %q: %v", args[i+1], err)
+			}
+			until.re = re
+			i++
+		case strings.HasPrefix(a, "--until="):
+			re, err := regexp.Compile(strings.TrimPrefix(a, "--until="))
+			if err != nil {
+				return srvutil.Errf(2, "bad --until regex: %v", err)
+			}
+			until.re = re
+		case a == "--until-exit":
+			if i+1 >= len(args) {
+				return srvutil.Errf(2, "--until-exit requires an exit code")
+			}
+			n, err := strconv.Atoi(args[i+1])
+			if err != nil {
+				return srvutil.Errf(2, "bad --until-exit value %q (want integer)", args[i+1])
+			}
+			until.exit = n
+			until.hasExit = true
+			i++
+		case strings.HasPrefix(a, "--until-exit="):
+			n, err := strconv.Atoi(strings.TrimPrefix(a, "--until-exit="))
+			if err != nil {
+				return srvutil.Errf(2, "bad --until-exit value: %v", err)
+			}
+			until.exit = n
+			until.hasExit = true
 		case a == "--":
 			cmdArgs = append(cmdArgs, args[i+1:]...)
 			i = len(args)
@@ -60,7 +130,7 @@ func Watch(args []string, cfg *config.Config, profileOverride string) error {
 		}
 	}
 	if len(cmdArgs) == 0 {
-		return srvutil.Errf(2, "usage: srv watch [-n SECONDS] [--diff] <command>")
+		return srvutil.Errf(2, "usage: srv watch [-n SECONDS] [--diff] [--until RE | --until-exit N] <command>")
 	}
 	cmd := strings.Join(cmdArgs, " ")
 
@@ -97,6 +167,14 @@ func Watch(args []string, cfg *config.Config, profileOverride string) error {
 		prevLines = strings.Count(frame, "\n")
 		if res != nil {
 			prevOut = res.Stdout
+		}
+
+		// --until / --until-exit exit AFTER rendering the matched frame
+		// so the user can see what tripped the condition. Without the
+		// render-first ordering, watch would clear the screen on exit
+		// and leave the user with no evidence of the match.
+		if until.matched(res, runErr) {
+			return nil
 		}
 
 		if !waitOrStop(interval, stopCh) {

@@ -209,6 +209,12 @@ func CmdJobs(args []string, cfg *config.Config, profileOverride string) error {
 	if len(args) > 0 && args[0] == "prune" {
 		return srvutil.Errf(2, "`srv jobs prune` was replaced by `srv prune jobs` (see `srv prune`)")
 	}
+	if len(args) > 0 && (args[0] == "pause" || args[0] == "resume") {
+		if len(args) < 2 {
+			return srvutil.Errf(2, "usage: srv jobs %s <id>", args[0])
+		}
+		return cmdJobsSignal(args[1], args[0], cfg)
+	}
 	for i, a := range args {
 		if a == "--watch" || a == "-w" {
 			// Remove the flag so the watch helper sees the remainder
@@ -274,6 +280,46 @@ see also:
 		cmd = "tail -f " + j.Log
 	}
 	return srvutil.Code(remote.RunStream(prof, "", cmd, follow))
+}
+
+// cmdJobsSignal sends SIGSTOP / SIGCONT to a detached job, implementing
+// `srv jobs pause <id>` and `srv jobs resume <id>`. Unlike CmdKill, the
+// local registry entry is preserved -- the job is still running on the
+// remote, just suspended (pause) or back in the runqueue (resume).
+//
+// Signalling the process GROUP (`kill -SIG -PID`) and falling back to
+// the pid mirrors the MCP kill_job handler's approach: detach spawns
+// under setsid so the recorded pid is the group leader on Linux, and
+// the workload (the bash wrapper's child) only feels the signal when
+// we signal the group. The bare-pid fallback covers macOS/BSD remotes
+// where setsid isn't on PATH and the recorded pid is the wrapper.
+//
+// `.exit` short-circuit: if the job already finished, the file at
+// ~/.srv-jobs/<id>.exit exists -- we surface that as "already exited"
+// rather than letting the kill report "no such pid" (same logic as
+// the MCP kill_job handler).
+func cmdJobsSignal(jid, action string, cfg *config.Config) error {
+	sig := "STOP"
+	verb := "paused"
+	if action == "resume" {
+		sig = "CONT"
+		verb = "resumed"
+	}
+	jf := jobs.Load()
+	j := jobs.Find(jf, jid)
+	if j == nil {
+		return srvutil.Errf(1, "error: no such job %q", jid)
+	}
+	prof, ok := cfg.Profiles[j.Profile]
+	if !ok {
+		return srvutil.Errf(1, "error: profile %q (from job) not found.", j.Profile)
+	}
+	exitf := fmt.Sprintf("$HOME/.srv-jobs/%s.exit", j.ID)
+	cmd := fmt.Sprintf(
+		`if [ -f %s ]; then printf 'already exited (code %%s)\n' "$(cat %s 2>/dev/null)"; elif kill -%s -%d 2>/dev/null || kill -%s %d 2>/dev/null; then echo %s; else echo 'no such pid (already exited?)'; fi`,
+		exitf, exitf, sig, j.Pid, sig, j.Pid, verb,
+	)
+	return srvutil.Code(remote.RunStream(prof, "", cmd, false))
 }
 
 // CmdKill implements `srv kill <id> [--signal=NAME | -9]`. Always

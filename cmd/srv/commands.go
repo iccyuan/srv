@@ -133,6 +133,7 @@ var subcommands = []subcommand{
 	// Transfer / view.
 	{name: "push", handler: func(c cmdCtx) error { return cmdPush(c.args, c.cfg, c.profileOverride) }},
 	{name: "pull", handler: func(c cmdCtx) error { return cmdPull(c.args, c.cfg, c.profileOverride) }},
+	{name: "get", handler: func(c cmdCtx) error { return cmdGet(c.args, c.cfg, c.profileOverride) }},
 	{name: "sync", handler: func(c cmdCtx) error { return syncx.Cmd(c.args, c.cfg, c.profileOverride) }},
 	{name: "edit", handler: func(c cmdCtx) error { return editcmd.Cmd(c.args, c.cfg, c.profileOverride) }},
 	{name: "open", handler: func(c cmdCtx) error { return launcher.Open(c.args, c.cfg, c.profileOverride) }},

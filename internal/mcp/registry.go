@@ -232,6 +232,22 @@ var tools = []tool{
 	},
 	{
 		def: toolDef{
+			Name:        "get",
+			Description: "Relay-download a URL through the remote: the server fetches the URL with curl/wget into a temp dir, the file is pulled to the local machine, and the remote temp copy is deleted. Use when the remote's network reaches a source the local machine can't (or can't reach quickly).",
+			InputSchema: map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"url":     strSchema("HTTP(S) URL the remote should download."),
+					"local":   strSchema("Local destination path or dir (default: current dir)."),
+					"profile": strSchema(""),
+				},
+				"required": []string{"url"},
+			},
+		},
+		handler: handleGet,
+	},
+	{
+		def: toolDef{
 			Name:        "sync",
 			Description: "Sync local files to the remote. Selection by `mode`: git (changed tracked files), glob (`include` patterns; `*` is one level, `**` recurses), mtime (`since`), or list (explicit `files`). `files`/globs are resolved relative to `root` (the local sync root), not your shell cwd. NOT incremental: every selected file is re-tar'd and re-sent each call even if unchanged (no per-file skip) -- it's a push, not rsync.",
 			InputSchema: map[string]any{

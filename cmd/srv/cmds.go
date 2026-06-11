@@ -792,6 +792,48 @@ func cmdPull(args []string, cfg *config.Config, profileOverride string) error {
 	return exitCode(rc)
 }
 
+// cmdGet relays a download through the remote: the server fetches the
+// URL, the bytes come home over SSH, and the remote temp copy is removed
+// afterward. Handy when the remote's line reaches a source the local
+// machine can't (or can't reach quickly).
+func cmdGet(args []string, cfg *config.Config, profileOverride string) error {
+	if len(args) == 0 {
+		return exitErr(1, "%s", i18n.T("usage.get"))
+	}
+	rawURL := args[0]
+	local := "."
+	if len(args) > 1 {
+		local = args[1]
+	}
+	name, profile, err := config.Resolve(cfg, profileOverride)
+	if err != nil {
+		return exitErr(1, "%v", err)
+	}
+	cwd := config.GetCwd(name, profile)
+	base := hookEvent(name, profile, cwd)
+	base.Target = rawURL
+	base.Local = local
+	base.Name = "pre-get"
+	hooks.Run(base)
+	fmt.Fprintf(os.Stderr, "get: fetching %s via %s\n", rawURL, name)
+	res, err := transfer.RelayDownload(profile, rawURL, local, true)
+	if err != nil {
+		check.PrintDialError(err, profile)
+		fmt.Fprintf(os.Stderr, "get failed: %v\n", err)
+		if res.ExitCode == 0 {
+			// A pre-exit failure (dial, mktemp) leaves ExitCode 0; don't
+			// let exitCode() report success for it.
+			res.ExitCode = 1
+		}
+	} else {
+		fmt.Printf("downloaded %s -> %s (via %s)\n", rawURL, res.LocalPath, name)
+	}
+	base.Name = "post-get"
+	base.Exit = res.ExitCode
+	hooks.Run(base)
+	return exitCode(res.ExitCode)
+}
+
 func stripRecursive(args []string) ([]string, bool) {
 	out := make([]string, 0, len(args))
 	r := false
