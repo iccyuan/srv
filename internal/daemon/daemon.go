@@ -133,6 +133,76 @@ type pooledClient struct {
 	// caller's session is done. Atomic so the hot read inside
 	// acquireClient doesn't have to grab a mutex.
 	inflight atomic.Int32
+	// ident is dialIdentity() of the profile this conn was dialed
+	// with. acquireClient re-reads config on every call, and a conn
+	// whose ident no longer matches (user / host / port / key edited)
+	// must never be handed out: it would silently run commands as the
+	// old user or on the old host.
+	ident string
+	// retired is set when the conn was pulled from the pool because
+	// its ident went stale while sessions were still running on it.
+	// The last release() closes it instead of the GC (which only
+	// scans s.pool and would never see it again).
+	retired atomic.Bool
+}
+
+// dialIdentity fingerprints every profile field that decides WHERE
+// and AS WHOM a connection authenticates. Fields that only tune an
+// established conn (keepalive, env, cwd, ...) are deliberately left
+// out so editing them doesn't churn the pool.
+func dialIdentity(p *config.Profile) string {
+	var b strings.Builder
+	fmt.Fprintf(&b, "%s\x00%d\x00%s\x00%s", p.Host, p.Port, p.User, p.IdentityFile)
+	for _, h := range p.Jump {
+		fmt.Fprintf(&b, "\x00jump=%s|%s", h.Spec, h.IdentityFile)
+	}
+	for _, o := range p.SshOptions {
+		fmt.Fprintf(&b, "\x00opt=%s", o)
+	}
+	return b.String()
+}
+
+// retireStaleLocked removes every pooled conn for profileName whose
+// ident differs from ident, plus that profile's ls-cache rows (they
+// describe the old target). Idle conns are returned for the caller to
+// close outside the mutex; busy ones are flagged retired and closed by
+// their last release(). Caller MUST hold s.mu.
+func (s *daemonState) retireStaleLocked(profileName, ident string) []*sshx.Client {
+	pcs := s.pool[profileName]
+	var toClose []*sshx.Client
+	kept := pcs[:0]
+	for _, pc := range pcs {
+		if pc.ident == ident {
+			kept = append(kept, pc)
+			continue
+		}
+		if pc.inflight.Load() == 0 {
+			toClose = append(toClose, pc.client)
+			continue
+		}
+		pc.retired.Store(true)
+		// release() decrements without s.mu, so the last session may
+		// have ended between the Load above and the Store. Re-check;
+		// the CAS pairs with release()'s so exactly one side closes.
+		if pc.inflight.Load() == 0 && pc.retired.CompareAndSwap(true, false) {
+			toClose = append(toClose, pc.client)
+		}
+	}
+	if len(kept) == len(pcs) {
+		return nil
+	}
+	if len(kept) == 0 {
+		delete(s.pool, profileName)
+	} else {
+		s.pool[profileName] = kept
+	}
+	cachePrefix := profileName + "\x00"
+	for k := range s.lsCache {
+		if strings.HasPrefix(k, cachePrefix) {
+			delete(s.lsCache, k)
+		}
+	}
+	return toClose
 }
 
 type lsCacheEntry struct {
@@ -629,12 +699,25 @@ func (s *daemonState) acquireClient(profileName string) (*sshx.Client, *config.P
 	}
 	profile.Name = profileName
 	poolSize := profile.GetPoolSize()
+	ident := dialIdentity(profile)
 
 	// Fast path: reuse an existing pooled conn. Pick the lowest-
 	// inflight one; if multiple tie, prefer the most recently used so
 	// a known-good connection wins over a long-idle one that might
-	// have NAT-timed-out under us.
+	// have NAT-timed-out under us. Conns dialed under an older version
+	// of this profile are retired first so they can't be picked.
 	s.mu.Lock()
+	if stale := s.retireStaleLocked(profileName, ident); len(stale) > 0 {
+		// Close off the mutex path: Close() can block on a slow
+		// socket teardown.
+		go func() {
+			for _, c := range stale {
+				if c != nil {
+					_ = c.Close()
+				}
+			}
+		}()
+	}
 	pcs := s.pool[profileName]
 	var best *pooledClient
 	for _, pc := range pcs {
@@ -715,7 +798,7 @@ func (s *daemonState) acquireClient(profileName string) (*sshx.Client, *config.P
 		// fast path will find a usable conn.
 		return s.acquireClient(profileName)
 	}
-	pc := &pooledClient{client: c, lastUsed: time.Now()}
+	pc := &pooledClient{client: c, lastUsed: time.Now(), ident: ident}
 	pc.inflight.Add(1)
 	s.pool[profileName] = append(s.pool[profileName], pc)
 	s.mu.Unlock()
@@ -727,10 +810,15 @@ func (s *daemonState) acquireClient(profileName string) (*sshx.Client, *config.P
 // lastUsed needs the mutex because the GC reads it while holding mu.
 func (s *daemonState) leaseRelease(pc *pooledClient, profile *config.Profile) (*sshx.Client, *config.Profile, func(), error) {
 	return pc.client, profile, func() {
-		pc.inflight.Add(-1)
+		left := pc.inflight.Add(-1)
 		s.mu.Lock()
 		pc.lastUsed = time.Now()
 		s.mu.Unlock()
+		// A retired conn is out of the pool; nobody else will close it.
+		// CompareAndSwap so only one releaser does the Close.
+		if left == 0 && pc.retired.CompareAndSwap(true, false) && pc.client != nil {
+			_ = pc.client.Close()
+		}
 	}, nil
 }
 

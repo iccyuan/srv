@@ -248,6 +248,9 @@ func handleWaitJob(args map[string]any, cfg *config.Config, profileOverride stri
 	// for up to maxWait seconds, checking each second for either
 	// the .exit marker (job finished, capture exit code) or the
 	// PID being gone without an .exit (got killed externally).
+	// `kill -0` alone also fails with EPERM when the pid is alive but
+	// owned by another user, which read as a false "killed"; `ps -p`
+	// is the permission-free existence check (Linux and BSD/macOS).
 	// Either resolution prints `STATUS=...` on the first line plus
 	// the log tail; if maxWait elapses the same shape is returned
 	// with STATUS=running so the model can loop.
@@ -269,7 +272,7 @@ func handleWaitJob(args map[string]any, cfg *config.Config, profileOverride stri
     tail -n %d %s
     exit 0
   fi
-  if ! kill -0 %d 2>/dev/null; then
+  if ! kill -0 %d 2>/dev/null && ! ps -p %d >/dev/null 2>&1; then
     lu=$(%s)
     printf 'STATUS=killed LOG_UNCHANGED=%%s\n' "$lu"
     tail -n %d %s
@@ -282,7 +285,7 @@ printf 'STATUS=running LOG_UNCHANGED=%%s\n' "$lu"
 tail -n %d %s
 `, maxWait,
 		exitFile, exitFile, logUnchangedExpr, tailLines, j.Log,
-		j.Pid, logUnchangedExpr, tailLines, j.Log,
+		j.Pid, j.Pid, logUnchangedExpr, tailLines, j.Log,
 		logUnchangedExpr, tailLines, j.Log)
 	start := time.Now()
 	res, _ := remote.RunCapture(prof, "", script)
