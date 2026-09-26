@@ -2,6 +2,20 @@
 
 ## [Unreleased]
 
+## [Go 2.7.1] - 2026-09-27
+
+### Fixed
+- **daemon 连接池不认 profile 变更,改了 user/host 后旧连接照样被分配**(`internal/daemon/daemon.go`):`acquireClient` 每次都重读 config,但复用池化连接时**只按 profile 名匹配**,从不核对这条连接当初是用哪个 host / port / user / key 拨的。实际踩到:profile 的 `user` 改成 `yuan` 又改回 `root`,池里同时留着两个版本的连接,least-loaded 选择继续把 yuan 那条分出去 —— `run` 以错误用户执行(apt 报 Permission denied),`wait_job` 以 yuan 跑 `kill -0 <root 的 pid>` 得到 EPERM,把**正在跑的任务误报成 `killed`**。改的若是 `host`,命令会**跑到旧服务器上**。修复:每条池化连接记录 `dialIdentity` 指纹(host、port、user、identity_file、jump 各跳、ssh_options;keepalive / env / cwd 这类只调参数的字段不计入,改了不会导致重连);取连接时指纹不一致就移出池子并清掉该 profile 的 ls 缓存,空闲的立即关闭,正在跑会话的标记 retired、由最后一次 release 关闭(CAS 保证只关一次),不打断进行中的命令。新增 4 个测试覆盖指纹字段、退役分流、空 key 清理、release 关闭。
+- **`wait_job` 把 EPERM 当成进程已死**(`internal/mcp/handlers_jobs.go`):`kill -0` 对存活但属于其他用户的 pid 也返回失败。改为 `kill -0` 失败后再用 `ps -p` 做与权限无关的存在性确认(Linux / BSD / macOS 通用)。
+
+### Added
+- **`srv get <url>`**:经远端中转下载(远端 curl/wget 到临时文件 → SSH 拉回本地 → 清理),同时暴露为 MCP 工具 `get`。
+- **`srv sync --bwlimit RATE`**:rsync 风格的 tar 流限速(push 在 gzip 之后计量,pull 按线上字节);MCP `sync` 不限速。
+- **`srv diff --tree <dir> [remote]`**:按 size + mtime 对比本地与远端目录树,不传输文件内容(按平台用 `find -printf` / `stat -f`)。
+- **`srv jobs pause/resume <id>`**:对 detached 任务发 SIGSTOP / SIGCONT,保留本地记录(优先信号整个进程组,回退到单 pid)。
+- **`srv watch --until RE` / `--until-exit N`**:输出匹配正则或命令返回指定退出码时结束 watch,退出前先渲染最后一帧。
+- **`srv mcp replay diff <a> <b>`**:对两条 replay 记录的参数和结果做 unified diff(优先 `git diff --no-index`,回退并排对比)。
+
 ## [Go 2.7.0] - 2026-05-28
 
 ### Added
