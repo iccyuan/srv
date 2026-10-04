@@ -3,6 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="srv-token" content="__SRV_TOKEN__">
 <title>srv installer</title>
 <style>
   :root {
@@ -376,6 +377,13 @@
 </main>
 
 <script>
+const SRV_TOKEN = document.querySelector('meta[name="srv-token"]').content;
+// Every /api/* call carries the per-run token; the server rejects
+// requests without it (see authorizeAPI in install.go).
+function api(path, opts = {}) {
+  const headers = Object.assign({ 'X-Srv-Token': SRV_TOKEN }, opts.headers || {});
+  return fetch(path, Object.assign({}, opts, { headers }));
+}
 const $ = (sel) => document.querySelector(sel);
 
 function el(tag, className, text) {
@@ -562,7 +570,7 @@ function updateSelectedCount() {
 
 async function loadStatus() {
   setOverall('warn', 'Checking installation');
-  const r = await fetch('/api/status');
+  const r = await api('/api/status');
   if (!r.ok) throw new Error(`status failed: ${r.status}`);
   const s = await r.json();
   renderStatus(s);
@@ -600,7 +608,7 @@ $('#apply').addEventListener('click', async () => {
   setOverall('warn', 'Applying changes');
   logLine(`Applying: ${checked.join(', ')}`);
   try {
-    const r = await fetch('/api/apply', {
+    const r = await api('/api/apply', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ actions: checked }),
@@ -633,7 +641,7 @@ $('#refresh').addEventListener('click', async () => {
 
 $('#quit').addEventListener('click', async () => {
   try {
-    await fetch('/api/quit', { method: 'POST' });
+    await api('/api/quit', { method: 'POST' });
   } finally {
     document.body.innerHTML = `
       <div class="done">

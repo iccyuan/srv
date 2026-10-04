@@ -86,3 +86,39 @@ func TestForwardStreamReader_NilCallbackStillBuffers(t *testing.T) {
 		t.Errorf("buf=%q", buf.String())
 	}
 }
+
+// Two forwarders (stdout + stderr) share one callback the way RunStream
+// wires them. Without serializeChunks the unsynchronized counter below
+// is a data race (-race flags it) and the count may come up short.
+func TestSerializeChunks_ConcurrentForwarders(t *testing.T) {
+	const n = 2000
+	var sbOut, sbErr strings.Builder
+	for i := 0; i < n; i++ {
+		sbOut.WriteString("out\n")
+		sbErr.WriteString("err\n")
+	}
+	var bufOut, bufErr bytes.Buffer
+	var wg sync.WaitGroup
+	calls := 0
+	bytesSeen := 0
+	onChunk := serializeChunks(func(_ StreamChunkKind, line string) {
+		calls++
+		bytesSeen += len(line)
+	})
+	wg.Add(2)
+	go forwardStreamReader(strings.NewReader(sbOut.String()), StreamStdout, &bufOut, onChunk, &wg)
+	go forwardStreamReader(strings.NewReader(sbErr.String()), StreamStderr, &bufErr, onChunk, &wg)
+	wg.Wait()
+	if calls != 2*n {
+		t.Errorf("calls=%d want %d", calls, 2*n)
+	}
+	if bytesSeen != 2*n*4 {
+		t.Errorf("bytesSeen=%d want %d", bytesSeen, 2*n*4)
+	}
+}
+
+func TestSerializeChunks_NilStaysNil(t *testing.T) {
+	if serializeChunks(nil) != nil {
+		t.Fatal("nil callback must stay nil so forwardStreamReader skips it")
+	}
+}

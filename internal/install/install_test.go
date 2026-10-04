@@ -1,6 +1,8 @@
 package install
 
 import (
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 )
@@ -64,5 +66,62 @@ func TestInstallHTMLKeepsFunctionalHooks(t *testing.T) {
 		if !strings.Contains(html, want) {
 			t.Fatalf("install HTML missing functional hook %q", want)
 		}
+	}
+}
+
+func TestAuthorizeAPI(t *testing.T) {
+	const token = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+	const listen = "127.0.0.1:43210"
+	mk := func(method, tok, host, origin string) *http.Request {
+		r := httptest.NewRequest(method, "http://"+listen+"/api/apply", nil)
+		r.Host = host
+		if tok != "" {
+			r.Header.Set("X-Srv-Token", tok)
+		}
+		if origin != "" {
+			r.Header.Set("Origin", origin)
+		}
+		return r
+	}
+	cases := []struct {
+		name string
+		req  *http.Request
+		want bool
+	}{
+		{"ok same-origin", mk("POST", token, listen, "http://"+listen), true},
+		{"ok no origin header", mk("POST", token, listen, ""), true},
+		{"ok localhost spelling", mk("POST", token, "localhost:43210", "http://localhost:43210"), true},
+		{"missing token", mk("POST", "", listen, ""), false},
+		{"wrong token", mk("POST", "ffff", listen, ""), false},
+		{"wrong method", mk("GET", token, listen, ""), false},
+		{"foreign origin", mk("POST", token, listen, "http://evil.example"), false},
+		{"foreign host", mk("POST", token, "evil.example:80", ""), false},
+		{"other port", mk("POST", token, "127.0.0.1:1", ""), false},
+	}
+	for _, tc := range cases {
+		if got := authorizeAPI(tc.req, http.MethodPost, token, listen); got != tc.want {
+			t.Errorf("%s: got %v want %v", tc.name, got, tc.want)
+		}
+	}
+}
+
+func TestInstallHTMLCarriesToken(t *testing.T) {
+	html := string(installHTML)
+	// The placeholder must appear exactly where Cmd substitutes it,
+	// and every /api/* call must go through the api() helper that
+	// attaches X-Srv-Token -- a bare fetch('/api/...') would be
+	// rejected by authorizeAPI.
+	if !strings.Contains(html, `<meta name="srv-token" content="`+tokenPlaceholder+`">`) {
+		t.Fatal("install HTML missing srv-token meta placeholder")
+	}
+	if !strings.Contains(html, "'X-Srv-Token': SRV_TOKEN") {
+		t.Fatal("install HTML api() helper must send X-Srv-Token")
+	}
+	if strings.Contains(html, "fetch('/api/") {
+		t.Fatal("install HTML has a bare fetch('/api/...') that bypasses the token helper")
+	}
+	tok, err := newToken()
+	if err != nil || len(tok) != 64 {
+		t.Fatalf("newToken: %q %v", tok, err)
 	}
 }

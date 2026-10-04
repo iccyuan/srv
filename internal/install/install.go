@@ -1,7 +1,11 @@
 package install
 
 import (
+	"bytes"
+	"crypto/rand"
+	"crypto/subtle"
 	_ "embed"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"net"
@@ -63,6 +67,17 @@ func Cmd(args []string, snap Snap) error {
 	}
 	bin, _ = filepath.Abs(bin)
 
+	// Per-run secret. The page we serve embeds it and sends it back in
+	// X-Srv-Token on every /api/* call. A page from any other origin
+	// can neither read our HTML (no CORS) nor send a custom header
+	// without a preflight we never answer, so it cannot drive
+	// /api/apply even though the port is guessable.
+	token, err := newToken()
+	if err != nil {
+		return fmt.Errorf("token: %v", err)
+	}
+	page := bytes.ReplaceAll(installHTML, []byte(tokenPlaceholder), []byte(token))
+
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		return fmt.Errorf("listen: %v", err)
@@ -87,15 +102,25 @@ func Cmd(args []string, snap Snap) error {
 		bumpIdle()
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
 		w.Header().Set("Cache-Control", "no-store")
-		w.Write(installHTML)
+		_, _ = w.Write(page)
 	})
-	mux.HandleFunc("/api/status", func(w http.ResponseWriter, r *http.Request) {
+	// api wraps every /api/* handler with the token + origin check.
+	api := func(method string, fn http.HandlerFunc) http.HandlerFunc {
+		return func(w http.ResponseWriter, r *http.Request) {
+			if !authorizeAPI(r, method, token, addr.String()) {
+				http.Error(w, "forbidden", http.StatusForbidden)
+				return
+			}
+			fn(w, r)
+		}
+	}
+	mux.HandleFunc("/api/status", api(http.MethodGet, func(w http.ResponseWriter, r *http.Request) {
 		bumpIdle()
 		s := buildInstallStatus(bin, snap)
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(s)
-	})
-	mux.HandleFunc("/api/apply", func(w http.ResponseWriter, r *http.Request) {
+	}))
+	mux.HandleFunc("/api/apply", api(http.MethodPost, func(w http.ResponseWriter, r *http.Request) {
 		bumpIdle()
 		var req struct {
 			Actions []string `json:"actions"`
@@ -104,8 +129,8 @@ func Cmd(args []string, snap Snap) error {
 		log := applyInstallActions(bin, req.Actions)
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(map[string]any{"log": log})
-	})
-	mux.HandleFunc("/api/quit", func(w http.ResponseWriter, r *http.Request) {
+	}))
+	mux.HandleFunc("/api/quit", api(http.MethodPost, func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(204)
 		go func() {
 			time.Sleep(150 * time.Millisecond)
@@ -115,7 +140,7 @@ func Cmd(args []string, snap Snap) error {
 				close(quit)
 			}
 		}()
-	})
+	}))
 
 	server := &http.Server{Handler: mux}
 	go func() { _ = server.Serve(listener) }()
@@ -135,6 +160,53 @@ func Cmd(args []string, snap Snap) error {
 	_ = server.Close()
 	fmt.Fprintln(os.Stderr, "srv installer: done.")
 	return nil
+}
+
+// tokenPlaceholder is substituted in install.html with the per-run token.
+const tokenPlaceholder = "__SRV_TOKEN__"
+
+func newToken() (string, error) {
+	var b [32]byte
+	if _, err := rand.Read(b[:]); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(b[:]), nil
+}
+
+// authorizeAPI is the gate every /api/* request passes through. It
+// requires the expected method, a matching X-Srv-Token, and -- when the
+// browser sends them -- a Host/Origin that is our own listener. Compare
+// in constant time; the token is the only thing standing between a
+// hostile tab and "edit PATH / rewrite ~/.codex/config.toml".
+func authorizeAPI(r *http.Request, method, token, listenAddr string) bool {
+	if r.Method != method {
+		return false
+	}
+	got := r.Header.Get("X-Srv-Token")
+	if len(got) != len(token) || subtle.ConstantTimeCompare([]byte(got), []byte(token)) != 1 {
+		return false
+	}
+	if r.Host != "" && !sameListener(r.Host, listenAddr) {
+		return false
+	}
+	if o := r.Header.Get("Origin"); o != "" && !sameListener(strings.TrimPrefix(o, "http://"), listenAddr) {
+		return false
+	}
+	return true
+}
+
+// sameListener reports whether host:port names our listener. The
+// printed URL uses 127.0.0.1, but a user who retypes it as localhost
+// must not be locked out, so both loopback spellings are accepted.
+func sameListener(hostport, listenAddr string) bool {
+	if hostport == listenAddr {
+		return true
+	}
+	_, port, err := net.SplitHostPort(listenAddr)
+	if err != nil {
+		return false
+	}
+	return hostport == "localhost:"+port
 }
 
 // installStatus is what /api/status returns -- the UI renders it directly.

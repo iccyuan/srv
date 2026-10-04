@@ -3,6 +3,7 @@ package syncx
 import (
 	"archive/tar"
 	"compress/gzip"
+	"errors"
 	"fmt"
 	"io"
 	"io/fs"
@@ -642,6 +643,12 @@ func CollectDeletes(o *Options, localRoot string, allExcludes []string) ([]strin
 // gzip writer so the cap reflects on-the-wire bytes, which is what
 // users care about (rsync's --bwlimit semantics, not "uncompressed
 // input rate").
+// errRemoteTarDone is the error TarUploadStream uses to unblock its tar
+// producer once the remote command has exited. A producer failure that
+// wraps this sentinel is a consequence of the remote exit, not a
+// local fault, so it is never surfaced to the caller.
+var errRemoteTarDone = errors.New("remote tar finished")
+
 func TarUploadStream(profile *config.Profile, localRoot string, files []string, remoteRoot string, bwLimitBps int64) (int, error) {
 	c, err := sshx.Dial(profile)
 	if err != nil {
@@ -743,8 +750,18 @@ func TarUploadStream(profile *config.Profile, localRoot string, files []string, 
 	}()
 
 	rc, runErr := c.RunStreamStdin(remoteCmd, pr)
+	// The remote side is finished (exited or the session failed). If
+	// it bailed before draining the stream -- `mkdir -p` failed, disk
+	// full, tar rejected a header -- x/crypto's Session.Wait has
+	// already closed its internal stdin pipe, so nobody reads `pr`
+	// any more and the producer above would block forever inside
+	// pw.Write, which in turn blocks `<-errCh` below. Closing the read
+	// end fails that write so the producer reaches `errCh <- err`. On
+	// a clean run the producer has already closed pw (the remote saw
+	// EOF), so this is a no-op.
+	_ = pr.CloseWithError(errRemoteTarDone)
 	tarErr := <-errCh
-	if tarErr != nil {
+	if tarErr != nil && !errors.Is(tarErr, errRemoteTarDone) {
 		return 1, tarErr
 	}
 	return rc, runErr

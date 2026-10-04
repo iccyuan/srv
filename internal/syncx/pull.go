@@ -276,6 +276,15 @@ func TarDownloadStream(profile *config.Profile, remoteRoot string, files []strin
 		}
 		errCh <- err
 	}()
+	// abort stops extraction early. The producer goroutine above may be
+	// blocked in pw.Write because we stopped reading; closing the read
+	// end fails that write, RunStreamStdout returns, and the `<-errCh`
+	// here is guaranteed to complete instead of hanging the sync.
+	abort := func(code int, err error) (int, error) {
+		_ = pr.CloseWithError(err)
+		<-errCh
+		return code, err
+	}
 
 	var src io.Reader = pr
 	if bwLimitBps > 0 {
@@ -284,8 +293,7 @@ func TarDownloadStream(profile *config.Profile, remoteRoot string, files []strin
 	if profile.GetCompressSync() {
 		gz, gerr := gzip.NewReader(src)
 		if gerr != nil {
-			<-errCh
-			return 1, gerr
+			return abort(1, gerr)
 		}
 		defer gz.Close()
 		src = gz
@@ -297,8 +305,7 @@ func TarDownloadStream(profile *config.Profile, remoteRoot string, files []strin
 			break
 		}
 		if terr != nil {
-			<-errCh
-			return 1, terr
+			return abort(1, terr)
 		}
 		if hdr.Name == "" {
 			continue
@@ -314,23 +321,19 @@ func TarDownloadStream(profile *config.Profile, remoteRoot string, files []strin
 		switch hdr.Typeflag {
 		case tar.TypeDir:
 			if err := os.MkdirAll(dst, 0o755); err != nil {
-				<-errCh
-				return 1, err
+				return abort(1, err)
 			}
 		case tar.TypeReg, tar.TypeRegA: // nolint: staticcheck
 			if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
-				<-errCh
-				return 1, err
+				return abort(1, err)
 			}
 			f, err := os.Create(dst)
 			if err != nil {
-				<-errCh
-				return 1, err
+				return abort(1, err)
 			}
 			if _, err := io.Copy(f, tr); err != nil {
 				f.Close()
-				<-errCh
-				return 1, err
+				return abort(1, err)
 			}
 			f.Close()
 			_ = os.Chmod(dst, os.FileMode(hdr.Mode&0o777))

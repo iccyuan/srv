@@ -811,6 +811,10 @@ const (
 // The trailing newline is preserved on each chunk so callers can
 // emit them verbatim.
 //
+// onChunk is never invoked concurrently: stdout and stderr are drained
+// by separate goroutines, but calls are serialized here so callers can
+// keep plain counters and buffers in their closure.
+//
 // Used by the MCP `run` tool (streaming mode, activated when the
 // client passes _meta.progressToken on tools/call) to push progress
 // notifications while the command is still executing, sidestepping
@@ -836,6 +840,7 @@ func (c *Client) RunStream(command string, cwd string, onChunk func(kind StreamC
 		return -1, "", "", err
 	}
 
+	onChunk = serializeChunks(onChunk)
 	var stdoutBuf, stderrBuf bytes.Buffer
 	var wg sync.WaitGroup
 	wg.Add(2)
@@ -855,6 +860,21 @@ func (c *Client) RunStream(command string, cwd string, onChunk func(kind StreamC
 		}
 	}
 	return exit, stdoutBuf.String(), stderrBuf.String(), nil
+}
+
+// serializeChunks wraps a RunStream callback in a mutex so the stdout
+// and stderr forwarder goroutines never run it concurrently. nil stays
+// nil so forwardStreamReader's nil check keeps working.
+func serializeChunks(onChunk func(StreamChunkKind, string)) func(StreamChunkKind, string) {
+	if onChunk == nil {
+		return nil
+	}
+	var mu sync.Mutex
+	return func(kind StreamChunkKind, line string) {
+		mu.Lock()
+		defer mu.Unlock()
+		onChunk(kind, line)
+	}
 }
 
 // forwardStreamReader reads from `src` line-by-line, mirrors each line
