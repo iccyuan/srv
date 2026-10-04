@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"sync/atomic"
 	"testing"
+	"time"
 )
 
 func TestLocalHashFirstN(t *testing.T) {
@@ -198,5 +199,44 @@ func TestRunChunkWorkersFirstErrorWins(t *testing.T) {
 	})
 	if err != myErr {
 		t.Errorf("got %v, want first error %v", err, myErr)
+	}
+}
+
+func TestMtimeClose(t *testing.T) {
+	base := time.Date(2026, 10, 4, 12, 0, 0, 0, time.UTC)
+	cases := []struct {
+		name string
+		d    time.Duration
+		want bool
+	}{
+		{"equal", 0, true},
+		{"sub-second", 900 * time.Millisecond, true},
+		{"one second (SFTP granularity)", time.Second, true},
+		{"two seconds (FAT granularity)", 2 * time.Second, true},
+		{"just over tolerance", 2*time.Second + time.Millisecond, false},
+		{"minutes apart", 3 * time.Minute, false},
+	}
+	for _, tc := range cases {
+		if got := mtimeClose(base, base.Add(tc.d)); got != tc.want {
+			t.Errorf("%s: mtimeClose(+%v)=%v want %v", tc.name, tc.d, got, tc.want)
+		}
+		if got := mtimeClose(base.Add(tc.d), base); got != tc.want {
+			t.Errorf("%s: mtimeClose(-%v)=%v want %v (must be symmetric)", tc.name, tc.d, got, tc.want)
+		}
+	}
+}
+
+func TestAlwaysHashKnob(t *testing.T) {
+	t.Setenv("SRV_TRANSFER_ALWAYS_HASH", "")
+	if alwaysHash() {
+		t.Fatal("unset knob must not force hashing")
+	}
+	t.Setenv("SRV_TRANSFER_ALWAYS_HASH", "1")
+	if !alwaysHash() {
+		t.Fatal("SRV_TRANSFER_ALWAYS_HASH=1 must force hashing")
+	}
+	t.Setenv("SRV_TRANSFER_ALWAYS_HASH", "yes")
+	if alwaysHash() {
+		t.Fatal("only the literal 1 enables the knob")
 	}
 }

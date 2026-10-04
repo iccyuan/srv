@@ -243,6 +243,22 @@ daemon startup (first call goes from a ~200-800ms handshake to 0-RTT).
 - **Resume with hash prefix check.** A partial is verified as a true
   prefix via a remote `sha256(head -c N)` (~80-byte reply) instead of
   re-downloading it to compare.
+- **Size + mtime skip.** When push/pull finds a same-size file it first
+  compares mtimes on both sides (±2s, absorbing SFTP / FAT second
+  granularity) and skips on a match with zero extra round-trips; the
+  hash prefix check only runs when mtimes disagree. Every completed
+  transfer stamps the local mtime onto the remote (`Chtimes`), so the
+  first re-push after upgrading still hashes and everything after that
+  takes the fast path. `SRV_TRANSFER_ALWAYS_HASH=1` restores per-file
+  hashing.
+- **Sync reuses the process-shared connection.** Each remote step of a
+  sync (remote stat, tar upload, delete, pull-side git/glob listing)
+  used to `sshx.Dial` on its own, so `sync --delete --diff` paid three
+  or four handshakes and `--watch` re-dialled on every save. They now
+  borrow transfer's per-profile shared client
+  (`transfer.AcquireSharedClient`) and retry once on a connection-level
+  error after evicting the cache; every operation is idempotent, so the
+  blind retry is safe.
 - **Compression.** `compress_sync` (default on) gzips the sync tar
   stream. `compress_streams` (default off) gzips captured stdout on
   the wire — only pays off on slow/cross-region links, decode failure

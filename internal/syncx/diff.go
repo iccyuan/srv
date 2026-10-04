@@ -52,11 +52,17 @@ func FetchRemoteStats(profile *config.Profile, remoteRoot string, files []string
 	if len(files) == 0 {
 		return map[string]RemoteStat{}, nil
 	}
-	c, err := sshx.Dial(profile)
-	if err != nil {
-		return nil, err
-	}
-	defer c.Close()
+	var out map[string]RemoteStat
+	err := withConn(profile, func(c *sshx.Client) error {
+		var err error
+		out, err = fetchRemoteStats(c, profile, remoteRoot, files)
+		return err
+	})
+	return out, err
+}
+
+// fetchRemoteStats is FetchRemoteStats with the connection already in hand; see withConn.
+func fetchRemoteStats(c *sshx.Client, profile *config.Profile, remoteRoot string, files []string) (map[string]RemoteStat, error) {
 	expanded, err := c.ExpandRemoteHome(remoteRoot)
 	if err != nil {
 		return nil, err

@@ -19,11 +19,17 @@ import (
 // GitChangedFiles semantics: all | modified | staged | untracked).
 // Returns relative paths inside the repo, sorted.
 func RemoteGitChangedFiles(profile *config.Profile, remoteRoot, scope string) ([]string, error) {
-	c, err := sshx.Dial(profile)
-	if err != nil {
-		return nil, err
-	}
-	defer c.Close()
+	var out []string
+	err := withConn(profile, func(c *sshx.Client) error {
+		var err error
+		out, err = remoteGitChangedFiles(c, profile, remoteRoot, scope)
+		return err
+	})
+	return out, err
+}
+
+// remoteGitChangedFiles is RemoteGitChangedFiles with the connection already in hand; see withConn.
+func remoteGitChangedFiles(c *sshx.Client, profile *config.Profile, remoteRoot, scope string) ([]string, error) {
 	expanded, err := c.ExpandRemoteHome(remoteRoot)
 	if err != nil {
 		return nil, err
@@ -102,11 +108,17 @@ func RemoteGlobFiles(profile *config.Profile, remoteRoot string, patterns []stri
 	if len(patterns) == 0 {
 		return nil, nil
 	}
-	c, err := sshx.Dial(profile)
-	if err != nil {
-		return nil, err
-	}
-	defer c.Close()
+	var out []string
+	err := withConn(profile, func(c *sshx.Client) error {
+		var err error
+		out, err = remoteGlobFiles(c, profile, remoteRoot, patterns)
+		return err
+	})
+	return out, err
+}
+
+// remoteGlobFiles is RemoteGlobFiles with the connection already in hand; see withConn.
+func remoteGlobFiles(c *sshx.Client, profile *config.Profile, remoteRoot string, patterns []string) ([]string, error) {
 	expanded, err := c.ExpandRemoteHome(remoteRoot)
 	if err != nil {
 		return nil, err
@@ -231,11 +243,17 @@ func TarDownloadStream(profile *config.Profile, remoteRoot string, files []strin
 	if len(files) == 0 {
 		return 0, nil
 	}
-	c, err := sshx.Dial(profile)
-	if err != nil {
-		return 255, err
-	}
-	defer c.Close()
+	out := 255
+	err := withConn(profile, func(c *sshx.Client) error {
+		var err error
+		out, err = tarDownloadStream(c, profile, remoteRoot, files, localRoot, bwLimitBps)
+		return err
+	})
+	return out, err
+}
+
+// tarDownloadStream is TarDownloadStream with the connection already in hand; see withConn.
+func tarDownloadStream(c *sshx.Client, profile *config.Profile, remoteRoot string, files []string, localRoot string, bwLimitBps int64) (int, error) {
 	expanded, err := c.ExpandRemoteHome(remoteRoot)
 	if err != nil {
 		return 1, err

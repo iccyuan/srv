@@ -67,7 +67,7 @@ func TestIsConnLevelError(t *testing.T) {
 // regression that retries on every call.
 func TestWithRetryOnConnDeath_NoErrorRunsOnce(t *testing.T) {
 	calls := 0
-	err := withRetryOnConnDeath("p", func() error {
+	err := RetryOnConnDeath("p", func() error {
 		calls++
 		return nil
 	})
@@ -85,7 +85,7 @@ func TestWithRetryOnConnDeath_NoErrorRunsOnce(t *testing.T) {
 func TestWithRetryOnConnDeath_BusinessErrorNoRetry(t *testing.T) {
 	calls := 0
 	want := errors.New("sftp: \"no such file\"")
-	got := withRetryOnConnDeath("p", func() error {
+	got := RetryOnConnDeath("p", func() error {
 		calls++
 		return want
 	})
@@ -104,7 +104,7 @@ func TestWithRetryOnConnDeath_BusinessErrorNoRetry(t *testing.T) {
 func TestWithRetryOnConnDeath_ConnErrorRetriesOnceThenSucceeds(t *testing.T) {
 	resetClientCache(t)
 	calls := 0
-	err := withRetryOnConnDeath("p", func() error {
+	err := RetryOnConnDeath("p", func() error {
 		calls++
 		if calls == 1 {
 			return io.EOF // classic dead-conn signature
@@ -127,7 +127,7 @@ func TestWithRetryOnConnDeath_ConnErrorRetriesOnceThenPersists(t *testing.T) {
 	resetClientCache(t)
 	calls := 0
 	persistent := errors.New("ssh: connection closed")
-	got := withRetryOnConnDeath("p", func() error {
+	got := RetryOnConnDeath("p", func() error {
 		calls++
 		return persistent
 	})
@@ -155,7 +155,7 @@ func TestWithRetryOnConnDeath_EvictsBetweenAttempts(t *testing.T) {
 
 	calls := 0
 	cacheHadEntryOnSecondTry := true
-	_ = withRetryOnConnDeath("p", func() error {
+	_ = RetryOnConnDeath("p", func() error {
 		calls++
 		if calls == 1 {
 			return io.EOF

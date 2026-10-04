@@ -98,7 +98,7 @@ func PushPath(profile *config.Profile, local, remote string, recursive bool) (in
 	// SSH client turned out to be dead inside the 30s skip-probe
 	// window (network blip / jump host restart / NAT forgetting
 	// us), the first attempt's SFTP op surfaces a conn-level error;
-	// withRetryOnConnDeath evicts the dead cache entry and runs the
+	// RetryOnConnDeath evicts the dead cache entry and runs the
 	// body once more on a fresh dial. Business errors (no such
 	// file, perm denied) are NOT retried -- only the connection-
 	// level signature triggers the second attempt.
@@ -110,7 +110,7 @@ func PushPath(profile *config.Profile, local, remote string, recursive bool) (in
 	if profile != nil {
 		profName = profile.Name
 	}
-	err := withRetryOnConnDeath(profName, func() error {
+	err := RetryOnConnDeath(profName, func() error {
 		ec, fr, e := pushPathOnce(profile, local, remote, recursive)
 		exitCode = ec
 		finalRemote = fr
@@ -200,7 +200,7 @@ func PullPath(profile *config.Profile, remote, local string, recursive bool) (in
 	if profile != nil {
 		profName = profile.Name
 	}
-	err := withRetryOnConnDeath(profName, func() error {
+	err := RetryOnConnDeath(profName, func() error {
 		ec, fl, e := pullPathOnce(profile, remote, local, recursive)
 		exitCode = ec
 		finalLocal = fl
@@ -317,9 +317,7 @@ func Upload(c *sshx.Client, local, remote string) error {
 			if err := chunkedUpload(c, src, localSize, remote); err != nil {
 				return err
 			}
-			if st, err := os.Stat(local); err == nil {
-				_ = s.Chmod(remote, st.Mode().Perm())
-			}
+			finalizeRemote(s, remote, localStat)
 			return nil
 		}
 	}
@@ -328,12 +326,23 @@ func Upload(c *sshx.Client, local, remote string) error {
 	var startOffset int64
 	if rstat, statErr := s.Stat(remote); statErr == nil && rstat.Size() > 0 {
 		if rstat.Size() == localSize {
-			if same, cmpErr := samePrefix(c, remote, local, localSize); cmpErr == nil && same {
-				// Idempotent skip -- but still mirror local mode in case
-				// the user changed permissions without touching content.
-				if st, err := os.Stat(local); err == nil {
-					_ = s.Chmod(remote, st.Mode().Perm())
-				}
+			// Cheap check first: same size AND same mtime (within the
+			// filesystem-granularity tolerance) is the rsync-style
+			// "unchanged" verdict and costs zero extra round-trips. The
+			// hash fallback below only runs when mtimes disagree --
+			// typically the first push after upgrading, before
+			// finalizeRemote has aligned the remote timestamps.
+			same, cmpErr := false, error(nil)
+			if !alwaysHash() && mtimeClose(rstat.ModTime(), localStat.ModTime()) {
+				same = true
+			} else {
+				same, cmpErr = samePrefix(c, remote, local, localSize)
+			}
+			if cmpErr == nil && same {
+				// Idempotent skip -- but still mirror local mode and
+				// mtime so a permission-only change lands and the next
+				// run takes the mtime fast path.
+				finalizeRemote(s, remote, localStat)
 				return nil
 			} else if cmpErr != nil {
 				warnNotMCP("srv push: existing-file check failed for %s: %v; restarting\n", remote, cmpErr)
@@ -383,10 +392,41 @@ func Upload(c *sshx.Client, local, remote string) error {
 		return err
 	}
 	meter.Done()
-	if st, err := os.Stat(local); err == nil {
-		_ = s.Chmod(remote, st.Mode().Perm())
-	}
+	finalizeRemote(s, remote, localStat)
 	return nil
+}
+
+// finalizeRemote mirrors the local file's mode and mtime onto the
+// freshly written (or verified-identical) remote file. The mtime half
+// is what makes the next push's size+mtime skip hit without a hash;
+// without it every re-push of an unchanged tree would pay one SSH exec
+// plus a full read on both sides per file. Both calls are best-effort:
+// an SFTP server that refuses setstat just leaves us on the hash path.
+func finalizeRemote(s *sftp.Client, remote string, localStat os.FileInfo) {
+	_ = s.Chmod(remote, localStat.Mode().Perm())
+	mt := localStat.ModTime()
+	_ = s.Chtimes(remote, mt, mt)
+}
+
+// mtimeTolerance absorbs the second-granularity most SFTP servers and
+// FAT/exFAT volumes keep for timestamps (rsync's --modify-window=1
+// serves the same purpose; syncx's diff view uses the same 2s).
+const mtimeTolerance = 2 * time.Second
+
+func mtimeClose(a, b time.Time) bool {
+	d := a.Sub(b)
+	if d < 0 {
+		d = -d
+	}
+	return d <= mtimeTolerance
+}
+
+// alwaysHash restores the pre-2.7.2 behaviour of hashing every
+// same-size file instead of trusting size+mtime. Escape hatch for
+// trees where tooling rewrites content while deliberately preserving
+// mtime (rare; some reproducible-build pipelines do this).
+func alwaysHash() bool {
+	return os.Getenv("SRV_TRANSFER_ALWAYS_HASH") == "1"
 }
 
 // fileJob is one src->dst pair queued for parallel transfer.
@@ -668,7 +708,11 @@ func Download(c *sshx.Client, remote, local string) error {
 			// goroutines; close the existing one so chunkedDownload's
 			// workers can each open their own.
 			_ = src.Close()
-			return chunkedDownload(c, remote, remoteSize, local)
+			if err := chunkedDownload(c, remote, remoteSize, local); err != nil {
+				return err
+			}
+			finalizeLocal(local, rstat)
+			return nil
 		}
 	}
 
@@ -676,7 +720,15 @@ func Download(c *sshx.Client, remote, local string) error {
 	var startOffset int64
 	if lstat, statErr := os.Stat(local); statErr == nil && lstat.Size() > 0 {
 		if lstat.Size() == remoteSize {
-			if same, cmpErr := samePrefix(c, remote, local, remoteSize); cmpErr == nil && same {
+			// Same size+mtime short-circuit; see Upload for the rationale.
+			same, cmpErr := false, error(nil)
+			if !alwaysHash() && mtimeClose(rstat.ModTime(), lstat.ModTime()) {
+				same = true
+			} else {
+				same, cmpErr = samePrefix(c, remote, local, remoteSize)
+			}
+			if cmpErr == nil && same {
+				finalizeLocal(local, rstat)
 				return nil
 			} else if cmpErr != nil {
 				warnNotMCP("srv pull: existing-file check failed for %s: %v; restarting\n", local, cmpErr)
@@ -723,7 +775,19 @@ func Download(c *sshx.Client, remote, local string) error {
 		return err
 	}
 	meter.Done()
+	// Close before touching mtime: Windows refuses Chtimes on a file
+	// with an open write handle. The deferred Close then no-ops.
+	_ = dst.Close()
+	finalizeLocal(local, rstat)
 	return nil
+}
+
+// finalizeLocal is Download's counterpart to finalizeRemote: stamp the
+// remote mtime onto the local copy so the next pull of an unchanged
+// file skips on size+mtime without hashing.
+func finalizeLocal(local string, rstat os.FileInfo) {
+	mt := rstat.ModTime()
+	_ = os.Chtimes(local, mt, mt)
 }
 
 // samePrefix asks the remote to sha256 the first n bytes of `remote`,

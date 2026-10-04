@@ -650,11 +650,17 @@ func CollectDeletes(o *Options, localRoot string, allExcludes []string) ([]strin
 var errRemoteTarDone = errors.New("remote tar finished")
 
 func TarUploadStream(profile *config.Profile, localRoot string, files []string, remoteRoot string, bwLimitBps int64) (int, error) {
-	c, err := sshx.Dial(profile)
-	if err != nil {
-		return 255, err
-	}
-	defer c.Close()
+	out := 255
+	err := withConn(profile, func(c *sshx.Client) error {
+		var err error
+		out, err = tarUploadStream(c, profile, localRoot, files, remoteRoot, bwLimitBps)
+		return err
+	})
+	return out, err
+}
+
+// tarUploadStream is TarUploadStream with the connection already in hand; see withConn.
+func tarUploadStream(c *sshx.Client, profile *config.Profile, localRoot string, files []string, remoteRoot string, bwLimitBps int64) (int, error) {
 
 	expanded, err := c.ExpandRemoteHome(remoteRoot)
 	if err != nil {
@@ -768,11 +774,17 @@ func TarUploadStream(profile *config.Profile, localRoot string, files []string, 
 }
 
 func DeleteRemoteFiles(profile *config.Profile, remoteRoot string, files []string) (int, error) {
-	c, err := sshx.Dial(profile)
-	if err != nil {
-		return 255, err
-	}
-	defer c.Close()
+	out := 255
+	err := withConn(profile, func(c *sshx.Client) error {
+		var err error
+		out, err = deleteRemoteFiles(c, profile, remoteRoot, files)
+		return err
+	})
+	return out, err
+}
+
+// deleteRemoteFiles is DeleteRemoteFiles with the connection already in hand; see withConn.
+func deleteRemoteFiles(c *sshx.Client, profile *config.Profile, remoteRoot string, files []string) (int, error) {
 	expanded, err := c.ExpandRemoteHome(remoteRoot)
 	if err != nil {
 		return 1, err

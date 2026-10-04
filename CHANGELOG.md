@@ -2,6 +2,15 @@
 
 ## [Unreleased]
 
+### Fixed
+- **sync 在远端 tar 提前退出时永久挂起**(`internal/syncx/sync.go`、`pull.go`):远端 `mkdir -p` 失败 / 磁盘满 / tar 拒绝流时,x/crypto 的 `Session.Wait` 已关掉内部 stdin 管道,本地 tar 生产者卡在 `pw.Write`,`<-errCh` 永不返回。push 侧现在在远端结束后先 `pr.CloseWithError` 再等生产者;pull 侧所有提前返回都先关读端(`abort`)。
+- **MCP 流式回调数据竞争**(`internal/sshx/client.go`):`RunStream` 从 stdout / stderr 两个 goroutine 并发调 `onChunk`,MCP `run`/`tail` 的字节计数、oversize 关闭、断线续传偏移都在无锁改状态。回调现在在 `RunStream` 内部串行化,调用方无需自己加锁。
+- **浏览器安装器 `/api/apply` 无来源校验**(`internal/install`):任意网页用 text/plain POST 扫 localhost 端口即可触发改 PATH / 改 `~/.codex/config.toml` / 拉终端。每次运行生成随机 token 嵌入页面,所有 `/api/*` 要求 `X-Srv-Token` 头、方法匹配、Host/Origin 为自身监听地址。
+
+### Performance
+- **push/pull 同尺寸文件先比 mtime 再决定是否哈希**(`internal/transfer/transfer.go`):此前同尺寸文件每个都跑一次远端 `head -c N | sha256sum` 加本地全量 sha256 —— 重推 1000 个未改文件等于 1000 次 SSH exec 和两端各 1000 次全量读。现在 size + mtime(±2s)一致直接跳过;传完用 `Chtimes` 把本地 mtime 盖到远端(pull 反向),下次就命中快路径。`SRV_TRANSFER_ALWAYS_HASH=1` 退回旧行为。
+- **sync 复用进程内共享 SSH 连接**(`internal/syncx/conn.go`):远端 stat、tar 上传、删除、pull 侧 git/glob 列举六处各自 `sshx.Dial` 改为借用 transfer 的 per-profile 缓存客户端,`sync --delete --diff` 从三四次握手降到一次,`--watch` 不再每次保存都重拨。连接层错误驱逐缓存重试一次(`transfer.RetryOnConnDeath` 导出)。
+
 ## [Go 2.7.1] - 2026-09-27
 
 ### Fixed

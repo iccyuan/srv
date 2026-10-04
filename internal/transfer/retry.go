@@ -66,7 +66,7 @@ func isConnLevelError(err error) bool {
 	return false
 }
 
-// withRetryOnConnDeath runs `op` once. If it returns a conn-level
+// RetryOnConnDeath runs `op` once. If it returns a conn-level
 // error, evicts the cached client for `profileName` (so the next
 // AcquireSharedClient dials fresh) and runs `op` exactly once more.
 // On any non-conn error or success, returns that result verbatim.
@@ -76,7 +76,7 @@ func isConnLevelError(err error) bool {
 // silently died within the skip-probe window); a second one would
 // just spin against a genuinely-down remote and burn time the user
 // is already waiting on.
-func withRetryOnConnDeath(profileName string, op func() error) error {
+func RetryOnConnDeath(profileName string, op func() error) error {
 	err := op()
 	if err == nil || !isConnLevelError(err) {
 		return err

@@ -168,6 +168,8 @@ profile 解析优先级:
 - **并行分块传输**:≥32 MiB 且无可续传 partial 的文件拆成 8 MiB 块,在一条 SSH 连接上走 N 路并行 `WriteAt`/`ReadAt`,让窗口刷新往返互相重叠。高 RTT 链路约 3-5×,LAN 上无副作用。`SRV_TRANSFER_CHUNK_{THRESHOLD,BYTES,PARALLEL}` 可调。
 - **目录并行**:递归 push/pull/sync 把文件扇到 `SRV_TRANSFER_WORKERS` 个 goroutine(默认 4,范围 1-32),共用同一条连接。
 - **断点续传 + 哈希前缀校验**:用远端 `sha256(head -c N)`(~80 字节回包)确认 partial 是真前缀,而不是把它重新下载来比对。
+- **size + mtime 跳过**:push/pull 遇到同尺寸文件先比两端 mtime(±2s,吸收 SFTP / FAT 的秒级粒度),一致即跳过,零额外往返;只有 mtime 不一致才回落到哈希前缀校验。每次传完都把本地 mtime 盖到远端(`Chtimes`),所以升级后第一次重推仍走哈希,之后就全是快路径。`SRV_TRANSFER_ALWAYS_HASH=1` 退回逐文件哈希。
+- **sync 复用进程内共享连接**:syncx 的每一步远端操作(远端 stat、tar 上传、删除、pull 侧 git/glob 列举)曾各自 `sshx.Dial`,一次 `sync --delete --diff` 要握手三四次,`--watch` 每次保存都重拨。现在全部借用 transfer 的 per-profile 共享客户端(`transfer.AcquireSharedClient`),连接层错误时驱逐缓存重试一次;所有操作都是幂等的,盲重试安全。
 - **压缩**:`compress_sync`(默认开)对 sync tar 流 gzip;`compress_streams`(默认关)在网络上 gzip 抓取的 stdout —— 只在慢/跨区域链路划算,解码失败回落明文。
 - **拨号重试**:`dial_attempts` / `dial_backoff`(指数退避,封顶 30s);认证和 host-key 错误绝不重试 —— 再来一次答案不变。
 - **Keepalive**:TCP SO_KEEPALIVE(内核快速发现死对端)+ SSH 层 keepalive(`keepalive_interval`/`keepalive_count`)。
